@@ -113,6 +113,15 @@ backup_settings() {
   [ "$BAK_FAILED" -eq 0 ]
 }
 
+# --- 0. platform — on Windows every hook and the status line run through Git Bash
+if is_windows; then
+  if [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
+    say FAIL "CLAUDE_CODE_GIT_BASH_PATH points at a missing file ($CLAUDE_CODE_GIT_BASH_PATH) — Git for Windows is required: hooks and the status line run through Git Bash"
+  else
+    say ok "Windows (Git Bash) — hooks and the status line run through it"
+  fi
+fi
+
 # --- 1. jq — everything else that reads JSON leans on it
 HAVE_JQ=0
 if command -v jq >/dev/null 2>&1; then
@@ -197,6 +206,16 @@ shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the
     cp "$1" "$SHIM_DIR/headroom.exe" 2>/dev/null && printf '%s' "$SHIM_DIR/headroom.exe"
   else
     ln -sfn "$1" "$SHIM_DIR/headroom" 2>/dev/null && printf '%s' "$SHIM_DIR/headroom"
+  fi
+}
+sl_hr_cmd() {  # sl_hr_cmd <script> — the statusLine.command to write for this platform
+  local b
+  if is_windows; then
+    b=${CLAUDE_CODE_GIT_BASH_PATH:-}
+    [ -n "$b" ] || b=$(win_path "$(command -v bash)")
+    printf '"%s" "%s"' "$b" "$(win_path "$1")"
+  else
+    printf 'bash "%s"' "$1"
   fi
 }
 path_hint() {  # the one line the user must run/do to put SHIM_DIR on PATH
@@ -452,6 +471,11 @@ else
       # shellcheck disable=SC2088 # matching a LITERAL ~ the shell never expanded — this just structurally validates the token shape
       case $sl_tok in
         "~/"*headroom-statusline.sh | /*headroom-statusline.sh) ;;
+        [A-Za-z]:[\\/]*headroom-statusline.sh)
+          # cygpath -u expects (and correctly splits) forward slashes; a
+          # backslash-separated Windows path has no "/" for it to anchor on,
+          # so normalize separators before the conversion.
+          sl_tok=$(unix_path "$(printf '%s' "$sl_tok" | tr '\\' '/')") ;;
         *) continue ;;
       esac
       sl_cand=$sl_tok
@@ -480,7 +504,7 @@ else
       elif [ "$sl_cand" = "$CLAUDE_DIR/headroom-statusline.sh" ]; then sl_canonical_missing=1
       else sl_custom_missing=$sl_cand
       fi
-    done < <(printf '%s\n' "$sl" | grep -oE "[^\"' ]+")
+    done < <(printf '%s\n' "$sl" | grep -oE "\"[^\"]*\"|'[^']*'|[^\"' ]+" | sed -e "s/^[\"']//" -e "s/[\"']\$//")
     # A present token from one candidate must not mask a co-occurring missing
     # signal from a DIFFERENT candidate token in the same command -- require
     # no missing signal was raised by ANY token, not just that ONE resolved.
@@ -595,7 +619,7 @@ JQEOF
       if cp "$PLUGIN_ROOT/scripts/lib/attribution.jq"    "$CLAUDE_DIR/lib/" \
          && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/" \
          && cp "$PLUGIN_ROOT/scripts/statusline.sh" "$sl_path" && chmod +x "$sl_path" \
-         && jq --arg hr "bash \"$sl_path\"" "$sl_merge_jq" \
+         && jq --arg hr "$(sl_hr_cmd "$sl_path")" "$sl_merge_jq" \
             "$SETTINGS" > "$TMPD/settings.sl" && cat "$TMPD/settings.sl" > "$SETTINGS"; then
         if [ -n "$sl" ] && ! printf '%s' "$sl" | grep -q "mcp__headroom__headroom_compress"; then
           say fixed "statusLine merged — your command kept and backed up under _headroomStatusLineBackup, badge appended ($sl_disp)"

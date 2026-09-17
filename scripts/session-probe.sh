@@ -29,6 +29,7 @@ type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # parti
   done
   return 1
 }
+type is_windows >/dev/null 2>&1 || is_windows() { return 1; }
 type note_error >/dev/null 2>&1 || note_error() { :; }
 [ -n "${STATE_DIR:-}" ] || STATE_DIR="${HEADROOM_STATE_DIR:-${HOME:-${TMPDIR:-/tmp}}/.claude/headroom-indicator}"
 
@@ -42,6 +43,12 @@ if ! command -v jq >/dev/null 2>&1; then
   # record it so the badge shows broken, not just idle.
   note_error jq "jq not found — hooks and badge are disabled"
   add_problem "jq not found (brew install jq / apt install jq)"
+fi
+
+# --- 1b. Windows: hooks and the badge run through Git Bash; a stale override is an outage
+if is_windows && [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
+  note_error install "CLAUDE_CODE_GIT_BASH_PATH points at a missing file"
+  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a missing Git Bash ($CLAUDE_CODE_GIT_BASH_PATH) — fix it in settings.json env"
 fi
 
 # --- 2. hcat present + executable (plugin layout, legacy sibling fallback)

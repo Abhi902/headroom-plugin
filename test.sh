@@ -2847,6 +2847,45 @@ out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6N" DOCTO
       DOCTOR_VENV_DIR="$W/none" DOCTOR_SHIM_DIR="$W6N/shim2" bash "$DOCTOR" 2>&1)
 check "w6: no engine → CLI check skips" "headroom CLI on PATH (no engine yet" "$out"
 
+# w7. Windows status-line wiring + Git Bash prerequisite
+W7="$W/w7"; mkdir -p "$W7/cd" "$W7/bashdir"
+printf '#!/bin/sh\nexit 0\n' > "$W7/bashdir/bash.exe"; chmod +x "$W7/bashdir/bash.exe"
+S7="$W7/s.json"; printf '{}\n' > "$S7"
+# NOTE: CLAUDE_CODE_GIT_BASH_PATH is the REAL bash.exe fixture created above
+# ($W7/bashdir/bash.exe), not a fabricated 'C:\...' literal: check 0 does a
+# direct `-f` test with no cygpath translation (real Git Bash's MSYS runtime
+# already translates a native Windows path for free, so doctor.sh never needs
+# to convert it itself) -- a literal backslash string can never resolve to a
+# real file outside real Git Bash, so a hermetic non-Windows test host needs
+# an existing path here to exercise the "present" branch at all. See
+# task-7-report.md for why this departs from the brief's literal fixture.
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" CYGPATH_UNIX_DIR="$W7/cd" CLAUDE_CODE_GIT_BASH_PATH="$W7/bashdir/bash.exe" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S7" DOCTOR_CLAUDE_DIR="$W7/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W7/shim" bash "$DOCTOR" --fix 2>&1)
+check "w7: windows wire reports fixed" "statusLine wired to" "$out"
+check_eq "w7: windows statusLine command shape" "\"$W7/bashdir/bash.exe\" \"C:\\fake\\headroom-statusline.sh\"" \
+  "$(jq -r '.statusLine.command' "$S7")"
+check "w7: doctor names Git Bash on Windows" "Windows (Git Bash)" "$out"
+# re-run: check 7 must recognise the backslash token as the canonical copy (no re-wire, no FAIL)
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" CYGPATH_UNIX_DIR="$W7/cd" CLAUDE_CODE_GIT_BASH_PATH="$W7/bashdir/bash.exe" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S7" DOCTOR_CLAUDE_DIR="$W7/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W7/shim" bash "$DOCTOR" 2>&1)
+check "w7: re-run sees the wiring as healthy" "statusLine wired (" "$out"
+check_absent "w7: re-run does not FAIL the windows path" "no such file exists" "$out"
+# CLAUDE_CODE_GIT_BASH_PATH pointing nowhere → FAIL
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows CLAUDE_CODE_GIT_BASH_PATH="$W7/missing/bash.exe" PATH="$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S7" DOCTOR_CLAUDE_DIR="$W7/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" 2>&1)
+check "w7: broken CLAUDE_CODE_GIT_BASH_PATH is FAIL" "Git for Windows is required" "$out"
+# probe: same prerequisite, one problem line
+out=$(printf '{"session_id":"w7"}' | env -u HCAT_PYTHON DOCTOR_OS=windows CLAUDE_CODE_GIT_BASH_PATH="$W7/missing/bash.exe" \
+      HOME="$W7" HEADROOM_STATE_DIR="$W7/state" bash "$PROBE")
+check "w7: probe flags a broken Git Bash path" "Git Bash" "$out"
+# POSIX wiring unchanged
+S7U="$W7/su.json"; printf '{}\n' > "$S7U"
+env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S7U" DOCTOR_CLAUDE_DIR="$W7/cdu" \
+  DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W7/shim" bash "$DOCTOR" --fix >/dev/null 2>&1
+check_eq "w7: posix statusLine command unchanged" "bash \"$W7/cdu/headroom-statusline.sh\"" "$(jq -r '.statusLine.command' "$S7U")"
+
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
 if command -v shellcheck >/dev/null 2>&1; then
