@@ -134,7 +134,7 @@ if [ -n "$py" ]; then
   # A half-created venv passes -x yet cannot `import headroom.compress` (hcat
   # exits 4) — verify the import and fail OPEN (allow the Read) on a broken
   # engine. `.compress` also distinguishes the real headroom-ai package from
-  # a name-squatted `headroom` on PyPI (see doctor.sh/bin/hcat/mcp-launcher.sh).
+  # a name-squatted `headroom` on PyPI (see doctor.sh/bin/hcat).
   # Only runs on the rare deny path, so the interpreter spawn is fine.
   if ! "$py" -c 'import headroom.compress' >/dev/null 2>&1; then
     note_error engine "engine import failed ($py) — gate failing open; run /doctor"

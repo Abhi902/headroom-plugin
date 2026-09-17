@@ -639,7 +639,6 @@ DOCTOR="$ROOT/scripts/doctor.sh"
 # hermetic: the doctor scans $PWD/.claude by default (v2.7) — point it at an
 # empty dir so the developer's real project settings never leak into the suite
 export DOCTOR_PROJECT_DIR="$TMP/no-proj"
-LAUNCHER="$ROOT/scripts/mcp-launcher.sh"
 MCP_JSON="$ROOT/.mcp.json"
 DOCD="$TMP/doc"; mkdir -p "$DOCD"
 
@@ -806,37 +805,12 @@ out=$(bash "$DOCTOR" --bogus 2>&1); rc=$?
 check "doctor: unknown flag errors" "unknown" "$out"
 check_eq "doctor: unknown flag exit 2" "2"       "$rc"
 
-# 32h. mcp-launcher.sh — resolves the engine and execs `headroom mcp serve`
-if [ -x "$LAUNCHER" ]; then
-  echo "ok - launcher: executable"; PASS=$((PASS+1))
+# 32h. no launcher any more (v2.8): the MCP is spawned by name, so there must be
+# nothing left that a shell-less Windows spawn would choke on
+if [ ! -e "$ROOT/scripts/mcp-launcher.sh" ]; then
+  echo "ok - launcher: removed (bare command since v2.8)"; PASS=$((PASS+1))
 else
-  echo "FAIL - launcher: executable"; FAIL=$((FAIL+1))
-fi
-out=$(HCAT_PYTHON="$FENG/python" bash "$LAUNCHER" 2>&1); rc=$?
-check "launcher: execs headroom mcp serve" "launched: mcp serve" "$out"
-check "launcher: update check off"         "update=off"          "$out"
-check "launcher: hf offline"               "offline=1"           "$out"
-check_eq "launcher: exit 0"                   "0"                   "$rc"
-err=$(HCAT_PYTHON=/nonexistent/python bash "$LAUNCHER" 2>&1 >/dev/null); rc=$?
-check "launcher: missing engine names doctor" "doctor" "$err"
-if [ "$rc" -ne 0 ]; then
-  echo "ok - launcher: missing engine exits nonzero"; PASS=$((PASS+1))
-else
-  echo "FAIL - launcher: missing engine exits nonzero (got rc=0)"; FAIL=$((FAIL+1))
-fi
-if [ "$(printf '%s\n' "$err" | wc -l | tr -d ' ')" = "1" ]; then
-  echo "ok - launcher: single stderr line"; PASS=$((PASS+1))
-else
-  echo "FAIL - launcher: single stderr line (got: $err)"; FAIL=$((FAIL+1))
-fi
-NOHR="$DOCD/nohr"; mkdir -p "$NOHR"
-printf '#!/bin/sh\nexit 0\n' > "$NOHR/python"; chmod +x "$NOHR/python"
-err=$(HCAT_PYTHON="$NOHR/python" bash "$LAUNCHER" 2>&1 >/dev/null); rc=$?
-check "launcher: python without headroom binary names doctor" "doctor" "$err"
-if [ "$rc" -ne 0 ]; then
-  echo "ok - launcher: headroom-binary-missing exits nonzero"; PASS=$((PASS+1))
-else
-  echo "FAIL - launcher: headroom-binary-missing exits nonzero"; FAIL=$((FAIL+1))
+  echo "FAIL - launcher: scripts/mcp-launcher.sh still present"; FAIL=$((FAIL+1))
 fi
 
 # 32i. bundled .mcp.json — erases the manual "register headroom MCP" step
@@ -847,15 +821,15 @@ else
 fi
 check "mcp.json: stdio server" "stdio" "$(jq -r '.mcpServers.headroom.type // empty' "$MCP_JSON" 2>/dev/null)"
 mcp_cmd=$(jq -r '.mcpServers.headroom.command // empty' "$MCP_JSON" 2>/dev/null)
-check "mcp.json: command uses CLAUDE_PLUGIN_ROOT" '${CLAUDE_PLUGIN_ROOT}' "$mcp_cmd"
-check "mcp.json: command targets mcp-launcher.sh" "mcp-launcher.sh"       "$mcp_cmd"
+check_eq "mcp.json: command is the bare name (spawned without a shell on every OS)" "headroom" "$mcp_cmd"
+check_eq "mcp.json: args = mcp serve" "mcp serve" "$(jq -r '.mcpServers.headroom.args | join(" ")' "$MCP_JSON" 2>/dev/null)"
 check "mcp.json: env update off" "off" "$(jq -r '.mcpServers.headroom.env.HEADROOM_UPDATE_CHECK // empty' "$MCP_JSON" 2>/dev/null)"
 check_eq "mcp.json: env hf offline" "1"   "$(jq -r '.mcpServers.headroom.env.HF_HUB_OFFLINE // empty' "$MCP_JSON" 2>/dev/null)"
-# the command string is shell-interpreted (quoted like hooks.json), so run it
-# the same way the hooks.json commands are exercised: via sh -c
-mcp_resolved=${mcp_cmd/'${CLAUDE_PLUGIN_ROOT}'/"$ROOT"}
-out=$(HCAT_PYTHON="$FENG/python" sh -c "$mcp_resolved" 2>&1)
-check "mcp.json: end-to-end launch through the bundled command" "launched: mcp serve" "$out"
+# end-to-end: the bare name resolves through PATH exactly as a shell-less spawn would
+mcp_args=$(jq -r '.mcpServers.headroom.args | join(" ")' "$MCP_JSON")
+# shellcheck disable=SC2086
+out=$(PATH="$FENG:$PATH" HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 "$mcp_cmd" $mcp_args 2>&1)
+check "mcp.json: end-to-end launch by name" "launched: mcp serve" "$out"
 
 # 32j. /doctor skill
 DSKILL="$ROOT/skills/doctor/SKILL.md"
@@ -1168,11 +1142,6 @@ printf '#!%s\n# console script only — no sibling python in this dir\n' "$SPY/p
 chmod +x "$CLI/headroom"
 FAKEHOME="$REVD/home"; mkdir -p "$FAKEHOME"
 
-# the launcher only needs the CLI: `headroom` on PATH is used directly
-out=$(env -u HCAT_PYTHON PATH="$CLI:/usr/bin:/bin" DOCTOR_VENV_DIR="$NOVENV" bash "$LAUNCHER" 2>&1); rc=$?
-check "f1 launcher: console-script-only layout execs" "mcp serve" "$out"
-check_eq "f1 launcher: exit 0" "0" "$rc"
-
 # hcat needs an importing python: the console script's shebang interpreter
 # (the echo-stub prints its argv, proving which interpreter hcat exec'd)
 printf '{"k":1}' > "$REVD/tiny.json"
@@ -1378,7 +1347,7 @@ out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7
 check "f7c: stale statusline copy is fixable" "statusline copy" "$out"
 check "f7c: reported as fixable" "fixable" "$out"
 # F7d: the doctor validates the bundled .mcp.json
-check "f7d: .mcp.json checked and healthy" ".mcp.json registers the headroom MCP" "$out"
+check "f7d: .mcp.json checked and healthy" ".mcp.json spawns \`headroom mcp serve\` by name" "$out"
 HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7C/settings.json" \
   DOCTOR_CLAUDE_DIR="$F7C/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" --fix >/dev/null 2>&1
 if cmp -s "$F7C/cd/headroom-statusline.sh" "$ROOT/scripts/statusline.sh" && [ -x "$F7C/cd/headroom-statusline.sh" ]; then
@@ -1933,74 +1902,24 @@ fi
 # manual ~/.claude.json registration still provided the tools). Hook commands are
 # the opposite — they DO run through a shell — so hooks.json keeps its quoting.
 # Pin the asymmetry in both directions.
-f8_mcp_cmd=$(jq -r '.mcpServers.headroom.command' "$MCP_JSON")
-check_absent "f8: mcp command carries no literal quotes (spawned without a shell)" '"' "$f8_mcp_cmd"
-f8_spawn=${f8_mcp_cmd//'${CLAUDE_PLUGIN_ROOT}'/$ROOT}
-if [ -x "$f8_spawn" ]; then
-  echo "ok - f8: mcp command as-spawned is the executable launcher"; PASS=$((PASS+1))
-else
-  echo "FAIL - f8: mcp command as-spawned is the executable launcher"
-  echo "    not executable: $f8_spawn"
-  FAIL=$((FAIL+1))
-fi
+check_absent "f8: mcp command carries no path (nothing for a shell-less spawn to mis-resolve)" "/" "$mcp_cmd"
+check_absent "f8: mcp command carries no quotes" '"' "$mcp_cmd"
 check "f8: hooks.json gate command KEEPS its shell quoting (hooks run via shell)" \
       '"${CLAUDE_PLUGIN_ROOT}"/scripts/hcat-gate.sh' \
       "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$ROOT/hooks/hooks.json")"
 
-# F8b: doctor 4b must judge the launcher AS-SPAWNED. The shipped bug above stayed
-# green for two minor versions because 4b stripped quotes before its -x test —
-# mechanism, not outcome. A quoted-but-otherwise-correct command is now fixable:
-# --fix unquotes the bundled .mcp.json in place (.bak first, idempotent).
-F8B="$REVD/f8b"; mkdir -p "$F8B/root/scripts/lib" "$F8B/cd"
-cp "$DOCTOR" "$F8B/root/scripts/doctor.sh"
-cp "$ROOT/scripts/lib/engine-resolve.sh" "$F8B/root/scripts/lib/engine-resolve.sh"
-printf '#!/bin/sh\nexec true\n' > "$F8B/root/scripts/mcp-launcher.sh"
-chmod +x "$F8B/root/scripts/mcp-launcher.sh"
-jq -n '{mcpServers:{headroom:{type:"stdio",command:"\"${CLAUDE_PLUGIN_ROOT}\"/scripts/mcp-launcher.sh",args:[],env:{}}}}' \
+# F8b: doctor 4b judges the .mcp.json SHAPE — a path-style command is what a
+# pre-v2.8 cache copy looks like, and it can never spawn on Windows: FAIL, not
+# fixable (there is no launcher left to repair; the fix is a plugin update).
+F8B="$REVD/f8b"; mkdir -p "$F8B/root/scripts" "$F8B/root/bin" "$F8B/cd"
+cp "$DOCTOR" "$F8B/root/scripts/doctor.sh"; cp -R "$ROOT/scripts/lib" "$F8B/root/scripts/lib"
+cp "$HCAT" "$F8B/root/bin/hcat"; cp -R "$ROOT/hooks" "$F8B/root/hooks"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"${CLAUDE_PLUGIN_ROOT}/scripts/mcp-launcher.sh",args:[],env:{}}}}' \
   > "$F8B/root/.mcp.json"
-out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
+out=$(HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
       DOCTOR_CLAUDE_DIR="$F8B/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8B/root/scripts/doctor.sh" 2>&1)
-check        "f8b: quoted mcp command reported fixable" "carries literal quotes"              "$out"
-check_absent "f8b: quoted mcp command not greened"      ".mcp.json registers the headroom MCP" "$out"
-HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
-  DOCTOR_CLAUDE_DIR="$F8B/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8B/root/scripts/doctor.sh" --fix >/dev/null 2>&1
-check_eq "f8b: --fix unquoted the command in place" '${CLAUDE_PLUGIN_ROOT}/scripts/mcp-launcher.sh' \
-         "$(jq -r '.mcpServers.headroom.command' "$F8B/root/.mcp.json")"
-out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
-      DOCTOR_CLAUDE_DIR="$F8B/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8B/root/scripts/doctor.sh" 2>&1)
-check "f8b: post-fix rerun greens 4b" ".mcp.json registers the headroom MCP" "$out"
-HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
-  DOCTOR_CLAUDE_DIR="$F8B/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8B/root/scripts/doctor.sh" --fix >/dev/null 2>&1
-check_eq "f8b: second --fix is a no-op (exactly one backup)" "1" \
-         "$(ls "$F8B/root/.mcp.json.bak."* 2>/dev/null | wc -l | tr -d ' ')"
-
-# F8c: the backup must actually succeed before the destructive rewrite
-# proceeds. A directory that denies creating new entries (no backup possible)
-# but still permits writing to an existing file's inode (the rewrite itself)
-# is exactly the failure mode this guards: previously the backup's exit
-# status was discarded and the rewrite ran anyway, claiming a backup that was
-# never created. Root can bypass these permission bits, so this fixture is
-# skipped when running as root (id -u 0).
-if [ "$(id -u)" -ne 0 ]; then
-  F8C="$REVD/f8c"; mkdir -p "$F8C/root/scripts/lib" "$F8C/cd"
-  cp "$DOCTOR" "$F8C/root/scripts/doctor.sh"
-  cp "$ROOT/scripts/lib/engine-resolve.sh" "$F8C/root/scripts/lib/engine-resolve.sh"
-  printf '#!/bin/sh\nexec true\n' > "$F8C/root/scripts/mcp-launcher.sh"
-  chmod +x "$F8C/root/scripts/mcp-launcher.sh"
-  jq -n '{mcpServers:{headroom:{type:"stdio",command:"\"${CLAUDE_PLUGIN_ROOT}\"/scripts/mcp-launcher.sh",args:[],env:{}}}}' \
-    > "$F8C/root/.mcp.json"
-  chmod 666 "$F8C/root/.mcp.json"   # the file itself stays writable in place
-  chmod 555 "$F8C/root"             # but the directory cannot gain new entries
-  out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8C/settings.json" \
-        DOCTOR_CLAUDE_DIR="$F8C/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8C/root/scripts/doctor.sh" --fix 2>&1)
-  chmod 755 "$F8C/root"             # restore before any cleanup/further use
-  check "f8c: a backup failure refuses the destructive rewrite" "could not back up" "$out"
-  check_eq "f8c: the command is left untouched when the backup fails" \
-           '"${CLAUDE_PLUGIN_ROOT}"/scripts/mcp-launcher.sh' \
-           "$(jq -r '.mcpServers.headroom.command' "$F8C/root/.mcp.json")"
-else
-  echo "skip - f8c: backup-failure guard (running as root, permission bits bypassed)"
-fi
+check        "f8b: path-style mcp command is FAIL (stale copy)" "stale plugin copy" "$out"
+check_absent "f8b: path-style mcp command not greened" ".mcp.json spawns" "$out"
 
 # --- 36. data-driven price table (data/model-prices.json)
 PRICES_JSON="$ROOT/data/model-prices.json"
@@ -2855,11 +2774,16 @@ out=$(env -u HCAT_PYTHON PATH="$W4N/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$S4N" D
       DOCTOR_VENV_DIR="$W4N/venv" bash "$DOCTOR" --fix 2>&1)
 check "w4: no interpreter → FAIL names python3/python/py -3" "python3, python, py -3" "$out"
 
+# w5. doctor 4b greens the bare command and names the CLI check
+out=$(HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" DOCTOR_CLAUDE_DIR="$W4/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" 2>&1)
+check "w5: 4b ok for bare command" ".mcp.json spawns \`headroom mcp serve\` by name" "$out"
+
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
 if command -v shellcheck >/dev/null 2>&1; then
   if shellcheck --severity=warning "$SCRIPT" "$DANGI" "$ROOT/scripts/hcat-gate.sh" \
-       "$ROOT/scripts/doctor.sh" "$ROOT/scripts/mcp-launcher.sh" \
+       "$ROOT/scripts/doctor.sh" \
        "$ROOT/scripts/session-probe.sh" "$ROOT/scripts/ledger-hook.sh" \
        "$ROOT/scripts/lib/headroom-state.sh" \
        "$ROOT/scripts/lib/engine-resolve.sh"; then

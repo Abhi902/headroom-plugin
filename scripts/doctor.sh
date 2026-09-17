@@ -18,9 +18,7 @@
 #                        by a respelling bash can never expand (a quoted ~),
 #                        also rewrites statusLine.command to the absolute path
 #                        (.bak first)
-#   * quoted mcp cmd   — strip literal quotes from the .mcp.json command
-#                        (.bak first); MCP commands are spawned without a
-#                        shell, so quotes break the launcher path
+#   * (removed in v2.8) quoted mcp cmd — .mcp.json now names the bare `headroom`; nothing to rewrite
 #   * stale copies     — delete pre-plugin script copies in ~/.claude, but only
 #                        once plugin-native hooks are confirmed and no legacy
 #                        hook entries remain
@@ -228,7 +226,10 @@ else
   say FAIL "hooks.json missing/invalid or lacks PreToolUse+PostToolUse ($HOOKS_JSON)"
 fi
 
-# --- 4b. bundled .mcp.json — parses, names the headroom server, launcher runs
+# --- 4b. bundled .mcp.json — shape only. Since v2.8 the server is spawned by its
+# bare name (`headroom mcp serve`): MCP stdio commands run without a shell on
+# every OS, and Windows cannot exec a .sh that way, so no launcher script may be
+# referenced. Whether the bare name RESOLVES is check 2b's job (one report).
 MCP_DEF="$PLUGIN_ROOT/.mcp.json"
 if [ "$HAVE_JQ" -eq 0 ]; then
   say skip ".mcp.json (needs jq)"
@@ -236,32 +237,11 @@ elif ! jq -e '.mcpServers.headroom.command' "$MCP_DEF" >/dev/null 2>&1; then
   say FAIL ".mcp.json missing/invalid or lacks the headroom server ($MCP_DEF)"
 else
   mcp_cmd=$(jq -r '.mcpServers.headroom.command' "$MCP_DEF")
-  # Claude Code expands ${CLAUDE_PLUGIN_ROOT} and spawns the result directly
-  # (posix_spawn, no shell) — judge the string exactly as spawned; quotes are
-  # never unwrapped, they become part of the filename.
-  mcp_path=${mcp_cmd//'${CLAUDE_PLUGIN_ROOT}'/$PLUGIN_ROOT}
-  if [ -x "$mcp_path" ]; then
-    say ok ".mcp.json registers the headroom MCP (launcher: $mcp_path)"
-  elif [ -x "${mcp_path//\"/}" ]; then
-    # the launcher exists but the command wraps it in literal quotes (shipped
-    # v2.5→v2.7.2): ENOENT at spawn → the /plugin ✗, server never connects
-    if [ "$FIX" -eq 1 ]; then
-      # the backup must actually land before we overwrite the only copy on
-      # disk — a swallowed backup failure followed by a rewrite would claim
-      # "(backup: ...)" while leaving no recovery copy at all
-      if ! cp "$MCP_DEF" "$MCP_DEF.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null; then
-        say FAIL "could not back up $MCP_DEF before rewriting it — refusing to overwrite without one"
-      elif jq --arg c "${mcp_cmd//\"/}" '.mcpServers.headroom.command = $c' \
-          "$MCP_DEF" > "$TMPD/mcp.new" && cat "$TMPD/mcp.new" > "$MCP_DEF"; then
-        say fixed "unquoted the .mcp.json command — MCP commands are spawned without a shell (backup: .mcp.json.bak.*)"
-      else
-        say FAIL "could not rewrite $MCP_DEF to drop the literal quotes"
-      fi
-    else
-      say fixable ".mcp.json command carries literal quotes — spawned without a shell they break the launcher path, so the bundled MCP never connects (--fix unquotes it)"
-    fi
+  mcp_args=$(jq -r '.mcpServers.headroom.args // [] | join(" ")' "$MCP_DEF")
+  if [ "$mcp_cmd" = "headroom" ] && [ "$mcp_args" = "mcp serve" ]; then
+    say ok ".mcp.json spawns \`headroom mcp serve\` by name (needs headroom on PATH — see the CLI check)"
   else
-    say FAIL ".mcp.json launcher missing or not executable ($mcp_path)"
+    say FAIL ".mcp.json command is '$mcp_cmd $mcp_args' — v2.8 spawns the bare \`headroom\` name; this looks like a stale plugin copy: /plugin update headroom-usage-indicator@headroom-tools"
   fi
 fi
 
