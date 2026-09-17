@@ -28,8 +28,8 @@ directory with `DOCTOR_PROJECT_DIR`, default the current working directory) —
 they all double-fire alongside the plugin-native hooks — the statusLine
 wiring (including a doctor-blessed custom, hand-wired path, not just the
 canonical `~/.claude/headroom-statusline.sh` copy), that the wired copy
-matches the plugin's script **and that its runtime deps (`attribution.jq`,
-`headroom-state.sh`) are present and current** — under `~/.claude/lib/`, or,
+matches the plugin's script **and that the installed lib deps (`attribution.jq`,
+`headroom-state.sh`, `engine-resolve.sh`) are present and current** — under `~/.claude/lib/`, or,
 for the legacy full-manual install layout, as flat siblings next to the copy
 (without them the badge is stuck at a permanent "idle" showing zero savings),
 stale pre-plugin script copies in `~/.claude`, and whether a recorded
@@ -107,9 +107,11 @@ Each line is aligned `<status> - <what>`:
     your shell (or the Windows user Path steps); the doctor never edits rc
     files or the registry
   - stale statusline copy → refreshed from the plugin's `scripts/statusline.sh`
-  - missing/stale statusline lib deps → `attribution.jq` and
-    `headroom-state.sh` (re)installed into `~/.claude/lib/`; these are what the
-    badge needs to attribute savings, so without them it silently reads zero
+  - missing/stale lib deps → `attribution.jq`, `headroom-state.sh` and
+    `engine-resolve.sh` (re)installed into `~/.claude/lib/`; the first two are
+    what the badge needs to attribute savings, so without them it silently reads
+    zero, and the third is the shared engine resolver a legacy flat install's
+    `hcat`/hooks source before their minimal inline fallback
   - stale `~/.claude` copies → deleted, but only once plugin-native hooks are
     confirmed and no legacy entries remain in `settings.json`,
     `settings.local.json`, or the current project's settings — project-level

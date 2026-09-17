@@ -60,10 +60,13 @@ if [ ! -x "$HCAT" ]; then
 fi
 
 # --- 2b. shared libs — the badge/ledger read attribution.jq; the hooks source
-# headroom-state.sh for ambient-health + offender-learning. Without them those
-# features silently degrade to no-ops. Plugin installs ship them in lib/; a
-# legacy flat install keeps them as siblings (copied by the manual installer).
-for _lib in attribution.jq headroom-state.sh; do
+# headroom-state.sh for ambient-health + offender-learning, and engine-resolve.sh
+# for the one shared "where is the engine" order (without it this hook, hcat and
+# the gate each fall back to a minimal HCAT_PYTHON-or-~/.headroom-venv lookup).
+# Without them those features silently degrade to no-ops. Plugin installs ship
+# them in lib/; a legacy flat install keeps them as siblings (copied by the
+# manual installer, and re-provisioned by /doctor --fix).
+for _lib in attribution.jq headroom-state.sh engine-resolve.sh; do
   if [ ! -f "$here/lib/$_lib" ] && [ ! -f "$here/$_lib" ]; then
     note_error install "$_lib missing — badge/ledger/health degraded"
     add_problem "$_lib is missing — reinstall the plugin, or (legacy install) re-run the manual installer to copy scripts/lib/*"
@@ -71,18 +74,33 @@ for _lib in attribution.jq headroom-state.sh; do
 done
 
 # --- 3. engine python resolvable (existence only — import is checked at use time)
+# `headroom` on PATH gets its own nudge (engine_off_path below): since v2.8 the
+# bundled .mcp.json spawns the BARE name with no shell and no launcher, so an
+# install whose engine resolves only through the doctor's venv — the doctor's own
+# happy path before v2.8 — silently loses its MCP the moment the plugin updates.
+# Nothing else announces it: the badge's "idle" is indistinguishable from "you
+# haven't compressed anything yet", and /doctor only runs when the user already
+# suspects something. A hook's PATH is the closest proxy available for the MCP
+# spawn environment, so this check is more trustworthy than doctor's own.
+engine_off_path() {
+  command -v headroom >/dev/null 2>&1 && return 0
+  add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /doctor --fix to shim it"
+}
 if [ -n "${HCAT_PYTHON:-}" ]; then
   # An explicit override pointing nowhere is a breakage, not an absence.
   if [ ! -x "$HCAT_PYTHON" ]; then
     note_error engine "HCAT_PYTHON is set but not executable ($HCAT_PYTHON)"
     add_problem "HCAT_PYTHON points at a non-executable python ($HCAT_PYTHON) — unset or fix it"
+  else
+    engine_off_path
   fi
-else
-  if ! resolve_engine_python >/dev/null 2>&1 && ! command -v headroom >/dev/null 2>&1; then
-    # Never-installed engine is the ordinary red-idle state, not a breakage:
-    # say it once at session start, but do not flip the badge to broken.
-    add_problem "headroom engine not installed — run /doctor --fix to bootstrap it"
-  fi
+elif resolve_engine_python >/dev/null 2>&1; then
+  engine_off_path
+elif ! command -v headroom >/dev/null 2>&1; then
+  # Never-installed engine is the ordinary red-idle state, not a breakage:
+  # say it once at session start, but do not flip the badge to broken. Same
+  # reasoning for the off-PATH nudge above: add_problem, never note_error.
+  add_problem "headroom engine not installed — run /doctor --fix to bootstrap it"
 fi
 
 # --- 4. bundled price table parses (when jq is available to check)

@@ -22,7 +22,11 @@
 #   * headroom on PATH — shim the resolved `headroom` CLI into ~/.local/bin
 #                        (symlink; a copy of headroom.exe on Windows) so the
 #                        bundled .mcp.json's bare command resolves; verified
-#                        afterwards, FAIL with the PATH snippet if it still doesn't
+#                        afterwards by NAME and by EXECUTION, FAIL with the PATH
+#                        snippet if it still doesn't resolve and FAIL if it
+#                        resolves but won't start. A foreign (non-symlink,
+#                        non-identical) file already at the shim path is never
+#                        overwritten — ~/.local/bin belongs to pipx/uv/pip too
 #   * stale copies     — delete pre-plugin script copies in ~/.claude, but only
 #                        once plugin-native hooks are confirmed and no legacy
 #                        hook entries remain
@@ -200,12 +204,47 @@ else
 fi
 
 # --- 2b. `headroom` on PATH — .mcp.json spawns the bare name (no shell, no launcher)
+shim_target() {  # the shim file this platform writes (a copy named headroom.exe on Windows)
+  if is_windows; then printf '%s' "$SHIM_DIR/headroom.exe"; else printf '%s' "$SHIM_DIR/headroom"; fi
+}
 shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the shim path
+  # rc 2 = a FOREIGN file already occupies the target. $SHIM_DIR (~/.local/bin by
+  # default) is not doctor-owned territory: pipx, `uv tool install` and `pip
+  # install --user` put real binaries there — and the only way we get here is that
+  # `headroom` did NOT resolve on the current PATH, which is exactly the shape of
+  # "their install exists, their PATH is stale". Replacing it would be
+  # unrecoverable (every other destructive write in this file takes a .bak first),
+  # so refuse and let 2b say so. A symlink is ours to replace; a byte-identical
+  # regular file already IS the shim, so leave it alone — that keeps --fix
+  # idempotent on Windows, where the shim is a copy rather than a link.
+  local target; target=$(shim_target)
+  if [ -e "$target" ] && [ ! -L "$target" ]; then
+    cmp -s "$1" "$target" || return 2
+    printf '%s' "$target"; return 0
+  fi
   mkdir -p "$SHIM_DIR" 2>/dev/null || return 1
   if is_windows; then
-    cp "$1" "$SHIM_DIR/headroom.exe" 2>/dev/null && printf '%s' "$SHIM_DIR/headroom.exe"
+    cp "$1" "$target" 2>/dev/null && printf '%s' "$target"
   else
-    ln -sfn "$1" "$SHIM_DIR/headroom" 2>/dev/null && printf '%s' "$SHIM_DIR/headroom"
+    ln -sfn "$1" "$target" 2>/dev/null && printf '%s' "$target"
+  fi
+}
+shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves
+  # Name resolution alone proves nothing: uv's relocatable trampolines resolve the
+  # interpreter relative to their own directory (so a copy elsewhere resolves and
+  # then dies at spawn), and a name-squatted `headroom` on PyPI would greenlight
+  # the line that stands in for "the MCP will connect". Cheap flag, engine env.
+  HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 "$1" --help >/dev/null 2>&1
+}
+reinstall_hint() {  # how to repair an engine whose `headroom` CLI is missing or broken
+  # HCAT_PYTHON is authoritative with no fallback, so "$PY -m pip install …" would
+  # be telling an HCAT_PYTHON=/usr/bin/python3 user to pip into the SYSTEM python.
+  if [ -n "${HCAT_PYTHON:-}" ]; then
+    printf 'install headroom-ai into the interpreter HCAT_PYTHON points at, or unset HCAT_PYTHON'
+  elif [ -n "$PY" ]; then
+    printf '%s -m pip install "headroom-ai[all]"' "$PY"
+  else
+    printf 'pip install "headroom-ai[all]" into the engine environment'
   fi
 }
 sl_hr_cmd() {  # sl_hr_cmd <script> — the statusLine.command to write for this platform
@@ -232,15 +271,20 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
   say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
 elif cli_res=$(resolve_headroom_cli); then
   if [ "$FIX" -eq 1 ]; then
-    if shim=$(shim_headroom "$cli_res"); then
-      hash -r 2>/dev/null
-      if command -v headroom >/dev/null 2>&1; then
-        say fixed "headroom shimmed to $shim (resolves on PATH)"
-      else
-        say FAIL "headroom shimmed to $shim but $SHIM_DIR is not on PATH — $(path_hint)"
-      fi
-    else
+    shim=$(shim_headroom "$cli_res"); shim_rc=$?
+    if [ "$shim_rc" -eq 2 ]; then
+      say FAIL "a different headroom already exists at $(shim_target) — not on PATH; add $SHIM_DIR to PATH or remove that file, then re-run --fix"
+    elif [ "$shim_rc" -ne 0 ]; then
       say FAIL "could not shim $cli_res into $SHIM_DIR"
+    else
+      hash -r 2>/dev/null
+      if ! command -v headroom >/dev/null 2>&1; then
+        say FAIL "headroom shimmed to $shim but $SHIM_DIR is not on PATH — $(path_hint)"
+      elif ! shim_runs "$shim"; then
+        say FAIL "headroom shimmed to $shim but it does not run (\`$shim --help\` failed) — reinstall the engine: $(reinstall_hint)"
+      else
+        say fixed "headroom shimmed to $shim (resolves on PATH)"
+      fi
     fi
   else
     say fixable "headroom CLI not on PATH (engine at $cli_res) — the bundled MCP spawns \`headroom\` by name; --fix shims it into $SHIM_DIR"
@@ -248,7 +292,7 @@ elif cli_res=$(resolve_headroom_cli); then
 elif [ -z "$PY" ]; then
   say skip "headroom CLI on PATH (no engine yet — fix the engine first)"
 else
-  say FAIL "engine python found ($PY) but no \`headroom\` CLI next to it — reinstall: $PY -m pip install \"headroom-ai[all]\""
+  say FAIL "engine python found ($PY) but no \`headroom\` CLI next to it — reinstall: $(reinstall_hint)"
 fi
 
 # --- 3. bin/hcat + a real smoke compression of a generated ~26 KB JSON
@@ -526,6 +570,7 @@ else
             && cp "$PLUGIN_ROOT/data/model-prices.json" "$CLAUDE_DIR/headroom-model-prices.json" 2>/dev/null || true
           cp "$PLUGIN_ROOT/scripts/lib/attribution.jq"    "$CLAUDE_DIR/lib/" \
             && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/" \
+            && cp "$PLUGIN_ROOT/scripts/lib/engine-resolve.sh" "$CLAUDE_DIR/lib/" \
             && cp "$PLUGIN_ROOT/scripts/statusline.sh" "$CLAUDE_DIR/headroom-statusline.sh" \
             && chmod +x "$CLAUDE_DIR/headroom-statusline.sh" || sl_copy_ok=0
         fi
@@ -612,12 +657,16 @@ JQEOF
         && cp "$PLUGIN_ROOT/data/model-prices.json" "$CLAUDE_DIR/headroom-model-prices.json" 2>/dev/null || true
       # statusline.sh resolves attribution.jq + headroom-state.sh from a lib/ dir
       # next to itself; without them compute() degrades to a permanent idle badge
-      # showing zero savings (issue #2). Provision them alongside the copy, and
-      # gate the "fixed" claim on them actually landing -- a silently-failed
-      # lib-dep copy must not be reported as a successful wire.
+      # showing zero savings (issue #2). engine-resolve.sh rides along because a
+      # legacy FLAT install's hcat/hcat-gate.sh/session-probe.sh source
+      # "$here/lib/engine-resolve.sh" first and otherwise run forever on their
+      # minimal inline fallback (spec §1, v2.8). Provision them alongside the
+      # copy, and gate the "fixed" claim on them actually landing -- a
+      # silently-failed lib-dep copy must not be reported as a successful wire.
       mkdir -p "$CLAUDE_DIR/lib"
       if cp "$PLUGIN_ROOT/scripts/lib/attribution.jq"    "$CLAUDE_DIR/lib/" \
          && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/" \
+         && cp "$PLUGIN_ROOT/scripts/lib/engine-resolve.sh" "$CLAUDE_DIR/lib/" \
          && cp "$PLUGIN_ROOT/scripts/statusline.sh" "$sl_path" && chmod +x "$sl_path" \
          && jq --arg hr "$(sl_hr_cmd "$sl_path")" "$sl_merge_jq" \
             "$SETTINGS" > "$TMPD/settings.sl" && cat "$TMPD/settings.sl" > "$SETTINGS"; then
@@ -660,6 +709,7 @@ JQEOF
     mkdir -p "$CLAUDE_DIR/lib"
     if cp "$PLUGIN_ROOT/scripts/lib/attribution.jq"    "$CLAUDE_DIR/lib/" \
        && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/" \
+       && cp "$PLUGIN_ROOT/scripts/lib/engine-resolve.sh" "$CLAUDE_DIR/lib/" \
        && cp "$PLUGIN_ROOT/scripts/statusline.sh" "$sl_copy" && chmod +x "$sl_copy"; then
       say fixed "statusline copy refreshed from the plugin ($sl_copy)"
     else
@@ -669,10 +719,14 @@ JQEOF
     say fixable "statusline copy differs from the plugin's scripts/statusline.sh — --fix refreshes it"
   fi
 
-  # 7c. statusline.sh's runtime deps (attribution.jq + headroom-state.sh) must sit
-  # next to the installed copy, or compute() silently degrades to a permanent idle
-  # badge showing zero savings (issue #2). The plain cmp in 7b only covers the
-  # script itself — these are separate files and were never provisioned.
+  # 7c. the installed lib deps. statusline.sh's runtime deps (attribution.jq +
+  # headroom-state.sh) must sit next to the installed copy, or compute() silently
+  # degrades to a permanent idle badge showing zero savings (issue #2). The plain
+  # cmp in 7b only covers the script itself — these are separate files and were
+  # never provisioned. engine-resolve.sh is checked here too (v2.8, spec §1): it
+  # is not a badge dep, but a legacy FLAT install's hcat / hcat-gate.sh /
+  # session-probe.sh source "$here/lib/engine-resolve.sh" ahead of their inline
+  # fallback, so this is the one place /doctor --fix can repair those.
   # statusline.sh resolves each dep from EITHER a lib/ subdir OR a flat sibling
   # (the legacy full-manual install layout), preferring lib/. Mirror that here so
   # a healthy flat install is not falsely flagged (which would also block block 9's
@@ -682,7 +736,7 @@ JQEOF
   else
     sl_dep_dir=$(dirname "$sl_copy")
     lib_stale=""
-    for f in attribution.jq headroom-state.sh; do
+    for f in attribution.jq headroom-state.sh engine-resolve.sh; do
       # Resolve each dep exactly as statusline.sh does — by EXISTENCE, lib/ first,
       # else the flat sibling next to the copy actually wired (canonical or
       # custom-path), then currency-check only the file it would load.
@@ -700,19 +754,20 @@ JQEOF
       fi
     done
     if [ -z "$lib_stale" ]; then
-      say ok "statusline lib deps current (attribution.jq, headroom-state.sh)"
+      say ok "statusline lib deps current (attribution.jq, headroom-state.sh, engine-resolve.sh)"
     elif [ "$sl_custom_copy" -eq 1 ]; then
       say FAIL "statusline lib deps at $sl_dep_dir missing/stale —$lib_stale (custom-path install is yours to update; doctor will not write there)"
     elif [ "$FIX" -eq 1 ]; then
       mkdir -p "$CLAUDE_DIR/lib"
       if cp "$PLUGIN_ROOT/scripts/lib/attribution.jq"    "$CLAUDE_DIR/lib/" \
-         && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/"; then
+         && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/" \
+         && cp "$PLUGIN_ROOT/scripts/lib/engine-resolve.sh" "$CLAUDE_DIR/lib/"; then
         say fixed "installed statusline lib deps to $CLAUDE_DIR/lib —$lib_stale"
       else
         say FAIL "could not copy statusline lib deps to $CLAUDE_DIR/lib"
       fi
     else
-      say fixable "statusline lib deps missing/stale —$lib_stale (badge shows zero savings without them; --fix installs attribution.jq + headroom-state.sh)"
+      say fixable "statusline lib deps missing/stale —$lib_stale (badge shows zero savings without them, and a legacy flat install loses the shared engine resolver; --fix installs attribution.jq + headroom-state.sh + engine-resolve.sh)"
     fi
   fi
 

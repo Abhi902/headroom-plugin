@@ -105,6 +105,9 @@ existing `HF_HUB_OFFLINE=1 HEADROOM_UPDATE_CHECK=off`.
   - Output note on the ok line: PATH is verified in the Bash tool's
     environment, the closest available proxy for Claude Code's MCP spawn env.
 - Block 9 (ambient all-clear) unchanged: a FAIL from 2b blocks it, as any FAIL.
+- Between a plugin update and the next `/doctor --fix` the SessionStart probe
+  nudges installs whose engine resolves but whose `headroom` is not on PATH
+  (`add_problem`, not `note_error`: a setup gap, not a badge breakage).
 - README: "Upgrading from ≤2.7.4 with a doctor-bootstrapped venv" note — run
   `/headroom-usage-indicator:doctor --fix` once; the bundled MCP now needs
   `headroom` on PATH. SKILL.md (doctor) consent list and fixable list disclose
