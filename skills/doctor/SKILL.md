@@ -12,10 +12,12 @@ headroom engine python (`$HCAT_PYTHON` → sibling of `headroom` on PATH → the
 `headroom` console script's shebang interpreter, which covers pip --user and
 pipx layouts → `~/.headroom-venv`), a real `bin/hcat` smoke compression of a
 generated ~26 KB JSON, the plugin-native `hooks/hooks.json` (SessionStart,
-PreToolUse, PostToolUse, Stop, SessionEnd), the bundled
-`.mcp.json` (parses and its launcher is executable **exactly as spawned** —
-MCP commands run without a shell, so a command carrying literal quotes is
-broken and `--fix` unquotes it in place), the bundled
+PreToolUse, PostToolUse, Stop, SessionEnd), the bundled `.mcp.json` (parses
+and names the bare `headroom mcp serve` command — since v2.8 there is no
+launcher script, because MCP stdio commands are spawned without a shell and
+Windows cannot run a `.sh` that way), that `headroom` actually resolves on
+PATH (check 2b — the bundled MCP is spawned by name; `--fix` shims the
+resolved CLI into `~/.local/bin` and re-verifies), the bundled
 `data/model-prices.json` badge price table (parses; `--fix` copies it beside the
 statusline copy), that
 `~/.claude/settings.json` is a single valid JSON document, legacy pre-plugin
@@ -32,7 +34,10 @@ for the legacy full-manual install layout, as flat siblings next to the copy
 (without them the badge is stuck at a permanent "idle" showing zero savings),
 stale pre-plugin script copies in `~/.claude`, and whether a recorded
 ambient-health failure (the `last-error` file that flips the statusline badge
-to "broken") can now be cleared.
+to "broken") can now be cleared. On Windows the doctor also confirms it is
+running under Git Bash (a stale `CLAUDE_CODE_GIT_BASH_PATH` is `FAIL`) and
+writes the status-line command with explicit Windows paths (`"C:\…\bash.exe"
+"C:\…\headroom-statusline.sh"`).
 
 A companion SessionStart hook, `scripts/session-probe.sh`, runs a much
 lighter version of this check automatically every session (jq present, `hcat`
@@ -65,8 +70,9 @@ Each line is aligned `<status> - <what>`:
   or a broken exported `HCAT_PYTHON` are reported here — the doctor refuses
   to edit settings or bootstrap around them.
 - `fixable` — the doctor can repair this itself with `--fix`:
-  - engine missing → bootstrap `python3 -m venv ~/.headroom-venv` +
-    `pip install "headroom-ai[all]"`
+  - engine missing → bootstrap a venv at `~/.headroom-venv` (`python3`,
+    `python`, or `py -3` — whichever works; `bin/` or `Scripts/` layout) +
+    `pip install "headroom-ai[all]"`, then shim `headroom` onto PATH as above
   - legacy hook entries → removed from `~/.claude/settings.json`,
     `~/.claude/settings.local.json`, and the current project's
     `.claude/settings.json` / `.claude/settings.local.json` (a timestamped
@@ -94,10 +100,12 @@ Each line is aligned `<status> - <what>`:
     it's missing too, it's re-copied first, same as above); doctor never
     reports this wiring as healthy even when the file is present, since the
     wired command itself would still never resolve it
-  - quoted `.mcp.json` command → literal quotes around `${CLAUDE_PLUGIN_ROOT}`
-    stripped in place (timestamped `.bak.*` first) — MCP stdio commands are
-    spawned without a shell, so the quotes 404 the launcher and the bundled
-    server never connects (the `/plugin` ✗)
+  - headroom CLI not on PATH (engine found, bare name unresolved) → the
+    resolved `headroom` is shimmed into `~/.local/bin` (symlink; on Windows a
+    copy named `headroom.exe`), then re-checked — if `~/.local/bin` is not on
+    PATH the line turns `FAIL` and carries the exact one-line PATH addition for
+    your shell (or the Windows user Path steps); the doctor never edits rc
+    files or the registry
   - stale statusline copy → refreshed from the plugin's `scripts/statusline.sh`
   - missing/stale statusline lib deps → `attribution.jq` and
     `headroom-state.sh` (re)installed into `~/.claude/lib/`; these are what the
@@ -124,8 +132,8 @@ Never run `--fix` unprompted. If anything is `fixable`, list exactly what
 `~/.claude/settings.local.json`, and the current project's
 `.claude/settings.json` / `.claude/settings.local.json`, each with its own
 timestamped backup; may create a venv and run pip; may delete stale script
-copies; may rewrite the plugin's bundled `.mcp.json` in place to unquote its
-command, with its own timestamped backup; may re-copy the statusline script
+copies; may create or replace a `headroom` shim in `~/.local/bin` (symlink;
+`headroom.exe` copy on Windows); may re-copy the statusline script
 plus its `lib/` deps and price table to `~/.claude` — both when wiring
 statusLine for the first time and when settings already point at a missing
 canonical copy; and may rewrite `statusLine.command` to an absolute path (same

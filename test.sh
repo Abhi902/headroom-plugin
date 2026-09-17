@@ -862,12 +862,16 @@ check "doctor skill: runs doctor.sh"       "doctor.sh"    "$(cat "$DSKILL" 2>/de
 check "doctor skill: consent before --fix" "consent"      "$(cat "$DSKILL" 2>/dev/null)"
 # docs-parity: Step 3's consent list and the fixable lists must name every --fix
 # mutation — an agent following the skill verbatim must not under-disclose
-check "doctor skill: consent list names the .mcp.json rewrite"       "rewrite the plugin's bundled" "$(cat "$DSKILL" 2>/dev/null)"
+check "doctor skill: consent list names the headroom shim install"   "create or replace a \`headroom\` shim" "$(cat "$DSKILL" 2>/dev/null)"
 check "doctor skill: consent list names the statusline re-copy"      "re-copy the statusline"       "$(cat "$DSKILL" 2>/dev/null)"
 check "doctor skill: fixable list covers wired-but-missing re-copy"  "wired but script missing"     "$(cat "$DSKILL" 2>/dev/null)"
 check "doctor header: fixable list covers wired-but-missing re-copy" "wired-missing copy"           "$(head -30 "$DOCTOR" 2>/dev/null)"
 check "doctor skill: consent list names the statusLine.command rewrite" "rewrite \`statusLine.command\`" "$(cat "$DSKILL" 2>/dev/null)"
 check "doctor header: header names the statusLine.command rewrite"      "rewrites statusLine.command"    "$(head -30 "$DOCTOR" 2>/dev/null)"
+check "doctor skill: consent list names the headroom shim"        "shim"                    "$(cat "$DSKILL" 2>/dev/null)"
+check "doctor skill: fixable list covers headroom not on PATH"    "headroom CLI not on PATH" "$(cat "$DSKILL" 2>/dev/null)"
+check_absent "doctor skill: no launcher left in the doctor docs"  "mcp-launcher"            "$(cat "$DSKILL" 2>/dev/null)"
+check "installer skill: legacy installer copies engine-resolve.sh" "engine-resolve.sh"       "$(cat "$ROOT/skills/headroom-usage-indicator/SKILL.md" 2>/dev/null)"
 
 # --- 34. review fixes: badge + hooks
 export HEADROOM_STATE_DIR="$TMP/state-review"
