@@ -1951,8 +1951,9 @@ check "f8: hooks.json gate command KEEPS its shell quoting (hooks run via shell)
 # green for two minor versions because 4b stripped quotes before its -x test —
 # mechanism, not outcome. A quoted-but-otherwise-correct command is now fixable:
 # --fix unquotes the bundled .mcp.json in place (.bak first, idempotent).
-F8B="$REVD/f8b"; mkdir -p "$F8B/root/scripts" "$F8B/cd"
+F8B="$REVD/f8b"; mkdir -p "$F8B/root/scripts/lib" "$F8B/cd"
 cp "$DOCTOR" "$F8B/root/scripts/doctor.sh"
+cp "$ROOT/scripts/lib/engine-resolve.sh" "$F8B/root/scripts/lib/engine-resolve.sh"
 printf '#!/bin/sh\nexec true\n' > "$F8B/root/scripts/mcp-launcher.sh"
 chmod +x "$F8B/root/scripts/mcp-launcher.sh"
 jq -n '{mcpServers:{headroom:{type:"stdio",command:"\"${CLAUDE_PLUGIN_ROOT}\"/scripts/mcp-launcher.sh",args:[],env:{}}}}' \
@@ -1981,8 +1982,9 @@ check_eq "f8b: second --fix is a no-op (exactly one backup)" "1" \
 # never created. Root can bypass these permission bits, so this fixture is
 # skipped when running as root (id -u 0).
 if [ "$(id -u)" -ne 0 ]; then
-  F8C="$REVD/f8c"; mkdir -p "$F8C/root/scripts" "$F8C/cd"
+  F8C="$REVD/f8c"; mkdir -p "$F8C/root/scripts/lib" "$F8C/cd"
   cp "$DOCTOR" "$F8C/root/scripts/doctor.sh"
+  cp "$ROOT/scripts/lib/engine-resolve.sh" "$F8C/root/scripts/lib/engine-resolve.sh"
   printf '#!/bin/sh\nexec true\n' > "$F8C/root/scripts/mcp-launcher.sh"
   chmod +x "$F8C/root/scripts/mcp-launcher.sh"
   jq -n '{mcpServers:{headroom:{type:"stdio",command:"\"${CLAUDE_PLUGIN_ROOT}\"/scripts/mcp-launcher.sh",args:[],env:{}}}}' \
@@ -2811,6 +2813,47 @@ out=$(printf '{"session_id":"w3"}' | env -u HCAT_PYTHON HOME="$W3/home" DOCTOR_V
       HEADROOM_STATE_DIR="$W3/state" bash "$PROBE"); rc=$?
 check_absent "w3: probe does not call a Scripts/ engine 'not installed'" "engine not installed" "$out"
 check_eq "w3: probe exit 0" "0" "$rc"
+
+# w4. doctor: engine found in a Scripts/ venv; bootstrap works with `python` only
+W4="$W/w4"; mkdir -p "$W4/cd" "$W4/venv/Scripts"
+printf '#!/bin/sh\nexit 0\n' > "$W4/venv/Scripts/python.exe"; chmod +x "$W4/venv/Scripts/python.exe"
+S4="$W4/s.json"; doc_settings_wired "$W4/cd" > "$S4"
+out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" DOCTOR_CLAUDE_DIR="$W4/cd" \
+      DOCTOR_VENV_DIR="$W4/venv" bash "$DOCTOR" 2>&1)
+check "w4: doctor engine via Scripts/python.exe" "engine python: $W4/venv/Scripts/python.exe" "$out"
+
+# a toolchain with `python` but NO `python3` (typical Windows) — stub creates a Scripts/ venv
+W4B="$W/w4boot"; mkdir -p "$W4B/stub" "$W4B/cd"
+ln -sf "$(command -v jq)" "$W4B/stub/jq"
+cat > "$W4B/stub/python" <<'W4EOF'
+#!/bin/sh
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  mkdir -p "$3/Scripts"
+  printf '#!/bin/sh\necho "$@" >> "$(dirname "$0")/../pip.calls"\n' > "$3/Scripts/pip.exe"
+  printf '#!/bin/sh\nexit 0\n' > "$3/Scripts/python.exe"
+  printf '#!/bin/sh\necho hr\n' > "$3/Scripts/headroom.exe"
+  chmod +x "$3/Scripts/pip.exe" "$3/Scripts/python.exe" "$3/Scripts/headroom.exe"
+fi
+exit 0
+W4EOF
+chmod +x "$W4B/stub/python"
+S4B="$W4B/s.json"; doc_settings_wired "$W4B/cd" > "$S4B"
+# DOCTOR_OS=windows forces the py/python/python3 preference order used by a real
+# Windows toolchain; without it, this POSIX test box's real /usr/bin/python3
+# would be tried first (same macOS-python3 hazard the w4none note calls out).
+out=$(env -u HCAT_PYTHON PATH="$W4B/stub:/usr/bin:/bin" DOCTOR_OS=windows DOCTOR_SETTINGS="$S4B" DOCTOR_CLAUDE_DIR="$W4B/cd" \
+      DOCTOR_VENV_DIR="$W4B/venv" DOCTOR_SHIM_DIR="$W4B/shim" bash "$DOCTOR" --fix 2>&1)
+check "w4: bootstrap succeeds with python (no python3)" "engine bootstrapped: python -m venv" "$out"
+check "w4: bootstrap used Scripts/pip.exe" "install headroom-ai[all]" "$(cat "$W4B/venv/pip.calls" 2>/dev/null)"
+# no interpreter at all → honest FAIL naming what was tried
+W4N="$W/w4none"; mkdir -p "$W4N/stub" "$W4N/cd"; ln -sf "$(command -v jq)" "$W4N/stub/jq"
+# shadow /usr/bin/python3 so the FAIL branch (not a real bootstrap) is exercised
+printf '#!/bin/sh\nexit 1\n' > "$W4N/stub/python3"; chmod +x "$W4N/stub/python3"
+printf '#!/bin/sh\nexit 1\n' > "$W4N/stub/python"; chmod +x "$W4N/stub/python"
+S4N="$W4N/s.json"; doc_settings_wired "$W4N/cd" > "$S4N"
+out=$(env -u HCAT_PYTHON PATH="$W4N/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$S4N" DOCTOR_CLAUDE_DIR="$W4N/cd" \
+      DOCTOR_VENV_DIR="$W4N/venv" bash "$DOCTOR" --fix 2>&1)
+check "w4: no interpreter → FAIL names python3/python/py -3" "python3, python, py -3" "$out"
 
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite

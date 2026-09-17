@@ -4,7 +4,7 @@
 #
 # Read-only by default: prints aligned ok/FAIL/fixable/skip lines and exits 0
 # iff nothing FAILed. `--fix` applies the repairs reported as fixable:
-#   * engine bootstrap — python3 -m venv ~/.headroom-venv + pip install "headroom-ai[all]"
+#   * engine bootstrap — <python3|python|py -3> -m venv ~/.headroom-venv + pip install "headroom-ai[all]" (bin/ or Scripts/ layout)
 #   * legacy hooks     — remove pre-plugin dangi/gate hook entries from
 #                        settings.json (timestamped .bak written first)
 #   * statusLine       — copy scripts/statusline.sh to ~/.claude/headroom-statusline.sh
@@ -32,6 +32,9 @@
 #   DOCTOR_VENV_DIR    engine venv dir      (default ~/.headroom-venv)
 #   HCAT_PYTHON        engine python override (authoritative, no fallback —
 #                      same contract as bin/hcat)
+#   DOCTOR_OS          windows|unix — force platform branches (default: detect)
+#   DOCTOR_SHIM_DIR    where --fix shims `headroom` (default ~/.local/bin)
+#   DOCTOR_CYGPATH     cygpath stub for tests (default: cygpath when present)
 #
 # Exit codes: 0 no FAILs · 1 at least one FAIL · 2 usage
 set -u
@@ -50,6 +53,14 @@ VENV_DIR=${DOCTOR_VENV_DIR:-$HOME/.headroom-venv}
 for _sl in "$SELF_DIR/lib/headroom-state.sh" "$SELF_DIR/headroom-state.sh"; do
   [ -f "$_sl" ] && { . "$_sl"; break; }
 done
+# shellcheck disable=SC1090,SC1091
+for _er in "$SELF_DIR/lib/engine-resolve.sh" "$SELF_DIR/engine-resolve.sh"; do
+  [ -f "$_er" ] && { . "$_er"; break; }
+done
+if ! type engine_python_candidates >/dev/null 2>&1; then
+  echo "doctor: scripts/lib/engine-resolve.sh missing — partial plugin checkout; reinstall the plugin" >&2
+  exit 1
+fi
 HEALTH_STATE_DIR="${STATE_DIR:-${HEADROOM_STATE_DIR:-${HOME:-${TMPDIR:-/tmp}}/.claude/headroom-indicator}}"
 HEALTH_HAD_ERROR=0
 HEALTH_ERR_SNAP=""
@@ -108,27 +119,14 @@ else
   say FAIL "jq not found — install it (brew install jq / apt install jq)"
 fi
 
-# --- 2. headroom engine python
-# Resolution (first hit wins, mirrors bin/hcat): $HCAT_PYTHON (authoritative) →
-# sibling "python" of `headroom` on PATH → the `headroom` console script's
-# shebang interpreter (pip --user / pipx layouts ship no sibling python) →
-# $VENV_DIR/bin/python.
-shebang_interp() {  # shebang_interp <script> — interpreter path from its #! line
-  local line rest
-  IFS= read -r line < "$1" 2>/dev/null || return 1
-  case $line in '#!'*) ;; *) return 1 ;; esac
-  rest=${line#'#!'}
-  # shellcheck disable=SC2086
-  set -- $rest
-  [ $# -ge 1 ] || return 1
-  case $1 in
-    */env|env) [ $# -ge 2 ] || return 1; command -v "$2" 2>/dev/null ;;
-    *) printf '%s\n' "$1" ;;
-  esac
-}
-
+# --- 2. headroom engine python — candidates come from scripts/lib/engine-resolve.sh
+# (HCAT_PYTHON authoritative → PATH sibling → shebang interp unless PE → uv tool
+# dir → venv bin/ or Scripts/); the first one that imports headroom.compress wins.
 PY=""
 HCAT_PY_BROKEN=0
+# set when this run just bootstrapped the venv itself; check 3 must not smoke
+# a stub/fresh venv on the same run it was created (see check 3 below)
+boot_used=""
 if [ -n "${HCAT_PYTHON:-}" ]; then
   if [ -x "$HCAT_PYTHON" ] && "$HCAT_PYTHON" -c 'import headroom.compress' >/dev/null 2>&1; then
     PY=$HCAT_PYTHON
@@ -136,14 +134,11 @@ if [ -n "${HCAT_PYTHON:-}" ]; then
     HCAT_PY_BROKEN=1
   fi
 else
-  HR_CLI=$(command -v headroom 2>/dev/null || true)
-  for cand in "${HR_CLI:+$(dirname "$HR_CLI")/python}" \
-              "$([ -n "$HR_CLI" ] && shebang_interp "$HR_CLI")" \
-              "$VENV_DIR/bin/python"; do
+  while IFS= read -r cand; do
     if [ -n "$cand" ] && [ -x "$cand" ] && "$cand" -c 'import headroom.compress' >/dev/null 2>&1; then
       PY=$cand; break
     fi
-  done
+  done < <(engine_python_candidates)
 fi
 if [ -n "$PY" ]; then
   say ok "engine python: $PY (import headroom.compress works)"
@@ -153,32 +148,50 @@ elif [ "$HCAT_PY_BROKEN" -eq 1 ] && [ "$FIX" -eq 1 ]; then
   say FAIL "HCAT_PYTHON is set but broken ($HCAT_PYTHON) — unset it or point it at a working python (refusing to bootstrap while it is set)"
 elif [ "$FIX" -eq 1 ]; then
   venv_preexisted=0; [ -e "$VENV_DIR" ] && venv_preexisted=1
-  if python3 -m venv "$VENV_DIR" >/dev/null 2>&1 \
-     && [ -x "$VENV_DIR/bin/pip" ] \
-     && "$VENV_DIR/bin/pip" install "headroom-ai[all]" >/dev/null 2>&1 \
-     && [ -x "$VENV_DIR/bin/python" ] \
-     && "$VENV_DIR/bin/python" -c 'import headroom.compress' >/dev/null 2>&1; then
-    say fixed "engine bootstrapped: python3 -m venv $VENV_DIR + pip install \"headroom-ai[all]\""
+  # interpreter order: POSIX prefers python3; Windows prefers the py launcher and
+  # plain python (python3 there is often the Store alias stub that only nags)
+  if is_windows; then boot_order="py:-3 python python3"; else boot_order="python3 python py:-3"; fi
+  for boot_c in $boot_order; do
+    boot_cmd=${boot_c%%:*}; boot_arg=""
+    [ "$boot_c" != "$boot_cmd" ] && boot_arg=${boot_c#*:}
+    command -v "$boot_cmd" >/dev/null 2>&1 || continue
+    # shellcheck disable=SC2086
+    if "$boot_cmd" $boot_arg -m venv "$VENV_DIR" >/dev/null 2>&1; then
+      boot_used="$boot_cmd${boot_arg:+ $boot_arg}"; break
+    fi
+    # a failed attempt must not leave a half-venv for the next interpreter to trip on
+    [ "$venv_preexisted" -eq 0 ] && rm -rf "$VENV_DIR"
+  done
+  boot_bindir=""; [ -n "$boot_used" ] && boot_bindir=$(venv_bindir "$VENV_DIR" 2>/dev/null) || boot_bindir=""
+  boot_py="python"; boot_pip="pip"
+  [ "$boot_bindir" = "Scripts" ] && { boot_py="python.exe"; boot_pip="pip.exe"; }
+  if [ -n "$boot_used" ] && [ -n "$boot_bindir" ] \
+     && [ -x "$VENV_DIR/$boot_bindir/$boot_pip" ] \
+     && "$VENV_DIR/$boot_bindir/$boot_pip" install "headroom-ai[all]" >/dev/null 2>&1 \
+     && [ -x "$VENV_DIR/$boot_bindir/$boot_py" ] \
+     && "$VENV_DIR/$boot_bindir/$boot_py" -c 'import headroom.compress' >/dev/null 2>&1; then
+    say fixed "engine bootstrapped: $boot_used -m venv $VENV_DIR + $boot_bindir/$boot_pip install \"headroom-ai[all]\""
+    PY="$VENV_DIR/$boot_bindir/$boot_py"
   else
-    # never leave a half-created venv behind: its bin/python would pass -x
+    # never leave a half-created venv behind: its python would pass -x
     # checks elsewhere while pip and the headroom package are missing
     [ "$venv_preexisted" -eq 0 ] && rm -rf "$VENV_DIR"
     hint=""
     command -v apt-get >/dev/null 2>&1 \
       && hint=" (on Debian/Ubuntu, python3 -m venv needs the python3-venv package: sudo apt install python3-venv)"
-    say FAIL "engine bootstrap failed — try by hand: python3 -m venv $VENV_DIR && $VENV_DIR/bin/pip install \"headroom-ai[all]\"$hint"
+    say FAIL "engine bootstrap failed (tried python3, python, py -3) — by hand: python3 -m venv $VENV_DIR && $VENV_DIR/bin/pip install \"headroom-ai[all]\"$hint"
   fi
 elif [ "$HCAT_PY_BROKEN" -eq 1 ]; then
   say fixable "engine python not found — HCAT_PYTHON is set but broken ($HCAT_PYTHON); unset it or point it at a working python (--fix refuses to bootstrap while it is set)"
 else
-  say fixable "engine python not found — --fix creates $VENV_DIR and pip-installs headroom-ai"
+  say fixable "engine python not found — --fix creates $VENV_DIR (python3/python/py -3 -m venv) and pip-installs headroom-ai"
 fi
 
 # --- 3. bin/hcat + a real smoke compression of a generated ~26 KB JSON
 HCAT="$PLUGIN_ROOT/bin/hcat"
 if [ ! -x "$HCAT" ]; then
   say FAIL "bin/hcat missing or not executable ($HCAT)"
-elif [ -z "$PY" ]; then
+elif [ -z "$PY" ] || [ -n "$boot_used" ]; then
   # engine absent at detection time — even if --fix just bootstrapped it, a
   # stubbed/new venv is smoke-tested on the next doctor run, not this one
   say skip "hcat smoke (engine missing — fix the engine, then re-run the doctor)"
