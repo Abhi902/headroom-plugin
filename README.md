@@ -138,8 +138,8 @@ For the curious — after the Quickstart, here is where everything lives:
 |---|---|---|
 | Dangi, the hcat gate, session-probe, the session ledger | `hooks/hooks.json` inside the plugin | auto-registered while the plugin is enabled (SessionStart, PreToolUse, PostToolUse, Stop, SessionEnd) |
 | `hcat` | `bin/hcat` inside the plugin | on Claude's Bash PATH automatically |
-| headroom MCP registration | `.mcp.json` inside the plugin | bundled; the launcher finds your engine |
-| headroom engine (Python) | `~/.headroom-venv` (or your own install) | the doctor bootstraps it with your consent |
+| headroom MCP registration | `.mcp.json` inside the plugin | bundled; spawns `headroom mcp serve` by name — the doctor makes sure `headroom` is on PATH |
+| headroom engine (Python) | `~/.headroom-venv` (or your own install: pip, pipx, uv) | the doctor bootstraps it with your consent and shims `headroom` into `~/.local/bin` |
 | status line | `statusLine` in `~/.claude/settings.json`, pointing at a copy of `scripts/statusline.sh` at `~/.claude/headroom-statusline.sh` (with its `attribution.jq` + `headroom-state.sh` deps in `~/.claude/lib/`) | **the one manual step** — the doctor writes it for you (merge-aware: an existing custom status line is kept and backed up under `_headroomStatusLineBackup`), and provisions the `lib/` deps the badge needs to count savings (v2.7.1) |
 
 If you'd rather wire the status line by hand, the merge-aware installer lives in `skills/headroom-usage-indicator/SKILL.md`; the standalone entry it writes boils down to (with your real home directory in place of `/Users/you` — a `~` inside the quoted path would never be expanded):
@@ -164,6 +164,18 @@ New versions arrive through the plugin marketplace:
 The hooks, `hcat`, and the MCP definition update with the plugin — nothing to re-copy. The one exception is the status-line script, which runs from a copy at `~/.claude/headroom-statusline.sh` (plus its `~/.claude/lib/` deps): if a release changes it, ask Claude to run the doctor once and it refreshes the copy and the deps. **Coming from v2.7.0 or earlier, run `/headroom-usage-indicator:doctor --fix` once after updating** — earlier installs never provisioned the badge's `lib/` deps, so it was stuck reporting zero savings until you do ([#2](https://github.com/Abhi902/headroom-plugin/issues/2), fixed in v2.7.1). Legacy (pre-v2.5) manual installs get none of this for free — every update means re-running the installer, which is one more reason to migrate.
 
 **Coming from v2.7.2 or earlier, run `/headroom-usage-indicator:doctor --fix` once too** — v2.7.3 fixes the bundled MCP registration that never connected (see [above](#the-gauge-and-the-engine)), and `--fix` repairs the already-installed broken copy rather than waiting for the next fresh install.
+
+**Coming from v2.7.4 or earlier, run `/headroom-usage-indicator:doctor --fix` once more** — v2.8 spawns the bundled MCP by its bare name, so you need headroom on PATH. If the doctor bootstrapped your engine into `~/.headroom-venv`, `--fix` shims it into `~/.local/bin` and tells you the one line to add to your shell rc if that directory isn't on PATH yet.
+
+## Windows
+
+Works under **Git for Windows (Git Bash)** — Claude Code runs its hooks and the status line through it, so it is a hard prerequisite (PowerShell-only setups are not supported). Then:
+
+1. `winget install jqlang.jq` and a Python 3.10+ (`winget install Python.Python.3.12`, or `uv`).
+2. Install the plugin as in the Quickstart and run `/headroom-usage-indicator:doctor --fix`. The doctor finds a venv in the `Scripts\` layout, `uv tool install headroom-ai` trampolines and pip's `headroom.exe` launchers, bootstraps a venv with `py -3`/`python` if nothing is installed, shims `headroom.exe` into `%USERPROFILE%\.local\bin`, and writes the status line as `"C:\…\Git\bin\bash.exe" "C:\Users\you\.claude\headroom-statusline.sh"`.
+3. If the doctor ends with *`…\.local\bin is not on PATH`*, add that directory to your user **Path** (Settings → System → About → Advanced system settings → Environment Variables) and restart Claude Code. Installing the engine with `uv tool install headroom-ai` or `pipx` instead puts `headroom` on PATH for you.
+
+`hcat` output is UTF-8 on every platform (`PYTHONIOENCODING=utf-8`). Desktop notifications from Dangi are macOS/Linux only for now. CI runs the resolver, `hcat`, the doctor and a shell-less MCP spawn on a real `windows-latest` runner — what it cannot run is Claude Code itself; see [#9](https://github.com/Abhi902/headroom-plugin/issues/9).
 
 ## Uninstall
 
@@ -231,7 +243,7 @@ If you can't (or won't) use the plugin marketplace, the copy-everything-to-`~/.c
 Two honest caveats about the legacy flow:
 
 - **`hcat` is NOT on Claude's PATH** in a legacy install — the "on PATH" convenience only exists while the plugin is enabled. Claude must invoke it by full path: `~/.claude/hcat <file>`. The gate is install-aware: in a legacy layout its deny message cites that full sibling path (`~/.claude/hcat "<path>"`), and the bare-`hcat`/on-PATH wording appears only for plugin installs.
-- You must also install and register the **headroom engine and MCP server yourself** (→ https://github.com/headroomlabs-ai/headroom), and you need `jq` (`brew install jq` or `apt install jq`).
+- You must also install the **headroom engine** yourself (→ https://github.com/headroomlabs-ai/headroom) — the plugin's `.mcp.json` spawns `headroom mcp serve` by name, so it must be on PATH — and you need `jq` (`brew install jq` or `apt install jq`).
 
 Do **not** run the legacy installer if the plugin is installed — you'd register every hook twice.
 
@@ -241,9 +253,9 @@ Do **not** run the legacy installer if the plugin is installed — you'd registe
 - `skills/doctor/SKILL.md` — the doctor: checks `jq`, the engine, the MCP, the hooks, the status line, and ambient-health state; fixes what you consent to, including legacy-install and project-settings cleanup.
 - `hooks/hooks.json` — plugin-native registration for session-probe (SessionStart), the hcat gate (PreToolUse), Dangi (PostToolUse), and the session ledger (Stop, SessionEnd).
 - `bin/hcat` — compress-at-the-source, on Claude's PATH while the plugin is enabled; falls back to a lossless TOON-lite (jq-only) rendering when the Python engine is absent.
-- `scripts/` — `statusline.sh`, `dangi-hook.sh`, `hcat-gate.sh`, `session-probe.sh`, `ledger-hook.sh`, `doctor.sh`, `mcp-launcher.sh` (the working parts), plus `scripts/lib/` (`attribution.jq`, `headroom-state.sh` — shared deps the installer copies next to the status-line script).
+- `scripts/` — `statusline.sh`, `dangi-hook.sh`, `hcat-gate.sh`, `session-probe.sh`, `ledger-hook.sh`, `doctor.sh` (the working parts), plus `scripts/lib/` (`attribution.jq`, `headroom-state.sh`, `engine-resolve.sh` — shared deps the installer copies next to the status-line script).
 - `data/model-prices.json` — the badge's price table as data; adding a model is an edit here, not a code change.
-- `.mcp.json` — bundled headroom MCP server definition (the launcher finds your engine).
+- `.mcp.json` — bundled headroom MCP server definition (`headroom mcp serve`, spawned by name).
 - `test.sh` — the synthetic-transcript test suite; run it from the repo root.
 
 ## License

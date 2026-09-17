@@ -177,6 +177,11 @@ Windows CI (`.github/workflows/test.yml`, new — the repo has no workflows):
      doctor wrote into the sandbox settings.json
      (`"C:\...\bash.exe" "C:\...\headroom-statusline.sh"`) with a fake
      session JSON on stdin; assert a badge is printed.
+- Deviation from the plan above: the Windows job's required gate is
+  `scripts/ci/windows-check.sh` (covering the resolver/hcat/doctor assertions
+  in steps 1, 3, 4), not the full suite; `./test.sh` also runs on that runner
+  but only informationally (`continue-on-error: true`), since some
+  Windows-only fixtures there still `skip` rather than pass outright.
 - Not covered by CI (needs Claude Code on Windows): hooks firing, the real
   status-line spawn, the `/plugin` connected mark — reporter verification.
 
