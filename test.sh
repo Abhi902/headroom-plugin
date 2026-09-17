@@ -1308,7 +1308,12 @@ fi
 exit 0
 EOF
 printf '#!/bin/sh\nexit 0\n' > "$DEB/apt-get"
-chmod +x "$DEB/python3" "$DEB/apt-get"
+# shadow the rest of the bootstrap fallback order (python, py) so a real
+# /usr/bin/python on the runner can't silently succeed where python3 -m venv
+# didn't — same hazard the w4none fixture guards against.
+printf '#!/bin/sh\nexit 1\n' > "$DEB/python"
+printf '#!/bin/sh\nexit 1\n' > "$DEB/py"
+chmod +x "$DEB/python3" "$DEB/apt-get" "$DEB/python" "$DEB/py"
 F6="$REVD/f6"; mkdir -p "$F6/cd"
 doc_settings_wired "$F6/cd" > "$F6/settings.json"
 out=$(env -u HCAT_PYTHON PATH="$DEB:/usr/bin:/bin" DOCTOR_SETTINGS="$F6/settings.json" \
