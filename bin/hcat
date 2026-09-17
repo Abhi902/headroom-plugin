@@ -10,9 +10,11 @@
 # Exit codes: 0 ok · 2 usage/missing file · 3 headroom python not found
 #             4 compression failed
 #
-# Python resolution (first hit wins): $HCAT_PYTHON → sibling "python" of
-# `headroom` on PATH → the `headroom` console script's shebang interpreter
-# (pip --user / pipx layouts ship no sibling python) → ~/.headroom-venv/bin/python.
+# Python resolution lives in scripts/lib/engine-resolve.sh (one definition for
+# every entry point): $HCAT_PYTHON → sibling python of `headroom` on PATH → its
+# shebang interpreter (skipped for MZ/PE launchers) → uv tool dir → ~/.headroom-venv
+# (bin/ or Scripts/ layout). A flat legacy copy without the lib falls back to
+# HCAT_PYTHON / ~/.headroom-venv only.
 
 set -u
 
@@ -25,20 +27,18 @@ _hb="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
 for _sl in "$_hb/../scripts/lib/headroom-state.sh" "$_hb/headroom-state.sh"; do
   [ -f "$_sl" ] && { . "$_sl"; break; }
 done
+# shellcheck disable=SC1090,SC1091
+for _er in "$_hb/../scripts/lib/engine-resolve.sh" "$_hb/engine-resolve.sh"; do
+  [ -f "$_er" ] && { . "$_er"; break; }
+done
 type note_error >/dev/null 2>&1 || note_error() { :; }
-
-shebang_interp() {  # shebang_interp <script> — interpreter path from its #! line
-  local line rest
-  IFS= read -r line < "$1" 2>/dev/null || return 1
-  case $line in '#!'*) ;; *) return 1 ;; esac
-  rest=${line#'#!'}
-  # shellcheck disable=SC2086
-  set -- $rest
-  [ $# -ge 1 ] || return 1
-  case $1 in
-    */env|env) [ $# -ge 2 ] || return 1; command -v "$2" 2>/dev/null ;;
-    *) printf '%s\n' "$1" ;;
-  esac
+type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # partial legacy copy
+  local c
+  if [ -n "${HCAT_PYTHON:-}" ]; then printf '%s\n' "$HCAT_PYTHON"; return 0; fi
+  for c in "${HOME:-}/.headroom-venv/bin/python" "${HOME:-}/.headroom-venv/Scripts/python.exe"; do
+    [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
 }
 
 if [ $# -ne 1 ] || [ -z "${1:-}" ]; then
@@ -51,17 +51,7 @@ if [ ! -f "$FILE" ] || [ ! -r "$FILE" ]; then
   exit 2
 fi
 
-PY=""
-if [ -n "${HCAT_PYTHON:-}" ]; then
-  PY=$HCAT_PYTHON            # explicit override is authoritative — no fallback
-else
-  HR_CLI=$(command -v headroom 2>/dev/null || true)
-  for cand in "${HR_CLI:+$(dirname "$HR_CLI")/python}" \
-              "$([ -n "$HR_CLI" ] && shebang_interp "$HR_CLI")" \
-              "$HOME/.headroom-venv/bin/python"; do
-    if [ -n "$cand" ] && [ -x "$cand" ]; then PY=$cand; break; fi
-  done
-fi
+PY=$(resolve_engine_python) || PY=""
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   # No engine: TOON-lite lossless tier (pure jq) before giving up. A uniform
   # JSON array (same flat keys per row) renders as one header row + CSV-like
@@ -107,7 +97,7 @@ if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   exit 3
 fi
 
-HF_HUB_OFFLINE=1 HEADROOM_UPDATE_CHECK=off exec "$PY" - "$FILE" <<'PYEOF'
+PYTHONIOENCODING=utf-8 PYTHONUTF8=1 HF_HUB_OFFLINE=1 HEADROOM_UPDATE_CHECK=off exec "$PY" - "$FILE" <<'PYEOF'
 import json, os, signal, sys, time
 
 # Mirrors the shell wrapper's STATE_DIR: a fresh last-error file flips the

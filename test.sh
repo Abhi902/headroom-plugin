@@ -2778,6 +2778,27 @@ check_eq "w1: win_path via DOCTOR_CYGPATH" 'C:\fake\x.sh' "$(DOCTOR_CYGPATH="$W/
 check_eq "w1: unix_path via DOCTOR_CYGPATH" '/c/fake/C:\x.sh' "$(DOCTOR_CYGPATH="$W/cygpath" er unix_path 'C:\x.sh')"
 check_eq "w1: win_path passthrough without cygpath" "/tmp/x.sh" "$(unset DOCTOR_CYGPATH; PATH="/usr/bin:/bin" er win_path /tmp/x.sh)"
 
+# w2. hcat: Windows venv layout resolved; exec env is UTF-8 safe
+W2="$W/w2"; mkdir -p "$W2/venv/Scripts" "$W2/home"
+# a fake python.exe that prints the env vars hcat is supposed to set, then its args
+cat > "$W2/venv/Scripts/python.exe" <<'W2EOF'
+#!/bin/sh
+echo "ioenc=${PYTHONIOENCODING:-unset} utf8=${PYTHONUTF8:-unset} args=$*"
+W2EOF
+chmod +x "$W2/venv/Scripts/python.exe"
+printf '{"k":1}' > "$W2/tiny.json"
+out=$(env -u HCAT_PYTHON HOME="$W2/home" DOCTOR_VENV_DIR="$W2/venv" PATH="/usr/bin:/bin" bash "$HCAT" "$W2/tiny.json" 2>&1); rc=$?
+check "w2: hcat resolves Scripts/python.exe" "args=- $W2/tiny.json" "$out"
+check "w2: hcat sets PYTHONIOENCODING=utf-8" "ioenc=utf-8" "$out"
+check "w2: hcat sets PYTHONUTF8=1"           "utf8=1"      "$out"
+check_eq "w2: hcat exit 0" "0" "$rc"
+# the legacy flat layout (no lib/ next to hcat) still resolves the plain venv
+W2L="$W/w2legacy"; mkdir -p "$W2L/home/.headroom-venv/bin"
+cp "$HCAT" "$W2L/hcat"; chmod +x "$W2L/hcat"
+printf '#!/bin/sh\necho "legacy-py $*"\n' > "$W2L/home/.headroom-venv/bin/python"; chmod +x "$W2L/home/.headroom-venv/bin/python"
+out=$(env -u HCAT_PYTHON -u DOCTOR_VENV_DIR HOME="$W2L/home" PATH="/usr/bin:/bin" bash "$W2L/hcat" "$W2/tiny.json" 2>&1)
+check "w2: legacy flat hcat (no lib) still finds ~/.headroom-venv" "legacy-py" "$out"
+
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
 if command -v shellcheck >/dev/null 2>&1; then
