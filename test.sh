@@ -2711,15 +2711,15 @@ cat > "$W/cygpath" <<'CYGEOF'
 #!/bin/sh
 case $1 in
   -w) printf '%s\n' "C:\\fake\\$(basename "$2")";;
-  -u) printf '%s\n' "${CYGPATH_UNIX_DIR:-/c/fake}/$(basename "$2")";;
+  -u) p=$(printf '%s' "$2" | tr '\\' '/'); printf '%s\n' "${CYGPATH_UNIX_DIR:-/c/fake}/$(basename "$p")";;
 esac
 CYGEOF
 chmod +x "$W/cygpath"
 check_eq "w1: win_path via DOCTOR_CYGPATH" 'C:\fake\x.sh' "$(DOCTOR_CYGPATH="$W/cygpath" er win_path /tmp/x.sh)"
-# NOTE: basename() only splits on "/", never "\" — 'C:\x.sh' has no "/" so it
-# passes through basename unchanged; expected value corrected accordingly
-# (see task-1-report.md).
-check_eq "w1: unix_path via DOCTOR_CYGPATH" '/c/fake/C:\x.sh' "$(DOCTOR_CYGPATH="$W/cygpath" er unix_path 'C:\x.sh')"
+# real cygpath -u splits backslash-separated Windows paths natively; the stub
+# normalizes "\" to "/" before basename() so it does the same (basename()
+# itself only ever splits on "/").
+check_eq "w1: unix_path via DOCTOR_CYGPATH" '/c/fake/x.sh' "$(DOCTOR_CYGPATH="$W/cygpath" er unix_path 'C:\x.sh')"
 check_eq "w1: win_path passthrough without cygpath" "/tmp/x.sh" "$(unset DOCTOR_CYGPATH; PATH="/usr/bin:/bin" er win_path /tmp/x.sh)"
 
 # w2. hcat: Windows venv layout resolved; exec env is UTF-8 safe

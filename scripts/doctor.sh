@@ -471,11 +471,7 @@ else
       # shellcheck disable=SC2088 # matching a LITERAL ~ the shell never expanded — this just structurally validates the token shape
       case $sl_tok in
         "~/"*headroom-statusline.sh | /*headroom-statusline.sh) ;;
-        [A-Za-z]:[\\/]*headroom-statusline.sh)
-          # cygpath -u expects (and correctly splits) forward slashes; a
-          # backslash-separated Windows path has no "/" for it to anchor on,
-          # so normalize separators before the conversion.
-          sl_tok=$(unix_path "$(printf '%s' "$sl_tok" | tr '\\' '/')") ;;
+        [A-Za-z]:[\\/]*headroom-statusline.sh) sl_tok=$(unix_path "$sl_tok") ;;
         *) continue ;;
       esac
       sl_cand=$sl_tok
@@ -581,7 +577,11 @@ else
       "$HOME"/*) sl_disp="~${sl_path#"$HOME"}" ;;
       *)         sl_disp=$sl_path ;;
     esac
-    # same decision + command template as the SKILL.md installer python
+    # same merge DECISION as the SKILL.md installer python (keep an existing
+    # non-headroom command under _headroomStatusLineBackup, chain it ahead of
+    # the badge) -- but the badge command itself comes from sl_hr_cmd, not a
+    # hardcoded `bash "<path>"`: POSIX gets `bash "<path>"`, Windows gets
+    # `"<bash.exe>" "<C:\...>"`. The SKILL.md installer stays POSIX-only.
     sl_merge_jq=$(cat <<'JQEOF'
 (._headroomStatusLineBackup // null) as $bak
 | (.statusLine // null) as $ex
