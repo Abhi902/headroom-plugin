@@ -79,10 +79,11 @@ existing `HF_HUB_OFFLINE=1 HEADROOM_UPDATE_CHECK=off`.
 - `.mcp.json`: `"command": "headroom", "args": ["mcp", "serve"]`; env keeps
   `HEADROOM_UPDATE_CHECK=off`, `HF_HUB_OFFLINE=1`.
 - Delete `scripts/mcp-launcher.sh`; update README/SKILL.md references.
-- Doctor check 4b: `.mcp.json` parses, names server `headroom` with a bare
-  `command` (no path separators, no `${CLAUDE_PLUGIN_ROOT}`), and
-  `command -v headroom` resolves. The quoted-command repair from v2.7.3 stays
-  only as a FAIL message for a stale cache copy (nothing left to unquote).
+- Doctor check 4b owns only the file's shape: `.mcp.json` parses and names
+  server `headroom` with a bare `command` (no path separators, no
+  `${CLAUDE_PLUGIN_ROOT}`, no quotes); anything else is FAIL (a stale cache
+  copy of an older release). Whether that bare name resolves is check 2b's
+  job, so a PATH problem is reported exactly once.
 - New check 2b "headroom CLI on PATH", after engine resolution:
   - engine resolved AND `command -v headroom` resolves → ok.
   - engine resolved, CLI not on PATH → `fixable`. `--fix`: shim
