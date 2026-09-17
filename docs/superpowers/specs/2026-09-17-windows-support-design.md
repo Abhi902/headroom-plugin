@@ -37,8 +37,12 @@ status-line wiring all Unix-only).
 3. **Git Bash is a documented Windows prerequisite.** Without it Claude Code
    runs hooks under PowerShell and none of ours can work. PowerShell-only
    installs are out of scope.
-4. **Verification:** unit fixtures on macOS simulate every Windows layout; the
-   issue reporter verifies on real Windows from the PR branch before the tag.
+4. **Verification:** unit fixtures on macOS simulate every Windows layout; a
+   `windows-latest` GitHub Actions job (repo is public, runner is free)
+   exercises real venv/pip/uv layouts, hcat UTF-8, doctor --fix, a shell-less
+   MCP spawn proxy and the status-line command shape; the issue reporter
+   verifies Claude Code itself on real Windows from the PR branch before the
+   tag.
 
 ## Section 1 — shared engine resolver
 
@@ -146,6 +150,35 @@ test.sh additions (TDD: each fixture red first):
 - docs parity: SKILL.md lists the shim mutation; README has no
   `mcp-launcher.sh` reference.
 - shellcheck `--severity=warning` clean.
+
+Windows CI (`.github/workflows/test.yml`, new — the repo has no workflows):
+- `ubuntu-latest` + `macos-latest`: `./test.sh` (shellcheck installed) — the
+  existing suite becomes a PR gate for the first time.
+- `windows-latest`, steps run in Git Bash (`shell: bash`), real engine:
+  1. `pip install "headroom-ai[all]"` into a real `python -m venv` → asserts
+     the `Scripts\python.exe` layout and that pip's `headroom.exe` starts
+     with `MZ`; `pip install uv && uv tool install headroom-ai` → asserts the
+     trampoline layout under `uv tool dir`. Both are exercised by
+     `resolve_engine_python` / `resolve_headroom_cli` for real, not stubbed.
+  2. `./test.sh` under Git Bash (Windows-only fixtures may `skip` when a
+     stub cannot be created; the suite must stay green there).
+  3. hcat on a JSON file containing non-ASCII strings (e.g. "naïve ✓ 日本")
+     must exit 0 and print a receipt — the UTF-8 regression.
+  4. `doctor.sh --fix` against a temp `HOME`/`DOCTOR_*` sandbox with the
+     real venv → ok lines for engine, shim, status line; second run
+     idempotent.
+  5. `spawn-probe.mjs` (repo `scripts/ci/`, test-only): Node
+     `child_process.spawn("headroom", ["mcp","serve"], {shell:false})` from
+     PowerShell/cmd context, writes an MCP `initialize` request on stdin and
+     asserts a JSON-RPC result within 20 s; negative control: spawning a
+     `.sh` file the same way must fail. Proxy for Claude Code's shell-less
+     stdio spawn — not Claude Code itself; the README says so.
+  6. Status line from PowerShell (`shell: pwsh`): run exactly the command
+     doctor wrote into the sandbox settings.json
+     (`"C:\...\bash.exe" "C:\...\headroom-statusline.sh"`) with a fake
+     session JSON on stdin; assert a badge is printed.
+- Not covered by CI (needs Claude Code on Windows): hooks firing, the real
+  status-line spawn, the `/plugin` connected mark — reporter verification.
 
 Docs: README "Windows" section (Git Bash required; jq via `winget install
 jqlang.jq`; `uv tool install "headroom-ai[all]"` or `pipx` recommended because
