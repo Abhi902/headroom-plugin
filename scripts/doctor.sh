@@ -19,6 +19,10 @@
 #                        also rewrites statusLine.command to the absolute path
 #                        (.bak first)
 #   * (removed in v2.8) quoted mcp cmd — .mcp.json now names the bare `headroom`; nothing to rewrite
+#   * headroom on PATH — shim the resolved `headroom` CLI into ~/.local/bin
+#                        (symlink; a copy of headroom.exe on Windows) so the
+#                        bundled .mcp.json's bare command resolves; verified
+#                        afterwards, FAIL with the PATH snippet if it still doesn't
 #   * stale copies     — delete pre-plugin script copies in ~/.claude, but only
 #                        once plugin-native hooks are confirmed and no legacy
 #                        hook entries remain
@@ -42,6 +46,7 @@ PLUGIN_ROOT=$(cd "$SELF_DIR/.." && pwd)
 SETTINGS=${DOCTOR_SETTINGS:-$HOME/.claude/settings.json}
 CLAUDE_DIR=${DOCTOR_CLAUDE_DIR:-$HOME/.claude}
 VENV_DIR=${DOCTOR_VENV_DIR:-$HOME/.headroom-venv}
+SHIM_DIR=${DOCTOR_SHIM_DIR:-${HOME:-}/.local/bin}
 
 # Ambient-health state (see statusline.sh): checked before the run because the
 # hcat smoke test itself clears engine errors on a working compression. Source
@@ -183,6 +188,48 @@ elif [ "$HCAT_PY_BROKEN" -eq 1 ]; then
   say fixable "engine python not found — HCAT_PYTHON is set but broken ($HCAT_PYTHON); unset it or point it at a working python (--fix refuses to bootstrap while it is set)"
 else
   say fixable "engine python not found — --fix creates $VENV_DIR (python3/python/py -3 -m venv) and pip-installs headroom-ai"
+fi
+
+# --- 2b. `headroom` on PATH — .mcp.json spawns the bare name (no shell, no launcher)
+shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the shim path
+  mkdir -p "$SHIM_DIR" 2>/dev/null || return 1
+  if is_windows; then
+    cp "$1" "$SHIM_DIR/headroom.exe" 2>/dev/null && printf '%s' "$SHIM_DIR/headroom.exe"
+  else
+    ln -sfn "$1" "$SHIM_DIR/headroom" 2>/dev/null && printf '%s' "$SHIM_DIR/headroom"
+  fi
+}
+path_hint() {  # the one line the user must run/do to put SHIM_DIR on PATH
+  local rc
+  if is_windows; then
+    printf 'add %%USERPROFILE%%\\.local\\bin to your user Path (Settings → System → About → Advanced system settings → Environment Variables), then restart Claude Code'
+  else
+    # shellcheck disable=SC2088  # literal ~ is intentional — a display string, not a path to expand
+    case "${SHELL:-}" in *zsh) rc="~/.zshrc" ;; *) rc="~/.bashrc" ;; esac
+    printf "run: echo 'export PATH=\"%s:\$PATH\"' >> %s — then restart Claude Code" "$SHIM_DIR" "$rc"
+  fi
+}
+if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
+  say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
+elif cli_res=$(resolve_headroom_cli); then
+  if [ "$FIX" -eq 1 ]; then
+    if shim=$(shim_headroom "$cli_res"); then
+      hash -r 2>/dev/null
+      if command -v headroom >/dev/null 2>&1; then
+        say fixed "headroom shimmed to $shim (resolves on PATH)"
+      else
+        say FAIL "headroom shimmed to $shim but $SHIM_DIR is not on PATH — $(path_hint)"
+      fi
+    else
+      say FAIL "could not shim $cli_res into $SHIM_DIR"
+    fi
+  else
+    say fixable "headroom CLI not on PATH (engine at $cli_res) — the bundled MCP spawns \`headroom\` by name; --fix shims it into $SHIM_DIR"
+  fi
+elif [ -z "$PY" ]; then
+  say skip "headroom CLI on PATH (no engine yet — fix the engine first)"
+else
+  say FAIL "engine python found ($PY) but no \`headroom\` CLI next to it — reinstall: $PY -m pip install \"headroom-ai[all]\""
 fi
 
 # --- 3. bin/hcat + a real smoke compression of a generated ~26 KB JSON

@@ -639,6 +639,11 @@ DOCTOR="$ROOT/scripts/doctor.sh"
 # hermetic: the doctor scans $PWD/.claude by default (v2.7) — point it at an
 # empty dir so the developer's real project settings never leak into the suite
 export DOCTOR_PROJECT_DIR="$TMP/no-proj"
+# hermetic (v2.8 issue #9, check 2b): the default shim dir is the real
+# ~/.local/bin — override it everywhere so a --fix run in this suite can never
+# write a real symlink into the developer's actual home directory. Individual
+# w6 fixtures below override this per-call to exercise the real default logic.
+export DOCTOR_SHIM_DIR="$TMP/shim-default"
 MCP_JSON="$ROOT/.mcp.json"
 DOCD="$TMP/doc"; mkdir -p "$DOCD"
 
@@ -687,6 +692,14 @@ echo "launched: $* update=$HEADROOM_UPDATE_CHECK offline=$HF_HUB_OFFLINE"
 FENGEOF
 chmod +x "$FENG/python" "$FENG/headroom"
 
+# headroom-only PATH entry (no sibling python) for fixtures whose engine-python
+# resolution must actually exercise the --fix bootstrap path rather than
+# short-circuit through 2b's PATH-sibling candidate ($FENG has a python sibling
+# and would hijack that resolution order); putting this on PATH just makes
+# check 2b's own `command -v headroom` succeed directly (issue #9)
+AMBIENT_HR="$DOCD/ambient-hr"; mkdir -p "$AMBIENT_HR"
+printf '#!/bin/sh\nexit 0\n' > "$AMBIENT_HR/headroom"; chmod +x "$AMBIENT_HR/headroom"
+
 # 32a. healthy read-only run against the real engine
 if [ -n "$HEADROOM_PY" ]; then
   CD1="$DOCD/cd1"; mkdir -p "$CD1/lib"
@@ -696,7 +709,10 @@ if [ -n "$HEADROOM_PY" ]; then
   cp "$ROOT/scripts/statusline.sh" "$CD1/headroom-statusline.sh"
   cp "$ROOT/scripts/lib/attribution.jq"    "$CD1/lib/"
   cp "$ROOT/scripts/lib/headroom-state.sh" "$CD1/lib/"
-  out=$(HCAT_PYTHON="$HEADROOM_PY" DOCTOR_SETTINGS="$S1" DOCTOR_CLAUDE_DIR="$CD1" \
+  # $FENG on PATH gives check 2b a real `headroom` to resolve (this Mac has none
+  # ambient); HCAT_PYTHON is authoritative for check 2 so this can't hijack the
+  # real-engine resolution being tested here (issue #9)
+  out=$(HCAT_PYTHON="$HEADROOM_PY" PATH="$FENG:$PATH" DOCTOR_SETTINGS="$S1" DOCTOR_CLAUDE_DIR="$CD1" \
         DOCTOR_VENV_DIR="$DOCD/none" bash "$DOCTOR" 2>&1); rc=$?
   check "doctor: healthy engine"          "engine python"   "$out"
   check "doctor: healthy hcat smoke"      "hcat smoke"      "$out"
@@ -757,7 +773,9 @@ check "doctor: foreign statusLine preserved by --fix" "my-custom-line.sh" \
 CD4="$DOCD/cd4"; mkdir -p "$CD4"
 touch "$CD4/dangi-hook.sh" "$CD4/hcat-gate.sh" "$CD4/hcat"
 S4="$DOCD/s4.json"; doc_settings_legacy "$CD4" > "$S4"
-out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" \
+# $AMBIENT_HR (headroom, no python sibling) keeps check 2b clean ("ok") without
+# hijacking the bootstrap-from-scratch resolution this fixture is testing (issue #9)
+out=$(env -u HCAT_PYTHON PATH="$AMBIENT_HR:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" \
       DOCTOR_CLAUDE_DIR="$CD4" DOCTOR_VENV_DIR="$DOCD/venv-boot" bash "$DOCTOR" --fix 2>&1); rc=$?
 check "fix: reports fixed"        "fixed"   "$out"
 check_eq "fix: exit 0"               "0"       "$rc"
@@ -789,7 +807,7 @@ fi
 check_eq "fix: one timestamped backup" "1" "$(ls "$S4".bak.* 2>/dev/null | wc -l | tr -d ' ')"
 # idempotency: a second --fix run must change nothing and re-bootstrap nothing
 cp "$S4" "$DOCD/s4.after1"
-out2=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" \
+out2=$(env -u HCAT_PYTHON PATH="$AMBIENT_HR:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" \
        DOCTOR_CLAUDE_DIR="$CD4" DOCTOR_VENV_DIR="$DOCD/venv-boot" bash "$DOCTOR" --fix 2>&1)
 if cmp -s "$S4" "$DOCD/s4.after1"; then
   echo "ok - fix: second run leaves settings unchanged"; PASS=$((PASS+1))
@@ -1645,7 +1663,10 @@ check_absent "f7q: a \$HOME-variable-prefixed wiring is not false-FAILed by a mi
 F7Q2="$REVD/f7q2"; mkdir -p "$F7Q2/cd"
 # no canonical copy on disk at all — only the file the command actually names
 printf '%s\n' '{"statusLine":{"type":"command","command":"bash \"~/.claude/headroom-statusline.sh.bak\"","refreshInterval":1}}' > "$F7Q2/settings.json"
-out=$(HOME="$F7Q2" HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7Q2/settings.json" \
+# $FENG on PATH keeps check 2b "ok" (HCAT_PYTHON is authoritative here, so this
+# can't change which statusLine-wiring candidate check 7 resolves) — this
+# fixture asserts no "fixable" anywhere in the output (issue #9)
+out=$(HOME="$F7Q2" HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7Q2/settings.json" \
       DOCTOR_CLAUDE_DIR="$F7Q2/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" 2>&1)
 check_absent "f7q: a suffixed filename is not truncated into a fabricated fixable claim about the canonical name" \
              "fixable" "$out"
@@ -2098,7 +2119,9 @@ if [ -n "$HEADROOM_PY" ]; then
   printf '%s engine stale2\n' "$(date +%s)" > "$HEADROOM_STATE_DIR/last-error"
   CDH="$TMP/doc-health"; mkdir -p "$CDH"
   SH="$TMP/doc-health-s.json"; doc_settings_wired "$CDH" > "$SH"
-  out=$(HCAT_PYTHON="$HEADROOM_PY" DOCTOR_SETTINGS="$SH" DOCTOR_CLAUDE_DIR="$CDH" \
+  # $FENG on PATH keeps check 2b "ok" (real headroom isn't on this Mac's ambient
+  # PATH) so the run stays fully clean and block 9 actually clears (issue #9)
+  out=$(HCAT_PYTHON="$HEADROOM_PY" PATH="$FENG:$PATH" DOCTOR_SETTINGS="$SH" DOCTOR_CLAUDE_DIR="$CDH" \
         DOCTOR_VENV_DIR="$TMP/doc-none" bash "$DOCTOR" 2>&1)
   check "health: doctor reports clearing" "cleared recorded failure" "$out"
   if [ -f "$HEADROOM_STATE_DIR/last-error" ]; then
@@ -2778,6 +2801,51 @@ check "w4: no interpreter → FAIL names python3/python/py -3" "python3, python,
 out=$(HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" DOCTOR_CLAUDE_DIR="$W4/cd" \
       DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" 2>&1)
 check "w5: 4b ok for bare command" ".mcp.json spawns \`headroom mcp serve\` by name" "$out"
+
+# w6. check 2b: shim + verify
+W6="$W/w6"; mkdir -p "$W6/cd" "$W6/venv/bin" "$W6/shim"
+printf '#!/bin/sh\nexit 0\n' > "$W6/venv/bin/python";   chmod +x "$W6/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W6/venv/bin/headroom"; chmod +x "$W6/venv/bin/headroom"
+S6="$W6/s.json"; doc_settings_wired "$W6/cd" > "$S6"
+# engine found in the venv, headroom NOT on PATH → fixable
+out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6" DOCTOR_CLAUDE_DIR="$W6/cd" \
+      DOCTOR_VENV_DIR="$W6/venv" DOCTOR_SHIM_DIR="$W6/shim" bash "$DOCTOR" 2>&1)
+check "w6: CLI off PATH is fixable" "headroom CLI not on PATH (engine at $W6/venv/bin/headroom)" "$out"
+# --fix with the shim dir ON PATH → fixed, shim is a symlink to the venv CLI
+out=$(env -u HCAT_PYTHON PATH="$W6/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6" DOCTOR_CLAUDE_DIR="$W6/cd" \
+      DOCTOR_VENV_DIR="$W6/venv" DOCTOR_SHIM_DIR="$W6/shim" bash "$DOCTOR" --fix 2>&1)
+check "w6: --fix shims and verifies" "headroom shimmed to $W6/shim/headroom (resolves on PATH)" "$out"
+check_eq "w6: shim is a symlink to the venv CLI" "$W6/venv/bin/headroom" "$(readlink "$W6/shim/headroom")"
+# second run: ok, no change
+out=$(env -u HCAT_PYTHON PATH="$W6/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6" DOCTOR_CLAUDE_DIR="$W6/cd" \
+      DOCTOR_VENV_DIR="$W6/venv" DOCTOR_SHIM_DIR="$W6/shim" bash "$DOCTOR" --fix 2>&1)
+check "w6: second --fix reports ok" "headroom CLI on PATH ($W6/shim/headroom)" "$out"
+check_absent "w6: second --fix does not re-shim" "headroom shimmed" "$out"
+# --fix with the shim dir NOT on PATH → FAIL with the exact snippet
+W6N="$W/w6nopath"; mkdir -p "$W6N/cd" "$W6N/shim"
+S6N="$W6N/s.json"; doc_settings_wired "$W6N/cd" > "$S6N"
+out=$(env -u HCAT_PYTHON SHELL=/bin/zsh PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6N" DOCTOR_CLAUDE_DIR="$W6N/cd" \
+      DOCTOR_VENV_DIR="$W6/venv" DOCTOR_SHIM_DIR="$W6N/shim" bash "$DOCTOR" --fix 2>&1); rc=$?
+check "w6: unresolved after shim is FAIL" "but $W6N/shim is not on PATH" "$out"
+check "w6: FAIL carries the zsh snippet" "export PATH=\"$W6N/shim:\$PATH\"' >> ~/.zshrc" "$out"
+check_eq "w6: doctor exits 1 on that FAIL" "1" "$rc"
+# Windows: the shim is a COPY named headroom.exe and the hint names the user Path
+W6W="$W/w6win"; mkdir -p "$W6W/cd" "$W6W/venv/Scripts" "$W6W/shim"
+printf '#!/bin/sh\nexit 0\n' > "$W6W/venv/Scripts/python.exe";  chmod +x "$W6W/venv/Scripts/python.exe"
+printf '#!/bin/sh\necho hr\n' > "$W6W/venv/Scripts/headroom.exe"; chmod +x "$W6W/venv/Scripts/headroom.exe"
+S6W="$W6W/s.json"; doc_settings_wired "$W6W/cd" > "$S6W"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6W" DOCTOR_CLAUDE_DIR="$W6W/cd" \
+      DOCTOR_VENV_DIR="$W6W/venv" DOCTOR_SHIM_DIR="$W6W/shim" bash "$DOCTOR" --fix 2>&1)
+if [ -f "$W6W/shim/headroom.exe" ] && [ ! -L "$W6W/shim/headroom.exe" ]; then
+  echo "ok - w6: windows shim is a copy named headroom.exe"; PASS=$((PASS+1))
+else
+  echo "FAIL - w6: windows shim is a copy named headroom.exe"; FAIL=$((FAIL+1))
+fi
+check "w6: windows hint names the user Path" '%USERPROFILE%\.local\bin' "$out"
+# no engine at all → skip (check 2 already says fixable)
+out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6N" DOCTOR_CLAUDE_DIR="$W6N/cd" \
+      DOCTOR_VENV_DIR="$W/none" DOCTOR_SHIM_DIR="$W6N/shim2" bash "$DOCTOR" 2>&1)
+check "w6: no engine → CLI check skips" "headroom CLI on PATH (no engine yet" "$out"
 
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
