@@ -17,6 +17,18 @@ here="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
 for _sl in "$here/lib/headroom-state.sh" "$here/headroom-state.sh"; do
   [ -f "$_sl" ] && { . "$_sl"; break; }
 done
+# shellcheck disable=SC1090,SC1091
+for _er in "$here/lib/engine-resolve.sh" "$here/engine-resolve.sh"; do
+  [ -f "$_er" ] && { . "$_er"; break; }
+done
+type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # partial legacy copy
+  local c
+  if [ -n "${HCAT_PYTHON:-}" ]; then printf '%s\n' "$HCAT_PYTHON"; return 0; fi
+  for c in "${HOME:-}/.headroom-venv/bin/python" "${HOME:-}/.headroom-venv/Scripts/python.exe"; do
+    [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
 type note_error >/dev/null 2>&1 || note_error() { :; }
 [ -n "${STATE_DIR:-}" ] || STATE_DIR="${HEADROOM_STATE_DIR:-${HOME:-${TMPDIR:-/tmp}}/.claude/headroom-indicator}"
 
@@ -59,12 +71,7 @@ if [ -n "${HCAT_PYTHON:-}" ]; then
     add_problem "HCAT_PYTHON points at a non-executable python ($HCAT_PYTHON) — unset or fix it"
   fi
 else
-  py=""
-  HR_CLI=$(command -v headroom 2>/dev/null || true)
-  [ -n "$HR_CLI" ] && [ -x "$(dirname "$HR_CLI")/python" ] && py="$(dirname "$HR_CLI")/python"
-  [ -z "$py" ] && [ -n "$HR_CLI" ] && py="$HR_CLI"
-  [ -z "$py" ] && [ -x "${HOME:-}/.headroom-venv/bin/python" ] && py="$HOME/.headroom-venv/bin/python"
-  if [ -z "$py" ]; then
+  if ! resolve_engine_python >/dev/null 2>&1 && ! command -v headroom >/dev/null 2>&1; then
     # Never-installed engine is the ordinary red-idle state, not a breakage:
     # say it once at session start, but do not flip the badge to broken.
     add_problem "headroom engine not installed — run /doctor --fix to bootstrap it"

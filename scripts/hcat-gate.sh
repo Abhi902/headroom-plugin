@@ -22,6 +22,18 @@ _here="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
 for _sl in "$_here/lib/headroom-state.sh" "$_here/headroom-state.sh"; do
   [ -f "$_sl" ] && { . "$_sl"; break; }
 done
+# shellcheck disable=SC1090,SC1091
+for _er in "$_here/lib/engine-resolve.sh" "$_here/engine-resolve.sh"; do
+  [ -f "$_er" ] && { . "$_er"; break; }
+done
+type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # partial legacy copy
+  local c
+  if [ -n "${HCAT_PYTHON:-}" ]; then printf '%s\n' "$HCAT_PYTHON"; return 0; fi
+  for c in "${HOME:-}/.headroom-venv/bin/python" "${HOME:-}/.headroom-venv/Scripts/python.exe"; do
+    [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
 type note_error >/dev/null 2>&1 || note_error() { :; }
 type canon_path >/dev/null 2>&1 || canon_path() { printf '%s' "$1"; }
 # Eligibility predicates come from the same lib (one definition shared with
@@ -109,12 +121,7 @@ if [ ! -x "$HCAT" ]; then
   legacy=1
 fi
 [ -x "$HCAT" ] || exit 0
-py=""
-if [ -n "${HCAT_PYTHON:-}" ]; then
-  py="$HCAT_PYTHON"
-elif [ -x "${HOME:-}/.headroom-venv/bin/python" ]; then
-  py="$HOME/.headroom-venv/bin/python"
-fi
+py=$(resolve_engine_python) || py=""
 if [ -n "$py" ]; then
   # A resolved-but-broken engine is a real outage the fail-open would otherwise
   # hide — record it so the badge can show "broken" instead of mimicking idle.

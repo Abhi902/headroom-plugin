@@ -2799,6 +2799,19 @@ printf '#!/bin/sh\necho "legacy-py $*"\n' > "$W2L/home/.headroom-venv/bin/python
 out=$(env -u HCAT_PYTHON -u DOCTOR_VENV_DIR HOME="$W2L/home" PATH="/usr/bin:/bin" bash "$W2L/hcat" "$W2/tiny.json" 2>&1)
 check "w2: legacy flat hcat (no lib) still finds ~/.headroom-venv" "legacy-py" "$out"
 
+# w3. gate + probe see a Scripts\python.exe engine
+W3="$W/w3"; mkdir -p "$W3/venv/Scripts" "$W3/home"
+printf '#!/bin/sh\nexit 0\n' > "$W3/venv/Scripts/python.exe"; chmod +x "$W3/venv/Scripts/python.exe"
+out=$(gate_input "$BIGJSON" w3-g1 | env -u HCAT_PYTHON HOME="$W3/home" DOCTOR_VENV_DIR="$W3/venv" PATH="/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W3/state" bash "$GATE"); rc=$?
+check "w3: gate denies with a Scripts/ engine" "deny" "$out"
+check_eq "w3: gate exit 0" "0" "$rc"
+PROBE="$ROOT/scripts/session-probe.sh"
+out=$(printf '{"session_id":"w3"}' | env -u HCAT_PYTHON HOME="$W3/home" DOCTOR_VENV_DIR="$W3/venv" PATH="/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W3/state" bash "$PROBE"); rc=$?
+check_absent "w3: probe does not call a Scripts/ engine 'not installed'" "engine not installed" "$out"
+check_eq "w3: probe exit 0" "0" "$rc"
+
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
 if command -v shellcheck >/dev/null 2>&1; then
