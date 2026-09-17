@@ -9,7 +9,7 @@ jobs:
       matrix: { os: [ubuntu-latest, macos-latest] }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: deps
         run: |
           if command -v apt-get >/dev/null; then sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck; else brew install jq shellcheck; fi
@@ -20,15 +20,15 @@ jobs:
     env:
       VENV_DIR: ${{ github.workspace }}/.headroom-venv
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       - name: real engine (venv + uv tool)
         run: |
           python -m venv "$VENV_DIR"
           "$VENV_DIR/Scripts/python.exe" -m pip install -q "headroom-ai[all]" || "$VENV_DIR/Scripts/python.exe" -m pip install -q headroom-ai
           "$VENV_DIR/Scripts/python.exe" -c "import headroom.compress; print('engine ok')"
-          pip install -q uv && (uv tool install headroom-ai || echo "uv tool install failed (non-fatal)")
+          (pip install -q uv && uv tool install headroom-ai) || echo "uv install skipped (non-fatal)"
       - name: windows-check (required gate)
         run: VENV_DIR="$(cygpath -u "$VENV_DIR")" bash scripts/ci/windows-check.sh
       - name: MCP spawn probe (shell-less, by name) + negative control
@@ -40,13 +40,18 @@ jobs:
           node scripts/ci/spawn-probe.mjs "$PWD\scripts\session-probe.sh"
           if ($LASTEXITCODE -eq 0) { throw "negative control: a .sh spawned without a shell should NOT work" }
           Write-Host "negative control ok (exit $LASTEXITCODE)"
+          exit 0
       - name: status line runs from PowerShell with the command doctor wrote
         shell: pwsh
         run: |
           $cmd = Get-Content ./statusline.cmd
           Write-Host "command: $cmd"
+          $m = [regex]::Matches($cmd, '"([^"]+)"')
+          $bash = $m[0].Groups[1].Value
+          $script = $m[1].Groups[1].Value
+          if (-not $bash -or -not $script) { throw "could not parse statusLine command: $cmd" }
           $json = '{"transcript_path":"","model":{"id":"claude-opus-4-8"},"session_id":"ci"}'
-          $out = $json | cmd /c $cmd
+          $out = $json | & $bash $script
           Write-Host "badge: $out"
           if (-not $out) { throw "status line printed nothing" }
       - name: full suite (informational on Windows)

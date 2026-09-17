@@ -554,13 +554,13 @@ export HEADROOM_STATE_DIR="$TMP/state-port"
 # (accepts -c, rejects -f like GNU stat does), a fake notify-send that logs its
 # args, and NO osascript anywhere on it.
 LINBIN="$TMP/linbin"; mkdir -p "$LINBIN"
-for t in jq tr wc date mkdir rmdir cat; do
+for t in jq tr wc date mkdir rmdir cat dirname basename grep sed tail head; do
   ln -s "$(command -v "$t")" "$LINBIN/$t"
 done
 cat > "$LINBIN/stat" <<'EOF'
 #!/bin/sh
 case "$1" in
-  -c) shift; exec /usr/bin/stat -f %m "$2" ;;
+  -c) shift; /usr/bin/stat -c %Y "$2" 2>/dev/null || exec /usr/bin/stat -f %m "$2" ;;
   # Faithful to real GNU `stat -f %m FILE`: -f means --file-system there, so it
   # errors on the '%m' operand (stderr) but STILL prints an fs-info block for
   # FILE on stdout, and exits 1 — stdout garbage that poisons $(( now - ... ))

@@ -7,12 +7,22 @@ import { spawn } from "node:child_process";
 const [cmd, ...args] = process.argv.slice(2);
 if (!cmd) { console.error("usage: spawn-probe.mjs <command> [args...]"); process.exit(1); }
 
-const child = spawn(cmd, args, {
-  shell: false,
-  stdio: ["pipe", "pipe", "inherit"],
-  env: { ...process.env, HEADROOM_UPDATE_CHECK: "off", HF_HUB_OFFLINE: "1" },
-});
+let child;
 const done = (code, msg) => { if (msg) console.error(msg); try { child.kill(); } catch {} process.exit(code); };
+
+// On Windows, spawning a non-executable file (e.g. a .sh with no associated
+// interpreter) with shell:false throws SYNCHRONOUSLY (EFTYPE) instead of
+// emitting an async "error" event — catch that path too so it still maps to
+// exit 3 instead of crashing node with an uncaught exception.
+try {
+  child = spawn(cmd, args, {
+    shell: false,
+    stdio: ["pipe", "pipe", "inherit"],
+    env: { ...process.env, HEADROOM_UPDATE_CHECK: "off", HF_HUB_OFFLINE: "1" },
+  });
+} catch (e) {
+  done(3, `spawn error: ${e.code || e.message}`);
+}
 child.on("error", (e) => done(3, `spawn error: ${e.code || e.message}`));
 child.on("exit", (code) => done(2, `server exited early (code ${code})`));
 let buf = "";
