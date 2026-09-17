@@ -2689,13 +2689,103 @@ out=$(gate_input "$nolib_f" nolib-2 | HEADROOM_STATE_DIR="$TMP/nolib-state" HCAT
 check_eq "fix/nolib: gate still exits 0 without lib" "0" "$rc"
 check "fix/nolib: gate still gates .json by extension without lib" "deny" "$out"
 
+# --- 46. v2.8 Windows support (issue #9)
+ER="$ROOT/scripts/lib/engine-resolve.sh"
+er() {  # er <fn> [args] — call a resolver function in a clean subshell
+  ( set -u; . "$ER"; "$@" )
+}
+W="$TMP/w"; mkdir -p "$W"
+
+# w1. is_windows: DOCTOR_OS override wins, OSTYPE next, uname last
+check_eq "w1: DOCTOR_OS=windows → is_windows" "0" "$(DOCTOR_OS=windows er is_windows; echo $?)"
+check_eq "w1: DOCTOR_OS=unix → not windows"   "1" "$(DOCTOR_OS=unix OSTYPE=msys er is_windows; echo $?)"
+check_eq "w1: OSTYPE=msys → is_windows"       "0" "$(unset DOCTOR_OS; OSTYPE=msys er is_windows; echo $?)"
+check_eq "w1: darwin → not windows"           "1" "$(unset DOCTOR_OS; OSTYPE=darwin24 er is_windows; echo $?)"
+
+# w1. venv_bindir: bin/ vs Scripts/ layouts
+W1U="$W/venv-unix"; mkdir -p "$W1U/bin"; printf '#!/bin/sh\nexit 0\n' > "$W1U/bin/python"; chmod +x "$W1U/bin/python"
+W1W="$W/venv-win";  mkdir -p "$W1W/Scripts"
+printf '#!/bin/sh\necho "win-python $*"\n' > "$W1W/Scripts/python.exe"; chmod +x "$W1W/Scripts/python.exe"
+printf '#!/bin/sh\necho "win-headroom $*"\n' > "$W1W/Scripts/headroom.exe"; chmod +x "$W1W/Scripts/headroom.exe"
+check_eq "w1: venv_bindir unix layout"    "bin"     "$(er venv_bindir "$W1U")"
+check_eq "w1: venv_bindir windows layout" "Scripts" "$(er venv_bindir "$W1W")"
+check_eq "w1: venv_bindir empty dir fails" "1"      "$(er venv_bindir "$W" >/dev/null; echo $?)"
+
+# w1. resolve_engine_python: Scripts\python.exe venv found when nothing else is
+out=$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W1W" er resolve_engine_python)
+check_eq "w1: resolver finds Scripts/python.exe" "$W1W/Scripts/python.exe" "$out"
+out=$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W1U" er resolve_engine_python)
+check_eq "w1: resolver finds bin/python" "$W1U/bin/python" "$out"
+check_eq "w1: resolver exits 1 with no engine" "1" \
+  "$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_engine_python >/dev/null; echo $?)"
+
+# w1. HCAT_PYTHON is authoritative even when broken (callers decide what to do)
+check_eq "w1: HCAT_PYTHON verbatim" "/nonexistent/py" \
+  "$(HCAT_PYTHON=/nonexistent/py DOCTOR_VENV_DIR="$W1W" er resolve_engine_python)"
+check_eq "w1: candidates = only HCAT_PYTHON when set" "/nonexistent/py" \
+  "$(HCAT_PYTHON=/nonexistent/py DOCTOR_VENV_DIR="$W1W" er engine_python_candidates)"
+
+# w1. PATH sibling beats venv; python.exe sibling accepted
+W1P="$W/pathbin"; mkdir -p "$W1P"
+printf '#!/bin/sh\nexit 0\n' > "$W1P/headroom"; chmod +x "$W1P/headroom"
+printf '#!/bin/sh\nexit 0\n' > "$W1P/python.exe"; chmod +x "$W1P/python.exe"
+out=$(unset HCAT_PYTHON; PATH="$W1P:/usr/bin:/bin" DOCTOR_VENV_DIR="$W1W" er resolve_engine_python)
+check_eq "w1: python.exe sibling of headroom on PATH wins" "$W1P/python.exe" "$out"
+
+# w1. MZ trampoline (uv / pip-on-Windows launcher): no shebang parse, fall through
+W1M="$W/mzbin"; mkdir -p "$W1M"
+printf 'MZ\220\000\003garbage #!/should/not/be/parsed\n' > "$W1M/headroom"; chmod +x "$W1M/headroom"
+out=$(unset HCAT_PYTHON; PATH="$W1M:/usr/bin:/bin" DOCTOR_VENV_DIR="$W1W" er resolve_engine_python)
+check_eq "w1: MZ trampoline skips shebang, falls to venv" "$W1W/Scripts/python.exe" "$out"
+
+# w1. uv tool dir layout (stub uv prints a dir for `uv tool dir`)
+W1UV="$W/uvtools"; mkdir -p "$W1UV/headroom-ai/Scripts" "$W/uvbin"
+printf '#!/bin/sh\nexit 0\n' > "$W1UV/headroom-ai/Scripts/python.exe"; chmod +x "$W1UV/headroom-ai/Scripts/python.exe"
+printf '#!/bin/sh\nexit 0\n' > "$W1UV/headroom-ai/Scripts/headroom.exe"; chmod +x "$W1UV/headroom-ai/Scripts/headroom.exe"
+printf '#!/bin/sh\n[ "$1" = tool ] && [ "$2" = dir ] && printf "%%s" "%s"\n' "$W1UV" > "$W/uvbin/uv"; chmod +x "$W/uvbin/uv"
+out=$(unset HCAT_PYTHON; PATH="$W/uvbin:/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_engine_python)
+check_eq "w1: uv tool dir python found" "$W1UV/headroom-ai/Scripts/python.exe" "$out"
+out=$(unset HCAT_PYTHON; PATH="$W/uvbin:/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_headroom_cli)
+check_eq "w1: uv tool dir CLI found" "$W1UV/headroom-ai/Scripts/headroom.exe" "$out"
+
+# w1. resolve_headroom_cli: HCAT_PYTHON dir authoritative; venv Scripts/headroom.exe; PATH
+out=$(HCAT_PYTHON="$W1W/Scripts/python.exe" PATH="$W1P:/usr/bin:/bin" er resolve_headroom_cli)
+check_eq "w1: CLI next to HCAT_PYTHON wins over PATH" "$W1W/Scripts/headroom.exe" "$out"
+out=$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W1W" er resolve_headroom_cli)
+check_eq "w1: CLI from venv Scripts/" "$W1W/Scripts/headroom.exe" "$out"
+out=$(unset HCAT_PYTHON; PATH="$W1P:/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_headroom_cli)
+check_eq "w1: CLI from PATH" "$W1P/headroom" "$out"
+check_eq "w1: CLI exits 1 when absent" "1" \
+  "$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_headroom_cli >/dev/null; echo $?)"
+
+# w1. win_path / unix_path: stubbed cygpath, else passthrough
+# NOTE: written via printf '%s\n' (not echo) — /bin/sh here is bash-3.2 in
+# POSIX mode, whose echo builtin interprets "\f" as a form-feed escape and
+# would corrupt the literal "C:\fake\..." fixture value; printf's %s leaves
+# its argument uninterpreted. See task-1-report.md for details.
+cat > "$W/cygpath" <<'CYGEOF'
+#!/bin/sh
+case $1 in
+  -w) printf '%s\n' "C:\\fake\\$(basename "$2")";;
+  -u) printf '%s\n' "${CYGPATH_UNIX_DIR:-/c/fake}/$(basename "$2")";;
+esac
+CYGEOF
+chmod +x "$W/cygpath"
+check_eq "w1: win_path via DOCTOR_CYGPATH" 'C:\fake\x.sh' "$(DOCTOR_CYGPATH="$W/cygpath" er win_path /tmp/x.sh)"
+# NOTE: basename() only splits on "/", never "\" — 'C:\x.sh' has no "/" so it
+# passes through basename unchanged; expected value corrected accordingly
+# (see task-1-report.md).
+check_eq "w1: unix_path via DOCTOR_CYGPATH" '/c/fake/C:\x.sh' "$(DOCTOR_CYGPATH="$W/cygpath" er unix_path 'C:\x.sh')"
+check_eq "w1: win_path passthrough without cygpath" "/tmp/x.sh" "$(unset DOCTOR_CYGPATH; PATH="/usr/bin:/bin" er win_path /tmp/x.sh)"
+
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
 if command -v shellcheck >/dev/null 2>&1; then
   if shellcheck --severity=warning "$SCRIPT" "$DANGI" "$ROOT/scripts/hcat-gate.sh" \
        "$ROOT/scripts/doctor.sh" "$ROOT/scripts/mcp-launcher.sh" \
        "$ROOT/scripts/session-probe.sh" "$ROOT/scripts/ledger-hook.sh" \
-       "$ROOT/scripts/lib/headroom-state.sh"; then
+       "$ROOT/scripts/lib/headroom-state.sh" \
+       "$ROOT/scripts/lib/engine-resolve.sh"; then
     echo "ok - shellcheck"; PASS=$((PASS+1))
   else
     echo "FAIL - shellcheck"; FAIL=$((FAIL+1))
