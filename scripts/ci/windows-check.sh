@@ -47,19 +47,40 @@ out=$(env -u HCAT_PYTHON DOCTOR_VENV_DIR="$VENV_DIR" PATH="/usr/bin:/bin" bash "
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "── hcat:"; then ok "hcat compresses non-ASCII JSON on Windows (rc=0, receipt printed)"
 else fail "hcat on non-ASCII JSON" "rc=$rc" "$(head -3 "$TMPD/hcat.err")"; fi
 
-# 5. doctor --fix in a sandbox HOME with the real venv: engine ok, shim created, status line wired with Windows paths
+# 5. doctor --fix in a sandbox HOME with the real venv: engine ok, shim created,
+# status line wired with Windows paths.
+#
+# The sandbox PATH deliberately carries ONLY the sandbox shim dir, jq's dir and the
+# Git Bash system dirs — no uv tool bin, no $VENV_DIR/Scripts — so resolution must
+# go venv → Scripts/headroom.exe → `cp` shim. That copy is the one Windows-only
+# mutation in this release, and it used to be asserted with a `|| echo skip` whose
+# branch depended on whether the workflow's `uv tool install` happened to land
+# `headroom` on the runner's PATH; a runner-image change would have turned it into
+# a permanent silent skip (review I4). Every assertion below is anchored at column
+# 0 (`say()` prints `printf '%-7s - %s\n'`, so status words start there) — the old
+# `grep -q " fixed "` could never match anything and the old shim grep also matched
+# 2b's FAIL text (review C2).
 SB="$TMPD/home"; mkdir -p "$SB/.claude" "$SB/.local/bin"
-out=$(env -u HCAT_PYTHON HOME="$SB" PATH="$SB/.local/bin:$PATH" DOCTOR_SETTINGS="$SB/.claude/settings.json" DOCTOR_CLAUDE_DIR="$SB/.claude" \
-      DOCTOR_VENV_DIR="$VENV_DIR" DOCTOR_SHIM_DIR="$SB/.local/bin" DOCTOR_PROJECT_DIR="$TMPD/noproj" bash "$ROOT/scripts/doctor.sh" --fix 2>&1); rc=$?
+SB_PATH="$SB/.local/bin:$(dirname "$(command -v jq)"):/usr/bin:/bin:/mingw64/bin"
+doctor_sb() {  # one sandboxed `doctor.sh --fix` run; prints its output, returns its rc
+  env -u HCAT_PYTHON HOME="$SB" PATH="$SB_PATH" DOCTOR_SETTINGS="$SB/.claude/settings.json" \
+      DOCTOR_CLAUDE_DIR="$SB/.claude" DOCTOR_VENV_DIR="$VENV_DIR" DOCTOR_SHIM_DIR="$SB/.local/bin" \
+      DOCTOR_PROJECT_DIR="$TMPD/noproj" bash "$ROOT/scripts/doctor.sh" --fix 2>&1
+}
+out=$(doctor_sb); rc=$?
 echo "$out" | sed 's/^/    doctor: /'
-printf '%s' "$out" | grep -q "engine python:" && ok "doctor: engine found" || fail "doctor: engine"
-printf '%s' "$out" | grep -qE "headroom (shimmed to|CLI on PATH)" && ok "doctor: headroom on PATH / shimmed" || fail "doctor: shim"
-[ -f "$SB/.local/bin/headroom.exe" ] && ok "doctor: shim is headroom.exe" || echo "skip - shim file (headroom already on PATH)"
+[ "$rc" -eq 0 ] && ok "doctor --fix run 1 exits 0" || fail "doctor --fix run 1 exited $rc"
+printf '%s\n' "$out" | grep -qE '^FAIL' && fail "doctor --fix run 1 printed a FAIL line" "$out" || ok "doctor --fix run 1 has no FAIL lines"
+printf '%s\n' "$out" | grep -q "engine python:" && ok "doctor: engine found" || fail "doctor: engine"
+printf '%s\n' "$out" | grep -qE '^fixed +- headroom shimmed to' && ok "doctor: shimmed headroom (Windows cp branch)" || fail "doctor: run 1 did not report the shim as fixed" "$out"
+[ -f "$SB/.local/bin/headroom.exe" ] && ok "doctor: shim is headroom.exe" || fail "doctor: shim file headroom.exe missing" "$(ls -l "$SB/.local/bin")"
 cmd=$(jq -r '.statusLine.command' "$SB/.claude/settings.json")
 case $cmd in \"*bash.exe\"\ \"*headroom-statusline.sh\") ok "doctor: statusLine command uses Windows paths ($cmd)" ;; *) fail "statusLine command shape" "got: $cmd" ;; esac
-out2=$(env -u HCAT_PYTHON HOME="$SB" PATH="$SB/.local/bin:$PATH" DOCTOR_SETTINGS="$SB/.claude/settings.json" DOCTOR_CLAUDE_DIR="$SB/.claude" \
-       DOCTOR_VENV_DIR="$VENV_DIR" DOCTOR_SHIM_DIR="$SB/.local/bin" DOCTOR_PROJECT_DIR="$TMPD/noproj" bash "$ROOT/scripts/doctor.sh" --fix 2>&1)
-printf '%s' "$out2" | grep -q " fixed " && fail "doctor: second --fix not idempotent" "$out2" || ok "doctor: second --fix is a no-op"
+out2=$(doctor_sb); rc2=$?
+[ "$rc2" -eq 0 ] && ok "doctor --fix run 2 exits 0" || fail "doctor --fix run 2 exited $rc2"
+printf '%s\n' "$out2" | grep -qE '^FAIL' && fail "doctor --fix run 2 printed a FAIL line" "$out2" || ok "doctor --fix run 2 has no FAIL lines"
+printf '%s\n' "$out2" | grep -qE '^fixed ' && fail "doctor: second --fix not idempotent" "$out2" || ok "doctor: second --fix is a no-op"
+printf '%s\n' "$out2" | grep -qE '^ok +- headroom CLI on PATH' && ok "doctor: run 2 resolves the shimmed headroom on PATH" || fail "doctor: run 2 did not report headroom CLI on PATH" "$out2"
 printf '%s\n' "$cmd" > "$ROOT/statusline.cmd"   # consumed by the PowerShell step
 
 echo; echo "$PASS passed, $FAIL failed"
