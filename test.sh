@@ -1920,13 +1920,13 @@ else
   echo "skip - f7bb: project-level settings backup-failure guard (running as root, permission bits bypassed)"
 fi
 
-# F8: execution semantics — Claude Code expands ${CLAUDE_PLUGIN_ROOT} in an MCP
-# stdio command and then spawns the result DIRECTLY (posix_spawn, no shell), so
-# literal quotes become part of the filename → ENOENT, the /plugin ✗, and the
-# bundled server never connects (shipped that way v2.5→v2.7.2, masked wherever a
-# manual ~/.claude.json registration still provided the tools). Hook commands are
-# the opposite — they DO run through a shell — so hooks.json keeps its quoting.
-# Pin the asymmetry in both directions.
+# F8: execution semantics — Claude Code spawns an MCP stdio command DIRECTLY
+# (no shell) on every OS, so the bundled command must be the bare name
+# `headroom`, resolved via PATH, with no path segment and no quotes for a
+# shell-less spawn to mis-resolve (a path or quoted command broke this on
+# every OS pre-v2.8, and a `.sh` would be unspawnable on Windows regardless).
+# Hook commands are the opposite — they DO run through a shell — so
+# hooks.json keeps its quoting. Pin the asymmetry in both directions.
 check_absent "f8: mcp command carries no path (nothing for a shell-less spawn to mis-resolve)" "/" "$mcp_cmd"
 check_absent "f8: mcp command carries no quotes" '"' "$mcp_cmd"
 check "f8: hooks.json gate command KEEPS its shell quoting (hooks run via shell)" \
@@ -2890,6 +2890,14 @@ env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTIN
   DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W7/shim" bash "$DOCTOR" --fix >/dev/null 2>&1
 check_eq "w7: posix statusLine command unchanged" "bash \"$W7/cdu/headroom-statusline.sh\"" "$(jq -r '.statusLine.command' "$S7U")"
 
+# w9. CI files exist and are well-formed
+WF="$ROOT/.github/workflows/test.yml"
+check "w9: workflow has a windows-latest job" "windows-latest" "$(cat "$WF" 2>/dev/null)"
+check "w9: workflow runs the suite on ubuntu+macos" "macos-latest" "$(cat "$WF" 2>/dev/null)"
+check "w9: windows job runs windows-check.sh" "scripts/ci/windows-check.sh" "$(cat "$WF" 2>/dev/null)"
+check "w9: spawn probe exists" "child_process" "$(cat "$ROOT/scripts/ci/spawn-probe.mjs" 2>/dev/null)"
+if [ -x "$ROOT/scripts/ci/windows-check.sh" ]; then echo "ok - w9: windows-check.sh executable"; PASS=$((PASS+1)); else echo "FAIL - w9: windows-check.sh executable"; FAIL=$((FAIL+1)); fi
+
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
 if command -v shellcheck >/dev/null 2>&1; then
@@ -2897,7 +2905,8 @@ if command -v shellcheck >/dev/null 2>&1; then
        "$ROOT/scripts/doctor.sh" \
        "$ROOT/scripts/session-probe.sh" "$ROOT/scripts/ledger-hook.sh" \
        "$ROOT/scripts/lib/headroom-state.sh" \
-       "$ROOT/scripts/lib/engine-resolve.sh"; then
+       "$ROOT/scripts/lib/engine-resolve.sh" \
+       "$HCAT" "$ROOT/scripts/ci/windows-check.sh"; then
     echo "ok - shellcheck"; PASS=$((PASS+1))
   else
     echo "FAIL - shellcheck"; FAIL=$((FAIL+1))
