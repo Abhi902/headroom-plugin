@@ -1,0 +1,114 @@
+name: test
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix: { os: [ubuntu-latest, macos-latest] }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: deps
+        run: |
+          if command -v apt-get >/dev/null; then sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck; else brew install jq shellcheck; fi
+      - run: ./test.sh
+  windows:
+    runs-on: windows-latest
+    defaults: { run: { shell: bash } }
+    env:
+      VENV_DIR: ${{ github.workspace }}/.headroom-venv
+      # RATCHET, not a target. The POSIX suite has fixtures that cannot pass
+      # under Git Bash yet; this is the number of them allowed to fail before
+      # the step goes red. LOWER it as fixtures are ported — never raise it
+      # without saying why in the PR that raises it.
+      WIN_FAIL_BASELINE: "121"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.12" }
+      - name: real engine (venv + uv tool)
+        run: |
+          python -m venv "$VENV_DIR"
+          "$VENV_DIR/Scripts/python.exe" -m pip install -q "headroom-ai[all]" || "$VENV_DIR/Scripts/python.exe" -m pip install -q headroom-ai
+          "$VENV_DIR/Scripts/python.exe" -c "import headroom.compress; print('engine ok')"
+          # `uv tool install` stays non-fatal (a transient PyPI failure must not red
+          # a required gate), but when it SUCCEEDS the layout must actually be
+          # there — windows-check.sh turns its skip into a fail on UV_EXPECTED=1.
+          if pip install -q uv && uv tool install headroom-ai; then
+            echo "UV_EXPECTED=1" >> "$GITHUB_ENV"
+          else
+            echo "uv install skipped (non-fatal)"
+          fi
+      - name: windows-check (required gate)
+        run: VENV_DIR="$(cygpath -u "$VENV_DIR")" bash scripts/ci/windows-check.sh
+      - name: MCP spawn probe (shell-less, by name) + negative control
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:VENV_DIR\Scripts;" + $env:PATH
+          node scripts/ci/spawn-probe.mjs headroom mcp serve
+          if ($LASTEXITCODE -ne 0) { throw "bare 'headroom mcp serve' failed to spawn/handshake ($LASTEXITCODE)" }
+          # spawn-probe maps ENOENT and EFTYPE to the same exit 3, so a renamed
+          # or moved target would "pass" this control without ever demonstrating
+          # that Windows refuses a shell-less .sh. Prove the target exists first.
+          $shTarget = "$PWD\scripts\session-probe.sh"
+          if (-not (Test-Path -LiteralPath $shTarget)) { throw "negative control target is missing: $shTarget" }
+          node scripts/ci/spawn-probe.mjs $shTarget
+          if ($LASTEXITCODE -eq 0) { throw "negative control: a .sh spawned without a shell should NOT work" }
+          Write-Host "negative control ok (exit $LASTEXITCODE)"
+          exit 0
+      - name: MCP spawn probe through the DOCTOR's own shim
+        shell: pwsh
+        run: |
+          # The probe above prepends the venv Scripts dir, so it exercises pip's
+          # original launcher. The file `doctor.sh --fix` actually writes lives in
+          # windows-check.sh's sandbox and was only ever run through Git Bash by
+          # `--help`; prove that copy is spawnable shell-less too, with only its
+          # directory prepended and the bare name asserted to resolve inside it.
+          $dir = (Get-Content ./shimdir.path -Raw).Trim()
+          if (-not (Test-Path -LiteralPath $dir)) { throw "doctor shim dir missing: $dir" }
+          Write-Host "doctor shim dir: $dir"
+          # prepend ONLY the sandbox shim dir (node itself must stay resolvable),
+          # then prove the bare name really resolves to the doctor's copy
+          $env:PATH = "$dir;" + $env:PATH
+          $resolved = (Get-Command headroom -ErrorAction SilentlyContinue).Source
+          Write-Host "bare 'headroom' resolves to: $resolved"
+          if (-not $resolved -or -not $resolved.StartsWith($dir)) { throw "bare 'headroom' did not resolve to the doctor's shim ($resolved)" }
+          node scripts/ci/spawn-probe.mjs headroom mcp serve
+          if ($LASTEXITCODE -ne 0) { throw "the doctor's own shim failed to spawn/handshake ($LASTEXITCODE)" }
+      - name: status line runs from PowerShell with the command doctor wrote
+        shell: pwsh
+        run: |
+          $cmd = Get-Content ./statusline.cmd
+          Write-Host "command: $cmd"
+          $m = [regex]::Matches($cmd, '"([^"]+)"')
+          $bash = $m[0].Groups[1].Value
+          $script = $m[1].Groups[1].Value
+          if (-not $bash -or -not $script) { throw "could not parse statusLine command: $cmd" }
+          $json = '{"transcript_path":"","model":{"id":"claude-opus-4-8"},"session_id":"ci"}'
+          $out = $json | & $bash $script
+          Write-Host "badge: $out"
+          if (-not $out) { throw "status line printed nothing" }
+      - name: full suite (ratcheted against WIN_FAIL_BASELINE)
+        run: |
+          ./test.sh > suite.log 2>&1 || true
+          echo "--- failing fixtures ---"
+          grep -E '^FAIL' suite.log || echo "(none)"
+          echo "--- summary ---"
+          summary=$(grep -E '^[0-9]+ passed, [0-9]+ failed$' suite.log | tail -1)
+          if [ -z "$summary" ]; then
+            echo "::error::the suite printed no summary line — it died before finishing"
+            tail -40 suite.log
+            exit 1
+          fi
+          echo "$summary"
+          fails=${summary#*, }; fails=${fails% failed}
+          if [ "$fails" -gt "$WIN_FAIL_BASELINE" ]; then
+            echo "::error::$fails fixtures failed, above the $WIN_FAIL_BASELINE baseline — fix them, or justify raising the baseline"
+            exit 1
+          fi
+          echo "$fails failed, at or below the $WIN_FAIL_BASELINE baseline"
+          if [ "$fails" -lt "$WIN_FAIL_BASELINE" ]; then
+            echo "::notice::only $fails failed — lower WIN_FAIL_BASELINE to $fails to keep the ratchet tight"
+          fi

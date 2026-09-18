@@ -92,7 +92,7 @@ dest.chmod(0o755)
 # forever, showing zero savings (issue #2). Provision them alongside the copy.
 lib_dir = pathlib.Path.home() / ".claude" / "lib"
 lib_dir.mkdir(parents=True, exist_ok=True)
-for _lib in ("attribution.jq", "headroom-state.sh"):
+for _lib in ("attribution.jq", "headroom-state.sh", "engine-resolve.sh"):
     shutil.copyfile(PLUGIN_ROOT / "scripts" / "lib" / _lib, lib_dir / _lib)
 
 p = pathlib.Path.home() / ".claude" / "settings.json"
@@ -171,7 +171,7 @@ ledger_dest.chmod(0o755)
 # siblings in a legacy layout ($here/headroom-state.sh, $here/attribution.jq).
 # WITHOUT them, ambient-health (broken badge) and offender-learning silently
 # degrade to no-ops and the badge/ledger attribution reads zero — so copy them.
-for _lib in ("headroom-state.sh", "attribution.jq"):
+for _lib in ("headroom-state.sh", "attribution.jq", "engine-resolve.sh"):
     shutil.copyfile(PLUGIN_ROOT / "scripts" / "lib" / _lib,
                     pathlib.Path.home() / ".claude" / _lib)
 
@@ -294,4 +294,4 @@ All knobs live in `scripts/statusline.sh` (edit, then re-run the installer):
 - **Gate threshold:** `HCAT_GATE_BYTES` (default 16384) — minimum file size the gate fires on; `HCAT_GATE_OFF=1` disables the gate entirely; the gated extension list is the `case` in `hcat-gate.sh`.
 - **Gate rewrite (v2.7):** `HCAT_GATE_NO_REWRITE=1` — makes a bare Bash `cat <file>` deny-and-suggest like `Read` does, instead of the default in-place rewrite to `hcat "<file>"`.
 - **Gate sniff (v2.7):** `HCAT_GATE_NO_SNIFF=1` — turns off the 512-byte structural sniff, so only the static extension list and the learned offender list make a file gate-eligible.
-- **hcat python:** `HCAT_PYTHON` — explicit path to headroom's venv python (authoritative override; otherwise resolved from `headroom` on PATH, then `~/.headroom-venv/bin/python`).
+- **hcat python:** `HCAT_PYTHON` — explicit path to headroom's venv python (authoritative override; otherwise resolved from `headroom` on PATH, then `~/.headroom-venv/bin/python`). On Windows the venv interpreter is `~/.headroom-venv/Scripts/python.exe`; the resolver (`scripts/lib/engine-resolve.sh`) tries both layouts plus uv tool installs.

@@ -554,13 +554,13 @@ export HEADROOM_STATE_DIR="$TMP/state-port"
 # (accepts -c, rejects -f like GNU stat does), a fake notify-send that logs its
 # args, and NO osascript anywhere on it.
 LINBIN="$TMP/linbin"; mkdir -p "$LINBIN"
-for t in jq tr wc date mkdir rmdir cat; do
+for t in jq tr wc date mkdir rmdir cat dirname basename grep sed tail head; do
   ln -s "$(command -v "$t")" "$LINBIN/$t"
 done
 cat > "$LINBIN/stat" <<'EOF'
 #!/bin/sh
 case "$1" in
-  -c) shift; exec /usr/bin/stat -f %m "$2" ;;
+  -c) shift; /usr/bin/stat -c %Y "$2" 2>/dev/null || exec /usr/bin/stat -f %m "$2" ;;
   # Faithful to real GNU `stat -f %m FILE`: -f means --file-system there, so it
   # errors on the '%m' operand (stderr) but STILL prints an fs-info block for
   # FILE on stdout, and exits 1 — stdout garbage that poisons $(( now - ... ))
@@ -639,7 +639,11 @@ DOCTOR="$ROOT/scripts/doctor.sh"
 # hermetic: the doctor scans $PWD/.claude by default (v2.7) — point it at an
 # empty dir so the developer's real project settings never leak into the suite
 export DOCTOR_PROJECT_DIR="$TMP/no-proj"
-LAUNCHER="$ROOT/scripts/mcp-launcher.sh"
+# hermetic (v2.8 issue #9, check 2b): the default shim dir is the real
+# ~/.local/bin — override it everywhere so a --fix run in this suite can never
+# write a real symlink into the developer's actual home directory. Individual
+# w6 fixtures below override this per-call to exercise the real default logic.
+export DOCTOR_SHIM_DIR="$TMP/shim-default"
 MCP_JSON="$ROOT/.mcp.json"
 DOCD="$TMP/doc"; mkdir -p "$DOCD"
 
@@ -688,6 +692,14 @@ echo "launched: $* update=$HEADROOM_UPDATE_CHECK offline=$HF_HUB_OFFLINE"
 FENGEOF
 chmod +x "$FENG/python" "$FENG/headroom"
 
+# headroom-only PATH entry (no sibling python) for fixtures whose engine-python
+# resolution must actually exercise the --fix bootstrap path rather than
+# short-circuit through 2b's PATH-sibling candidate ($FENG has a python sibling
+# and would hijack that resolution order); putting this on PATH just makes
+# check 2b's own `command -v headroom` succeed directly (issue #9)
+AMBIENT_HR="$DOCD/ambient-hr"; mkdir -p "$AMBIENT_HR"
+printf '#!/bin/sh\nexit 0\n' > "$AMBIENT_HR/headroom"; chmod +x "$AMBIENT_HR/headroom"
+
 # 32a. healthy read-only run against the real engine
 if [ -n "$HEADROOM_PY" ]; then
   CD1="$DOCD/cd1"; mkdir -p "$CD1/lib"
@@ -697,7 +709,11 @@ if [ -n "$HEADROOM_PY" ]; then
   cp "$ROOT/scripts/statusline.sh" "$CD1/headroom-statusline.sh"
   cp "$ROOT/scripts/lib/attribution.jq"    "$CD1/lib/"
   cp "$ROOT/scripts/lib/headroom-state.sh" "$CD1/lib/"
-  out=$(HCAT_PYTHON="$HEADROOM_PY" DOCTOR_SETTINGS="$S1" DOCTOR_CLAUDE_DIR="$CD1" \
+  cp "$ROOT/scripts/lib/engine-resolve.sh" "$CD1/lib/"   # v2.8: doctor provisions this one too
+  # $FENG on PATH gives check 2b a real `headroom` to resolve (this Mac has none
+  # ambient); HCAT_PYTHON is authoritative for check 2 so this can't hijack the
+  # real-engine resolution being tested here (issue #9)
+  out=$(HCAT_PYTHON="$HEADROOM_PY" PATH="$FENG:$PATH" DOCTOR_SETTINGS="$S1" DOCTOR_CLAUDE_DIR="$CD1" \
         DOCTOR_VENV_DIR="$DOCD/none" bash "$DOCTOR" 2>&1); rc=$?
   check "doctor: healthy engine"          "engine python"   "$out"
   check "doctor: healthy hcat smoke"      "hcat smoke"      "$out"
@@ -758,7 +774,9 @@ check "doctor: foreign statusLine preserved by --fix" "my-custom-line.sh" \
 CD4="$DOCD/cd4"; mkdir -p "$CD4"
 touch "$CD4/dangi-hook.sh" "$CD4/hcat-gate.sh" "$CD4/hcat"
 S4="$DOCD/s4.json"; doc_settings_legacy "$CD4" > "$S4"
-out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" \
+# $AMBIENT_HR (headroom, no python sibling) keeps check 2b clean ("ok") without
+# hijacking the bootstrap-from-scratch resolution this fixture is testing (issue #9)
+out=$(env -u HCAT_PYTHON PATH="$AMBIENT_HR:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" \
       DOCTOR_CLAUDE_DIR="$CD4" DOCTOR_VENV_DIR="$DOCD/venv-boot" bash "$DOCTOR" --fix 2>&1); rc=$?
 check "fix: reports fixed"        "fixed"   "$out"
 check_eq "fix: exit 0"               "0"       "$rc"
@@ -776,7 +794,8 @@ fi
 # issue #2: statusline.sh needs its lib/ deps next to the copy, or compute()
 # silently degrades to a permanent idle badge. --fix must provision them.
 if cmp -s "$ROOT/scripts/lib/attribution.jq" "$CD4/lib/attribution.jq" \
-   && cmp -s "$ROOT/scripts/lib/headroom-state.sh" "$CD4/lib/headroom-state.sh"; then
+   && cmp -s "$ROOT/scripts/lib/headroom-state.sh" "$CD4/lib/headroom-state.sh" \
+   && cmp -s "$ROOT/scripts/lib/engine-resolve.sh" "$CD4/lib/engine-resolve.sh"; then
   echo "ok - fix: statusline lib deps provisioned (issue #2)"; PASS=$((PASS+1))
 else
   echo "FAIL - fix: statusline lib deps provisioned (issue #2)"; FAIL=$((FAIL+1))
@@ -790,7 +809,7 @@ fi
 check_eq "fix: one timestamped backup" "1" "$(ls "$S4".bak.* 2>/dev/null | wc -l | tr -d ' ')"
 # idempotency: a second --fix run must change nothing and re-bootstrap nothing
 cp "$S4" "$DOCD/s4.after1"
-out2=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" \
+out2=$(env -u HCAT_PYTHON PATH="$AMBIENT_HR:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" \
        DOCTOR_CLAUDE_DIR="$CD4" DOCTOR_VENV_DIR="$DOCD/venv-boot" bash "$DOCTOR" --fix 2>&1)
 if cmp -s "$S4" "$DOCD/s4.after1"; then
   echo "ok - fix: second run leaves settings unchanged"; PASS=$((PASS+1))
@@ -806,37 +825,12 @@ out=$(bash "$DOCTOR" --bogus 2>&1); rc=$?
 check "doctor: unknown flag errors" "unknown" "$out"
 check_eq "doctor: unknown flag exit 2" "2"       "$rc"
 
-# 32h. mcp-launcher.sh — resolves the engine and execs `headroom mcp serve`
-if [ -x "$LAUNCHER" ]; then
-  echo "ok - launcher: executable"; PASS=$((PASS+1))
+# 32h. no launcher any more (v2.8): the MCP is spawned by name, so there must be
+# nothing left that a shell-less Windows spawn would choke on
+if [ ! -e "$ROOT/scripts/mcp-launcher.sh" ]; then
+  echo "ok - launcher: removed (bare command since v2.8)"; PASS=$((PASS+1))
 else
-  echo "FAIL - launcher: executable"; FAIL=$((FAIL+1))
-fi
-out=$(HCAT_PYTHON="$FENG/python" bash "$LAUNCHER" 2>&1); rc=$?
-check "launcher: execs headroom mcp serve" "launched: mcp serve" "$out"
-check "launcher: update check off"         "update=off"          "$out"
-check "launcher: hf offline"               "offline=1"           "$out"
-check_eq "launcher: exit 0"                   "0"                   "$rc"
-err=$(HCAT_PYTHON=/nonexistent/python bash "$LAUNCHER" 2>&1 >/dev/null); rc=$?
-check "launcher: missing engine names doctor" "doctor" "$err"
-if [ "$rc" -ne 0 ]; then
-  echo "ok - launcher: missing engine exits nonzero"; PASS=$((PASS+1))
-else
-  echo "FAIL - launcher: missing engine exits nonzero (got rc=0)"; FAIL=$((FAIL+1))
-fi
-if [ "$(printf '%s\n' "$err" | wc -l | tr -d ' ')" = "1" ]; then
-  echo "ok - launcher: single stderr line"; PASS=$((PASS+1))
-else
-  echo "FAIL - launcher: single stderr line (got: $err)"; FAIL=$((FAIL+1))
-fi
-NOHR="$DOCD/nohr"; mkdir -p "$NOHR"
-printf '#!/bin/sh\nexit 0\n' > "$NOHR/python"; chmod +x "$NOHR/python"
-err=$(HCAT_PYTHON="$NOHR/python" bash "$LAUNCHER" 2>&1 >/dev/null); rc=$?
-check "launcher: python without headroom binary names doctor" "doctor" "$err"
-if [ "$rc" -ne 0 ]; then
-  echo "ok - launcher: headroom-binary-missing exits nonzero"; PASS=$((PASS+1))
-else
-  echo "FAIL - launcher: headroom-binary-missing exits nonzero"; FAIL=$((FAIL+1))
+  echo "FAIL - launcher: scripts/mcp-launcher.sh still present"; FAIL=$((FAIL+1))
 fi
 
 # 32i. bundled .mcp.json — erases the manual "register headroom MCP" step
@@ -847,15 +841,15 @@ else
 fi
 check "mcp.json: stdio server" "stdio" "$(jq -r '.mcpServers.headroom.type // empty' "$MCP_JSON" 2>/dev/null)"
 mcp_cmd=$(jq -r '.mcpServers.headroom.command // empty' "$MCP_JSON" 2>/dev/null)
-check "mcp.json: command uses CLAUDE_PLUGIN_ROOT" '${CLAUDE_PLUGIN_ROOT}' "$mcp_cmd"
-check "mcp.json: command targets mcp-launcher.sh" "mcp-launcher.sh"       "$mcp_cmd"
+check_eq "mcp.json: command is the bare name (spawned without a shell on every OS)" "headroom" "$mcp_cmd"
+check_eq "mcp.json: args = mcp serve" "mcp serve" "$(jq -r '.mcpServers.headroom.args | join(" ")' "$MCP_JSON" 2>/dev/null)"
 check "mcp.json: env update off" "off" "$(jq -r '.mcpServers.headroom.env.HEADROOM_UPDATE_CHECK // empty' "$MCP_JSON" 2>/dev/null)"
 check_eq "mcp.json: env hf offline" "1"   "$(jq -r '.mcpServers.headroom.env.HF_HUB_OFFLINE // empty' "$MCP_JSON" 2>/dev/null)"
-# the command string is shell-interpreted (quoted like hooks.json), so run it
-# the same way the hooks.json commands are exercised: via sh -c
-mcp_resolved=${mcp_cmd/'${CLAUDE_PLUGIN_ROOT}'/"$ROOT"}
-out=$(HCAT_PYTHON="$FENG/python" sh -c "$mcp_resolved" 2>&1)
-check "mcp.json: end-to-end launch through the bundled command" "launched: mcp serve" "$out"
+# end-to-end: the bare name resolves through PATH exactly as a shell-less spawn would
+mcp_args=$(jq -r '.mcpServers.headroom.args | join(" ")' "$MCP_JSON")
+# shellcheck disable=SC2086
+out=$(PATH="$FENG:$PATH" HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 "$mcp_cmd" $mcp_args 2>&1)
+check "mcp.json: end-to-end launch by name" "launched: mcp serve" "$out"
 
 # 32j. /doctor skill
 DSKILL="$ROOT/skills/doctor/SKILL.md"
@@ -870,12 +864,16 @@ check "doctor skill: runs doctor.sh"       "doctor.sh"    "$(cat "$DSKILL" 2>/de
 check "doctor skill: consent before --fix" "consent"      "$(cat "$DSKILL" 2>/dev/null)"
 # docs-parity: Step 3's consent list and the fixable lists must name every --fix
 # mutation — an agent following the skill verbatim must not under-disclose
-check "doctor skill: consent list names the .mcp.json rewrite"       "rewrite the plugin's bundled" "$(cat "$DSKILL" 2>/dev/null)"
+check "doctor skill: consent list names the headroom shim install"   "create or replace a \`headroom\` shim" "$(cat "$DSKILL" 2>/dev/null)"
 check "doctor skill: consent list names the statusline re-copy"      "re-copy the statusline"       "$(cat "$DSKILL" 2>/dev/null)"
 check "doctor skill: fixable list covers wired-but-missing re-copy"  "wired but script missing"     "$(cat "$DSKILL" 2>/dev/null)"
 check "doctor header: fixable list covers wired-but-missing re-copy" "wired-missing copy"           "$(head -30 "$DOCTOR" 2>/dev/null)"
 check "doctor skill: consent list names the statusLine.command rewrite" "rewrite \`statusLine.command\`" "$(cat "$DSKILL" 2>/dev/null)"
 check "doctor header: header names the statusLine.command rewrite"      "rewrites statusLine.command"    "$(head -30 "$DOCTOR" 2>/dev/null)"
+check "doctor skill: consent list names the headroom shim"        "shim"                    "$(cat "$DSKILL" 2>/dev/null)"
+check "doctor skill: fixable list covers headroom not on PATH"    "headroom CLI not on PATH" "$(cat "$DSKILL" 2>/dev/null)"
+check_absent "doctor skill: no launcher left in the doctor docs"  "mcp-launcher"            "$(cat "$DSKILL" 2>/dev/null)"
+check "installer skill: legacy installer copies engine-resolve.sh" "engine-resolve.sh"       "$(cat "$ROOT/skills/headroom-usage-indicator/SKILL.md" 2>/dev/null)"
 
 # --- 34. review fixes: badge + hooks
 export HEADROOM_STATE_DIR="$TMP/state-review"
@@ -1168,11 +1166,6 @@ printf '#!%s\n# console script only — no sibling python in this dir\n' "$SPY/p
 chmod +x "$CLI/headroom"
 FAKEHOME="$REVD/home"; mkdir -p "$FAKEHOME"
 
-# the launcher only needs the CLI: `headroom` on PATH is used directly
-out=$(env -u HCAT_PYTHON PATH="$CLI:/usr/bin:/bin" DOCTOR_VENV_DIR="$NOVENV" bash "$LAUNCHER" 2>&1); rc=$?
-check "f1 launcher: console-script-only layout execs" "mcp serve" "$out"
-check_eq "f1 launcher: exit 0" "0" "$rc"
-
 # hcat needs an importing python: the console script's shebang interpreter
 # (the echo-stub prints its argv, proving which interpreter hcat exec'd)
 printf '{"k":1}' > "$REVD/tiny.json"
@@ -1317,7 +1310,12 @@ fi
 exit 0
 EOF
 printf '#!/bin/sh\nexit 0\n' > "$DEB/apt-get"
-chmod +x "$DEB/python3" "$DEB/apt-get"
+# shadow the rest of the bootstrap fallback order (python, py) so a real
+# /usr/bin/python on the runner can't silently succeed where python3 -m venv
+# didn't — same hazard the w4none fixture guards against.
+printf '#!/bin/sh\nexit 1\n' > "$DEB/python"
+printf '#!/bin/sh\nexit 1\n' > "$DEB/py"
+chmod +x "$DEB/python3" "$DEB/apt-get" "$DEB/python" "$DEB/py"
 F6="$REVD/f6"; mkdir -p "$F6/cd"
 doc_settings_wired "$F6/cd" > "$F6/settings.json"
 out=$(env -u HCAT_PYTHON PATH="$DEB:/usr/bin:/bin" DOCTOR_SETTINGS="$F6/settings.json" \
@@ -1378,7 +1376,7 @@ out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7
 check "f7c: stale statusline copy is fixable" "statusline copy" "$out"
 check "f7c: reported as fixable" "fixable" "$out"
 # F7d: the doctor validates the bundled .mcp.json
-check "f7d: .mcp.json checked and healthy" ".mcp.json registers the headroom MCP" "$out"
+check "f7d: .mcp.json checked and healthy" ".mcp.json spawns \`headroom mcp serve\` by name" "$out"
 HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7C/settings.json" \
   DOCTOR_CLAUDE_DIR="$F7C/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" --fix >/dev/null 2>&1
 if cmp -s "$F7C/cd/headroom-statusline.sh" "$ROOT/scripts/statusline.sh" && [ -x "$F7C/cd/headroom-statusline.sh" ]; then
@@ -1401,7 +1399,8 @@ check "f7e: statusline copy itself still reported current" "statusline copy is c
 HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7E/settings.json" \
   DOCTOR_CLAUDE_DIR="$F7E/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" --fix >/dev/null 2>&1
 if cmp -s "$ROOT/scripts/lib/attribution.jq" "$F7E/cd/lib/attribution.jq" \
-   && cmp -s "$ROOT/scripts/lib/headroom-state.sh" "$F7E/cd/lib/headroom-state.sh"; then
+   && cmp -s "$ROOT/scripts/lib/headroom-state.sh" "$F7E/cd/lib/headroom-state.sh" \
+   && cmp -s "$ROOT/scripts/lib/engine-resolve.sh" "$F7E/cd/lib/engine-resolve.sh"; then
   echo "ok - f7e: --fix provisions the missing lib deps (issue #2)"; PASS=$((PASS+1))
 else
   echo "FAIL - f7e: --fix provisions the missing lib deps (issue #2)"; FAIL=$((FAIL+1))
@@ -1417,6 +1416,7 @@ doc_settings_wired "$F7F/cd" > "$F7F/settings.json"
 cp "$ROOT/scripts/statusline.sh" "$F7F/cd/headroom-statusline.sh"        # copy current
 cp "$ROOT/scripts/lib/attribution.jq"    "$F7F/cd/attribution.jq"        # deps as FLAT siblings,
 cp "$ROOT/scripts/lib/headroom-state.sh" "$F7F/cd/headroom-state.sh"     # not under lib/
+cp "$ROOT/scripts/lib/engine-resolve.sh" "$F7F/cd/engine-resolve.sh"     # (v2.8 dep, same rule)
 out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7F/settings.json" \
       DOCTOR_CLAUDE_DIR="$F7F/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" 2>&1)
 check "f7f: flat-layout lib deps reported current" "statusline lib deps current" "$out"
@@ -1445,6 +1445,7 @@ doc_settings_wired "$F7H/cd" > "$F7H/settings.json"
 cp "$ROOT/scripts/statusline.sh" "$F7H/cd/headroom-statusline.sh"
 cp "$ROOT/scripts/lib/attribution.jq"    "$F7H/cd/lib/"          # lib/ deps current
 cp "$ROOT/scripts/lib/headroom-state.sh" "$F7H/cd/lib/"
+cp "$ROOT/scripts/lib/engine-resolve.sh" "$F7H/cd/lib/"
 printf '# stale\n' > "$F7H/cd/attribution.jq"                    # stale flat sibling must be ignored
 out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7H/settings.json" \
       DOCTOR_CLAUDE_DIR="$F7H/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" 2>&1)
@@ -1533,9 +1534,15 @@ fi
 # either way; asserting "current" pins that a healthy custom install is
 # doctor-clean, not just that check 7 alone trusts it. (An UNhealthy custom
 # install, deps missing/stale, is covered separately by F7p.)
-F7M="$REVD/f7m"; mkdir -p "$F7M/cd" "$F7M/custom/lib"
+F7M="$REVD/f7m"; mkdir -p "$F7M/cd/lib" "$F7M/custom/lib"
 cp "$ROOT/scripts/statusline.sh" "$F7M/custom/headroom-statusline.sh"          # wired HERE, present
-cp "$ROOT/scripts/lib/attribution.jq" "$ROOT/scripts/lib/headroom-state.sh" "$F7M/custom/lib/"
+cp "$ROOT/scripts/lib/attribution.jq" "$ROOT/scripts/lib/headroom-state.sh" \
+   "$ROOT/scripts/lib/engine-resolve.sh" "$F7M/custom/lib/"
+# engine-resolve.sh is NOT a badge dep and is never demanded next to a custom
+# copy (the doctor refuses to write there, so that FAIL could never be cleared —
+# review #13): it is checked under $CLAUDE_DIR, so a fully-healthy custom install
+# has it there too.
+cp "$ROOT/scripts/lib/engine-resolve.sh" "$F7M/cd/lib/"
 jq -n --arg c "$F7M/custom/headroom-statusline.sh" \
   '{statusLine:{type:"command",command:("bash \"" + $c + "\"")}}' > "$F7M/settings.json"
 out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7M/settings.json" \
@@ -1546,6 +1553,8 @@ check        "f7m: 7b also reports the custom copy current, not just check 7" "s
 check_absent "f7m: 7b doesn't cry wolf over a current custom copy either"     "is stale"                    "$out"
 check        "f7m: a fully-healthy custom install is doctor-clean end to end (7c too)" "statusline lib deps current" "$out"
 check_absent "f7m: a fully-healthy custom install isn't cried wolf over by 7c"         "missing/stale"              "$out"
+check        "f7m: the shared engine resolver is reported from \$CLAUDE_DIR, not the custom dir" \
+             "shared engine resolver current ($F7M/cd/lib/engine-resolve.sh)" "$out"
 HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7M/settings.json" \
   DOCTOR_CLAUDE_DIR="$F7M/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" --fix >/dev/null 2>&1
 if [ ! -f "$F7M/cd/headroom-statusline.sh" ]; then
@@ -1644,7 +1653,8 @@ fi
 # healthy custom install (deps present and current) must report ok, not skip
 F7P2="$REVD/f7p2"; mkdir -p "$F7P2/cd" "$F7P2/custom/lib"
 cp "$ROOT/scripts/statusline.sh" "$F7P2/custom/headroom-statusline.sh"
-cp "$ROOT/scripts/lib/attribution.jq" "$ROOT/scripts/lib/headroom-state.sh" "$F7P2/custom/lib/"
+cp "$ROOT/scripts/lib/attribution.jq" "$ROOT/scripts/lib/headroom-state.sh" \
+   "$ROOT/scripts/lib/engine-resolve.sh" "$F7P2/custom/lib/"
 jq -n --arg c "$F7P2/custom/headroom-statusline.sh" \
   '{statusLine:{type:"command",command:("bash \"" + $c + "\"")}}' > "$F7P2/settings.json"
 out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7P2/settings.json" \
@@ -1676,7 +1686,10 @@ check_absent "f7q: a \$HOME-variable-prefixed wiring is not false-FAILed by a mi
 F7Q2="$REVD/f7q2"; mkdir -p "$F7Q2/cd"
 # no canonical copy on disk at all — only the file the command actually names
 printf '%s\n' '{"statusLine":{"type":"command","command":"bash \"~/.claude/headroom-statusline.sh.bak\"","refreshInterval":1}}' > "$F7Q2/settings.json"
-out=$(HOME="$F7Q2" HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7Q2/settings.json" \
+# $FENG on PATH keeps check 2b "ok" (HCAT_PYTHON is authoritative here, so this
+# can't change which statusLine-wiring candidate check 7 resolves) — this
+# fixture asserts no "fixable" anywhere in the output (issue #9)
+out=$(HOME="$F7Q2" HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F7Q2/settings.json" \
       DOCTOR_CLAUDE_DIR="$F7Q2/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" 2>&1)
 check_absent "f7q: a suffixed filename is not truncated into a fabricated fixable claim about the canonical name" \
              "fixable" "$out"
@@ -1926,79 +1939,31 @@ else
   echo "skip - f7bb: project-level settings backup-failure guard (running as root, permission bits bypassed)"
 fi
 
-# F8: execution semantics — Claude Code expands ${CLAUDE_PLUGIN_ROOT} in an MCP
-# stdio command and then spawns the result DIRECTLY (posix_spawn, no shell), so
-# literal quotes become part of the filename → ENOENT, the /plugin ✗, and the
-# bundled server never connects (shipped that way v2.5→v2.7.2, masked wherever a
-# manual ~/.claude.json registration still provided the tools). Hook commands are
-# the opposite — they DO run through a shell — so hooks.json keeps its quoting.
-# Pin the asymmetry in both directions.
-f8_mcp_cmd=$(jq -r '.mcpServers.headroom.command' "$MCP_JSON")
-check_absent "f8: mcp command carries no literal quotes (spawned without a shell)" '"' "$f8_mcp_cmd"
-f8_spawn=${f8_mcp_cmd//'${CLAUDE_PLUGIN_ROOT}'/$ROOT}
-if [ -x "$f8_spawn" ]; then
-  echo "ok - f8: mcp command as-spawned is the executable launcher"; PASS=$((PASS+1))
-else
-  echo "FAIL - f8: mcp command as-spawned is the executable launcher"
-  echo "    not executable: $f8_spawn"
-  FAIL=$((FAIL+1))
-fi
+# F8: execution semantics — Claude Code spawns an MCP stdio command DIRECTLY
+# (no shell) on every OS, so the bundled command must be the bare name
+# `headroom`, resolved via PATH, with no path segment and no quotes for a
+# shell-less spawn to mis-resolve (a path or quoted command broke this on
+# every OS pre-v2.8, and a `.sh` would be unspawnable on Windows regardless).
+# Hook commands are the opposite — they DO run through a shell — so
+# hooks.json keeps its quoting. Pin the asymmetry in both directions.
+check_absent "f8: mcp command carries no path (nothing for a shell-less spawn to mis-resolve)" "/" "$mcp_cmd"
+check_absent "f8: mcp command carries no quotes" '"' "$mcp_cmd"
 check "f8: hooks.json gate command KEEPS its shell quoting (hooks run via shell)" \
       '"${CLAUDE_PLUGIN_ROOT}"/scripts/hcat-gate.sh' \
       "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$ROOT/hooks/hooks.json")"
 
-# F8b: doctor 4b must judge the launcher AS-SPAWNED. The shipped bug above stayed
-# green for two minor versions because 4b stripped quotes before its -x test —
-# mechanism, not outcome. A quoted-but-otherwise-correct command is now fixable:
-# --fix unquotes the bundled .mcp.json in place (.bak first, idempotent).
-F8B="$REVD/f8b"; mkdir -p "$F8B/root/scripts" "$F8B/cd"
-cp "$DOCTOR" "$F8B/root/scripts/doctor.sh"
-printf '#!/bin/sh\nexec true\n' > "$F8B/root/scripts/mcp-launcher.sh"
-chmod +x "$F8B/root/scripts/mcp-launcher.sh"
-jq -n '{mcpServers:{headroom:{type:"stdio",command:"\"${CLAUDE_PLUGIN_ROOT}\"/scripts/mcp-launcher.sh",args:[],env:{}}}}' \
+# F8b: doctor 4b judges the .mcp.json SHAPE — a path-style command is what a
+# pre-v2.8 cache copy looks like, and it can never spawn on Windows: FAIL, not
+# fixable (there is no launcher left to repair; the fix is a plugin update).
+F8B="$REVD/f8b"; mkdir -p "$F8B/root/scripts" "$F8B/root/bin" "$F8B/cd"
+cp "$DOCTOR" "$F8B/root/scripts/doctor.sh"; cp -R "$ROOT/scripts/lib" "$F8B/root/scripts/lib"
+cp "$HCAT" "$F8B/root/bin/hcat"; cp -R "$ROOT/hooks" "$F8B/root/hooks"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"${CLAUDE_PLUGIN_ROOT}/scripts/mcp-launcher.sh",args:[],env:{}}}}' \
   > "$F8B/root/.mcp.json"
-out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
+out=$(HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
       DOCTOR_CLAUDE_DIR="$F8B/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8B/root/scripts/doctor.sh" 2>&1)
-check        "f8b: quoted mcp command reported fixable" "carries literal quotes"              "$out"
-check_absent "f8b: quoted mcp command not greened"      ".mcp.json registers the headroom MCP" "$out"
-HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
-  DOCTOR_CLAUDE_DIR="$F8B/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8B/root/scripts/doctor.sh" --fix >/dev/null 2>&1
-check_eq "f8b: --fix unquoted the command in place" '${CLAUDE_PLUGIN_ROOT}/scripts/mcp-launcher.sh' \
-         "$(jq -r '.mcpServers.headroom.command' "$F8B/root/.mcp.json")"
-out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
-      DOCTOR_CLAUDE_DIR="$F8B/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8B/root/scripts/doctor.sh" 2>&1)
-check "f8b: post-fix rerun greens 4b" ".mcp.json registers the headroom MCP" "$out"
-HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8B/settings.json" \
-  DOCTOR_CLAUDE_DIR="$F8B/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8B/root/scripts/doctor.sh" --fix >/dev/null 2>&1
-check_eq "f8b: second --fix is a no-op (exactly one backup)" "1" \
-         "$(ls "$F8B/root/.mcp.json.bak."* 2>/dev/null | wc -l | tr -d ' ')"
-
-# F8c: the backup must actually succeed before the destructive rewrite
-# proceeds. A directory that denies creating new entries (no backup possible)
-# but still permits writing to an existing file's inode (the rewrite itself)
-# is exactly the failure mode this guards: previously the backup's exit
-# status was discarded and the rewrite ran anyway, claiming a backup that was
-# never created. Root can bypass these permission bits, so this fixture is
-# skipped when running as root (id -u 0).
-if [ "$(id -u)" -ne 0 ]; then
-  F8C="$REVD/f8c"; mkdir -p "$F8C/root/scripts" "$F8C/cd"
-  cp "$DOCTOR" "$F8C/root/scripts/doctor.sh"
-  printf '#!/bin/sh\nexec true\n' > "$F8C/root/scripts/mcp-launcher.sh"
-  chmod +x "$F8C/root/scripts/mcp-launcher.sh"
-  jq -n '{mcpServers:{headroom:{type:"stdio",command:"\"${CLAUDE_PLUGIN_ROOT}\"/scripts/mcp-launcher.sh",args:[],env:{}}}}' \
-    > "$F8C/root/.mcp.json"
-  chmod 666 "$F8C/root/.mcp.json"   # the file itself stays writable in place
-  chmod 555 "$F8C/root"             # but the directory cannot gain new entries
-  out=$(HCAT_PYTHON="$FENG/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$F8C/settings.json" \
-        DOCTOR_CLAUDE_DIR="$F8C/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$F8C/root/scripts/doctor.sh" --fix 2>&1)
-  chmod 755 "$F8C/root"             # restore before any cleanup/further use
-  check "f8c: a backup failure refuses the destructive rewrite" "could not back up" "$out"
-  check_eq "f8c: the command is left untouched when the backup fails" \
-           '"${CLAUDE_PLUGIN_ROOT}"/scripts/mcp-launcher.sh' \
-           "$(jq -r '.mcpServers.headroom.command' "$F8C/root/.mcp.json")"
-else
-  echo "skip - f8c: backup-failure guard (running as root, permission bits bypassed)"
-fi
+check        "f8b: path-style mcp command is FAIL (stale copy)" "stale plugin copy" "$out"
+check_absent "f8b: path-style mcp command not greened" ".mcp.json spawns" "$out"
 
 # --- 36. data-driven price table (data/model-prices.json)
 PRICES_JSON="$ROOT/data/model-prices.json"
@@ -2107,9 +2072,15 @@ jq -e '.hooks.SessionStart[0].hooks[0].command | contains("session-probe.sh")' \
   && check "health: hooks.json registers the probe" "ok" "ok" \
   || check "health: hooks.json registers the probe" "ok" "MISSING"
 
-# probe: healthy env is silent (existence-level checks only)
+# probe: healthy env is silent (existence-level checks only). $AMBIENT_HR
+# (a PATH dir holding nothing but an executable `headroom`) is what makes
+# these fixtures healthy under the v2.8 contract: the bundled .mcp.json spawns
+# the bare name, so an engine that resolves while `headroom` is off PATH now
+# earns its own probe nudge (see the w11 block) -- this box has no ambient
+# headroom, so without it every "silent" assertion below would be asserting
+# the absence of a line the probe is now right to print.
 rm -f "$HEADROOM_STATE_DIR/last-error"
-out=$(HCAT_PYTHON=/usr/bin/true bash "$PROBE"); rc=$?
+out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE"); rc=$?
 check_eq "health: probe healthy silent" "" "$out"
 check_eq "health: probe healthy exit 0" "0" "$rc"
 
@@ -2131,7 +2102,7 @@ fi
 
 # probe: surfaces a fresh recorded failure even when its own checks pass
 printf '%s runtime hcat: compression failed: boom\n' "$(date +%s)" > "$HEADROOM_STATE_DIR/last-error"
-out=$(HCAT_PYTHON=/usr/bin/true bash "$PROBE")
+out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
 check "health: probe surfaces recorded failure" "recent failure" "$out"
 
 # probe: status line not wired yet → one-line setup nudge (the "I installed it,
@@ -2139,7 +2110,7 @@ check "health: probe surfaces recorded failure" "recent failure" "$out"
 # NOT write last-error (an unfinished setup step is not an engine failure).
 rm -f "$HEADROOM_STATE_DIR/last-error"
 uwd="$TMP/probe-unwired"; mkdir -p "$uwd"; printf '{}' > "$uwd/settings.json"
-out=$(HCAT_PYTHON=/usr/bin/true HEADROOM_SETTINGS="$uwd/settings.json" bash "$PROBE")
+out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" HEADROOM_SETTINGS="$uwd/settings.json" bash "$PROBE")
 check "health: probe nudges an unwired status line" "status line" "$out"
 check "health: setup nudge points at doctor --fix"  "doctor --fix"  "$out"
 check "health: setup nudge is a setup line"          "headroom setup" "$out"
@@ -2154,12 +2125,12 @@ fi
 wmd="$TMP/probe-wiredmiss"; mkdir -p "$wmd"
 printf '{"statusLine":{"type":"command","command":"bash \\"%s/headroom-statusline.sh\\""}}' "$wmd" > "$wmd/settings.json"
 : > "$wmd/headroom-statusline.sh"   # copy present, but no lib/ next to it
-out=$(HCAT_PYTHON=/usr/bin/true HEADROOM_SETTINGS="$wmd/settings.json" bash "$PROBE")
+out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" HEADROOM_SETTINGS="$wmd/settings.json" bash "$PROBE")
 check "health: probe nudges wired-but-missing-deps" "missing its deps" "$out"
 
 # probe: fully wired + deps present (the exported fixture) → silent, no false nudge
 rm -f "$HEADROOM_STATE_DIR/last-error"
-out=$(HCAT_PYTHON=/usr/bin/true bash "$PROBE")
+out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
 check_eq "health: wired status line + deps stays silent" "" "$out"
 
 # a working compression clears engine/runtime errors (real engine required)
@@ -2177,7 +2148,9 @@ if [ -n "$HEADROOM_PY" ]; then
   printf '%s engine stale2\n' "$(date +%s)" > "$HEADROOM_STATE_DIR/last-error"
   CDH="$TMP/doc-health"; mkdir -p "$CDH"
   SH="$TMP/doc-health-s.json"; doc_settings_wired "$CDH" > "$SH"
-  out=$(HCAT_PYTHON="$HEADROOM_PY" DOCTOR_SETTINGS="$SH" DOCTOR_CLAUDE_DIR="$CDH" \
+  # $FENG on PATH keeps check 2b "ok" (real headroom isn't on this Mac's ambient
+  # PATH) so the run stays fully clean and block 9 actually clears (issue #9)
+  out=$(HCAT_PYTHON="$HEADROOM_PY" PATH="$FENG:$PATH" DOCTOR_SETTINGS="$SH" DOCTOR_CLAUDE_DIR="$CDH" \
         DOCTOR_VENV_DIR="$TMP/doc-none" bash "$DOCTOR" 2>&1)
   check "health: doctor reports clearing" "cleared recorded failure" "$out"
   if [ -f "$HEADROOM_STATE_DIR/last-error" ]; then
@@ -2328,12 +2301,12 @@ printf '{"session_id":"ledger-empty","transcript_path":"%s"}' "$trE" | bash "$LE
 check_absent "ledger: empty session not recorded" "ledger-empty" "$(cat "$lg")"
 
 # the probe surfaces the invoice exactly once
-out=$(HCAT_PYTHON=/usr/bin/true bash "$PROBE")
+out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
 check "invoice: probe surfaces last session" "headroom invoice" "$out"
 check "invoice: reports savings"             "saved ~1.2k tok"  "$out"
 check "invoice: loss-frames the misses"      "left on the table" "$out"
 check "invoice: names the biggest miss"      "/var/data/events.json" "$out"
-out=$(HCAT_PYTHON=/usr/bin/true bash "$PROBE")
+out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
 check_absent "invoice: surfaced only once" "invoice" "$out"
 
 # hooks.json registers the ledger hook on Stop and SessionEnd
@@ -2689,13 +2662,1108 @@ out=$(gate_input "$nolib_f" nolib-2 | HEADROOM_STATE_DIR="$TMP/nolib-state" HCAT
 check_eq "fix/nolib: gate still exits 0 without lib" "0" "$rc"
 check "fix/nolib: gate still gates .json by extension without lib" "deny" "$out"
 
+# --- 46. v2.8 Windows support (issue #9)
+ER="$ROOT/scripts/lib/engine-resolve.sh"
+er() {  # er <fn> [args] — call a resolver function in a clean subshell
+  ( set -u; . "$ER"; "$@" )
+}
+W="$TMP/w"; mkdir -p "$W"
+
+# w1. is_windows: DOCTOR_OS override wins, OSTYPE next, uname last
+check_eq "w1: DOCTOR_OS=windows → is_windows" "0" "$(DOCTOR_OS=windows er is_windows; echo $?)"
+check_eq "w1: DOCTOR_OS=unix → not windows"   "1" "$(DOCTOR_OS=unix OSTYPE=msys er is_windows; echo $?)"
+check_eq "w1: OSTYPE=msys → is_windows"       "0" "$(unset DOCTOR_OS; OSTYPE=msys er is_windows; echo $?)"
+check_eq "w1: darwin → not windows"           "1" "$(unset DOCTOR_OS; OSTYPE=darwin24 er is_windows; echo $?)"
+
+# w1. venv_bindir: bin/ vs Scripts/ layouts
+W1U="$W/venv-unix"; mkdir -p "$W1U/bin"; printf '#!/bin/sh\nexit 0\n' > "$W1U/bin/python"; chmod +x "$W1U/bin/python"
+W1W="$W/venv-win";  mkdir -p "$W1W/Scripts"
+printf '#!/bin/sh\necho "win-python $*"\n' > "$W1W/Scripts/python.exe"; chmod +x "$W1W/Scripts/python.exe"
+printf '#!/bin/sh\necho "win-headroom $*"\n' > "$W1W/Scripts/headroom.exe"; chmod +x "$W1W/Scripts/headroom.exe"
+check_eq "w1: venv_bindir unix layout"    "bin"     "$(er venv_bindir "$W1U")"
+check_eq "w1: venv_bindir windows layout" "Scripts" "$(er venv_bindir "$W1W")"
+check_eq "w1: venv_bindir empty dir fails" "1"      "$(er venv_bindir "$W" >/dev/null; echo $?)"
+
+# w1. resolve_engine_python: Scripts\python.exe venv found when nothing else is
+out=$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W1W" er resolve_engine_python)
+check_eq "w1: resolver finds Scripts/python.exe" "$W1W/Scripts/python.exe" "$out"
+out=$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W1U" er resolve_engine_python)
+check_eq "w1: resolver finds bin/python" "$W1U/bin/python" "$out"
+check_eq "w1: resolver exits 1 with no engine" "1" \
+  "$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_engine_python >/dev/null; echo $?)"
+
+# w1. HCAT_PYTHON is authoritative even when broken (callers decide what to do)
+check_eq "w1: HCAT_PYTHON verbatim" "/nonexistent/py" \
+  "$(HCAT_PYTHON=/nonexistent/py DOCTOR_VENV_DIR="$W1W" er resolve_engine_python)"
+check_eq "w1: candidates = only HCAT_PYTHON when set" "/nonexistent/py" \
+  "$(HCAT_PYTHON=/nonexistent/py DOCTOR_VENV_DIR="$W1W" er engine_python_candidates)"
+
+# w1. PATH sibling beats venv; python.exe sibling accepted
+W1P="$W/pathbin"; mkdir -p "$W1P"
+printf '#!/bin/sh\nexit 0\n' > "$W1P/headroom"; chmod +x "$W1P/headroom"
+printf '#!/bin/sh\nexit 0\n' > "$W1P/python.exe"; chmod +x "$W1P/python.exe"
+out=$(unset HCAT_PYTHON; PATH="$W1P:/usr/bin:/bin" DOCTOR_VENV_DIR="$W1W" er resolve_engine_python)
+check_eq "w1: python.exe sibling of headroom on PATH wins" "$W1P/python.exe" "$out"
+
+# w1. MZ trampoline (uv / pip-on-Windows launcher): no shebang parse, fall through
+W1M="$W/mzbin"; mkdir -p "$W1M"
+printf 'MZ\220\000\003garbage #!/should/not/be/parsed\n' > "$W1M/headroom"; chmod +x "$W1M/headroom"
+out=$(unset HCAT_PYTHON; PATH="$W1M:/usr/bin:/bin" DOCTOR_VENV_DIR="$W1W" er resolve_engine_python)
+check_eq "w1: MZ trampoline skips shebang, falls to venv" "$W1W/Scripts/python.exe" "$out"
+
+# w1. uv tool dir layout (stub uv prints a dir for `uv tool dir`)
+W1UV="$W/uvtools"; mkdir -p "$W1UV/headroom-ai/Scripts" "$W/uvbin"
+printf '#!/bin/sh\nexit 0\n' > "$W1UV/headroom-ai/Scripts/python.exe"; chmod +x "$W1UV/headroom-ai/Scripts/python.exe"
+printf '#!/bin/sh\nexit 0\n' > "$W1UV/headroom-ai/Scripts/headroom.exe"; chmod +x "$W1UV/headroom-ai/Scripts/headroom.exe"
+printf '#!/bin/sh\n[ "$1" = tool ] && [ "$2" = dir ] && printf "%%s" "%s"\n' "$W1UV" > "$W/uvbin/uv"; chmod +x "$W/uvbin/uv"
+out=$(unset HCAT_PYTHON; PATH="$W/uvbin:/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_engine_python)
+check_eq "w1: uv tool dir python found" "$W1UV/headroom-ai/Scripts/python.exe" "$out"
+out=$(unset HCAT_PYTHON; PATH="$W/uvbin:/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_headroom_cli)
+check_eq "w1: uv tool dir CLI found" "$W1UV/headroom-ai/Scripts/headroom.exe" "$out"
+
+# w1. resolve_headroom_cli: HCAT_PYTHON dir authoritative; venv Scripts/headroom.exe; PATH
+out=$(HCAT_PYTHON="$W1W/Scripts/python.exe" PATH="$W1P:/usr/bin:/bin" er resolve_headroom_cli)
+check_eq "w1: CLI next to HCAT_PYTHON wins over PATH" "$W1W/Scripts/headroom.exe" "$out"
+out=$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W1W" er resolve_headroom_cli)
+check_eq "w1: CLI from venv Scripts/" "$W1W/Scripts/headroom.exe" "$out"
+out=$(unset HCAT_PYTHON; PATH="$W1P:/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_headroom_cli)
+check_eq "w1: CLI from PATH" "$W1P/headroom" "$out"
+check_eq "w1: CLI exits 1 when absent" "1" \
+  "$(unset HCAT_PYTHON; PATH="/usr/bin:/bin" DOCTOR_VENV_DIR="$W/none" er resolve_headroom_cli >/dev/null; echo $?)"
+
+# w1. win_path / unix_path: stubbed cygpath, else passthrough
+# NOTE: written via printf '%s\n' (not echo) — /bin/sh here is bash-3.2 in
+# POSIX mode, whose echo builtin interprets "\f" as a form-feed escape and
+# would corrupt the literal "C:\fake\..." fixture value; printf's %s leaves
+# its argument uninterpreted. See task-1-report.md for details.
+cat > "$W/cygpath" <<'CYGEOF'
+#!/bin/sh
+case $1 in
+  -w) printf '%s\n' "C:\\fake\\$(basename "$2")";;
+  -u) p=$(printf '%s' "$2" | tr '\\' '/'); printf '%s\n' "${CYGPATH_UNIX_DIR:-/c/fake}/$(basename "$p")";;
+esac
+CYGEOF
+chmod +x "$W/cygpath"
+check_eq "w1: win_path via DOCTOR_CYGPATH" 'C:\fake\x.sh' "$(DOCTOR_CYGPATH="$W/cygpath" er win_path /tmp/x.sh)"
+# real cygpath -u splits backslash-separated Windows paths natively; the stub
+# normalizes "\" to "/" before basename() so it does the same (basename()
+# itself only ever splits on "/").
+check_eq "w1: unix_path via DOCTOR_CYGPATH" '/c/fake/x.sh' "$(DOCTOR_CYGPATH="$W/cygpath" er unix_path 'C:\x.sh')"
+check_eq "w1: win_path passthrough without cygpath" "/tmp/x.sh" "$(unset DOCTOR_CYGPATH; PATH="/usr/bin:/bin" er win_path /tmp/x.sh)"
+
+# w2. hcat: Windows venv layout resolved; exec env is UTF-8 safe
+W2="$W/w2"; mkdir -p "$W2/venv/Scripts" "$W2/home"
+# a fake python.exe that prints the env vars hcat is supposed to set, then its args
+cat > "$W2/venv/Scripts/python.exe" <<'W2EOF'
+#!/bin/sh
+echo "ioenc=${PYTHONIOENCODING:-unset} utf8=${PYTHONUTF8:-unset} args=$*"
+W2EOF
+chmod +x "$W2/venv/Scripts/python.exe"
+printf '{"k":1}' > "$W2/tiny.json"
+out=$(env -u HCAT_PYTHON HOME="$W2/home" DOCTOR_VENV_DIR="$W2/venv" PATH="/usr/bin:/bin" bash "$HCAT" "$W2/tiny.json" 2>&1); rc=$?
+check "w2: hcat resolves Scripts/python.exe" "args=- $W2/tiny.json" "$out"
+check "w2: hcat sets PYTHONIOENCODING=utf-8" "ioenc=utf-8" "$out"
+check "w2: hcat sets PYTHONUTF8=1"           "utf8=1"      "$out"
+check_eq "w2: hcat exit 0" "0" "$rc"
+# the legacy flat layout (no lib/ next to hcat) still resolves the plain venv
+W2L="$W/w2legacy"; mkdir -p "$W2L/home/.headroom-venv/bin"
+cp "$HCAT" "$W2L/hcat"; chmod +x "$W2L/hcat"
+printf '#!/bin/sh\necho "legacy-py $*"\n' > "$W2L/home/.headroom-venv/bin/python"; chmod +x "$W2L/home/.headroom-venv/bin/python"
+out=$(env -u HCAT_PYTHON -u DOCTOR_VENV_DIR HOME="$W2L/home" PATH="/usr/bin:/bin" bash "$W2L/hcat" "$W2/tiny.json" 2>&1)
+check "w2: legacy flat hcat (no lib) still finds ~/.headroom-venv" "legacy-py" "$out"
+
+# w3. gate + probe see a Scripts\python.exe engine
+W3="$W/w3"; mkdir -p "$W3/venv/Scripts" "$W3/home"
+printf '#!/bin/sh\nexit 0\n' > "$W3/venv/Scripts/python.exe"; chmod +x "$W3/venv/Scripts/python.exe"
+out=$(gate_input "$BIGJSON" w3-g1 | env -u HCAT_PYTHON HOME="$W3/home" DOCTOR_VENV_DIR="$W3/venv" PATH="/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W3/state" bash "$GATE"); rc=$?
+check "w3: gate denies with a Scripts/ engine" "deny" "$out"
+check_eq "w3: gate exit 0" "0" "$rc"
+PROBE="$ROOT/scripts/session-probe.sh"
+out=$(printf '{"session_id":"w3"}' | env -u HCAT_PYTHON HOME="$W3/home" DOCTOR_VENV_DIR="$W3/venv" PATH="/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W3/state" bash "$PROBE"); rc=$?
+check_absent "w3: probe does not call a Scripts/ engine 'not installed'" "engine not installed" "$out"
+check_eq "w3: probe exit 0" "0" "$rc"
+
+# w4. doctor: engine found in a Scripts/ venv; bootstrap works with `python` only
+W4="$W/w4"; mkdir -p "$W4/cd" "$W4/venv/Scripts"
+printf '#!/bin/sh\nexit 0\n' > "$W4/venv/Scripts/python.exe"; chmod +x "$W4/venv/Scripts/python.exe"
+S4="$W4/s.json"; doc_settings_wired "$W4/cd" > "$S4"
+out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" DOCTOR_CLAUDE_DIR="$W4/cd" \
+      DOCTOR_VENV_DIR="$W4/venv" bash "$DOCTOR" 2>&1)
+check "w4: doctor engine via Scripts/python.exe" "engine python: $W4/venv/Scripts/python.exe" "$out"
+
+# a toolchain with `python` but NO `python3` (typical Windows) — stub creates a Scripts/ venv
+W4B="$W/w4boot"; mkdir -p "$W4B/stub" "$W4B/cd"
+ln -sf "$(command -v jq)" "$W4B/stub/jq"
+cat > "$W4B/stub/python" <<'W4EOF'
+#!/bin/sh
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  mkdir -p "$3/Scripts"
+  printf '#!/bin/sh\necho "$@" >> "$(dirname "$0")/../pip.calls"\n' > "$3/Scripts/pip.exe"
+  printf '#!/bin/sh\nexit 0\n' > "$3/Scripts/python.exe"
+  printf 'MZ() { :; }\nexit 0\n' > "$3/Scripts/headroom.exe"   # PE magic (review #3) yet still shell-runnable
+  chmod +x "$3/Scripts/pip.exe" "$3/Scripts/python.exe" "$3/Scripts/headroom.exe"
+fi
+exit 0
+W4EOF
+chmod +x "$W4B/stub/python"
+S4B="$W4B/s.json"; doc_settings_wired "$W4B/cd" > "$S4B"
+# DOCTOR_OS=windows forces the py/python/python3 preference order used by a real
+# Windows toolchain; without it, this POSIX test box's real /usr/bin/python3
+# would be tried first (same macOS-python3 hazard the w4none note calls out).
+out=$(env -u HCAT_PYTHON PATH="$W4B/stub:/usr/bin:/bin" DOCTOR_OS=windows DOCTOR_SETTINGS="$S4B" DOCTOR_CLAUDE_DIR="$W4B/cd" \
+      DOCTOR_VENV_DIR="$W4B/venv" DOCTOR_SHIM_DIR="$W4B/shim" bash "$DOCTOR" --fix 2>&1)
+check "w4: bootstrap succeeds with python (no python3)" "engine bootstrapped: python -m venv" "$out"
+check "w4: bootstrap used Scripts/pip.exe" "install headroom-ai[all]" "$(cat "$W4B/venv/pip.calls" 2>/dev/null)"
+# no interpreter at all → honest FAIL naming what was tried
+W4N="$W/w4none"; mkdir -p "$W4N/stub" "$W4N/cd"; ln -sf "$(command -v jq)" "$W4N/stub/jq"
+# shadow /usr/bin/python3 so the FAIL branch (not a real bootstrap) is exercised
+printf '#!/bin/sh\nexit 1\n' > "$W4N/stub/python3"; chmod +x "$W4N/stub/python3"
+printf '#!/bin/sh\nexit 1\n' > "$W4N/stub/python"; chmod +x "$W4N/stub/python"
+S4N="$W4N/s.json"; doc_settings_wired "$W4N/cd" > "$S4N"
+out=$(env -u HCAT_PYTHON PATH="$W4N/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$S4N" DOCTOR_CLAUDE_DIR="$W4N/cd" \
+      DOCTOR_VENV_DIR="$W4N/venv" bash "$DOCTOR" --fix 2>&1)
+check "w4: no interpreter → FAIL names python3/python/py -3" "python3, python, py -3" "$out"
+
+# w5. doctor 4b greens the bare command and names the CLI check
+out=$(HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S4" DOCTOR_CLAUDE_DIR="$W4/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" 2>&1)
+check "w5: 4b ok for bare command" ".mcp.json spawns \`headroom mcp serve\` by name" "$out"
+
+# w6. check 2b: shim + verify
+W6="$W/w6"; mkdir -p "$W6/cd" "$W6/venv/bin" "$W6/shim"
+printf '#!/bin/sh\nexit 0\n' > "$W6/venv/bin/python";   chmod +x "$W6/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W6/venv/bin/headroom"; chmod +x "$W6/venv/bin/headroom"
+S6="$W6/s.json"; doc_settings_wired "$W6/cd" > "$S6"
+# engine found in the venv, headroom NOT on PATH → fixable
+out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6" DOCTOR_CLAUDE_DIR="$W6/cd" \
+      DOCTOR_VENV_DIR="$W6/venv" DOCTOR_SHIM_DIR="$W6/shim" bash "$DOCTOR" 2>&1)
+check "w6: CLI off PATH is fixable" "headroom CLI not on PATH (engine at $W6/venv/bin/headroom)" "$out"
+# --fix with the shim dir ON PATH → fixed, shim is a symlink to the venv CLI
+out=$(env -u HCAT_PYTHON PATH="$W6/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6" DOCTOR_CLAUDE_DIR="$W6/cd" \
+      DOCTOR_VENV_DIR="$W6/venv" DOCTOR_SHIM_DIR="$W6/shim" bash "$DOCTOR" --fix 2>&1)
+check "w6: --fix shims and verifies" "headroom shimmed to $W6/shim/headroom (resolves on PATH)" "$out"
+check_eq "w6: shim is a symlink to the venv CLI" "$W6/venv/bin/headroom" "$(readlink "$W6/shim/headroom")"
+# second run: ok, no change
+out=$(env -u HCAT_PYTHON PATH="$W6/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6" DOCTOR_CLAUDE_DIR="$W6/cd" \
+      DOCTOR_VENV_DIR="$W6/venv" DOCTOR_SHIM_DIR="$W6/shim" bash "$DOCTOR" --fix 2>&1)
+check "w6: second --fix reports ok" "headroom CLI on PATH ($W6/shim/headroom)" "$out"
+check_absent "w6: second --fix does not re-shim" "headroom shimmed" "$out"
+# --fix with the shim dir NOT on PATH → FAIL with the exact snippet
+W6N="$W/w6nopath"; mkdir -p "$W6N/cd" "$W6N/shim"
+S6N="$W6N/s.json"; doc_settings_wired "$W6N/cd" > "$S6N"
+out=$(env -u HCAT_PYTHON SHELL=/bin/zsh PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6N" DOCTOR_CLAUDE_DIR="$W6N/cd" \
+      DOCTOR_VENV_DIR="$W6/venv" DOCTOR_SHIM_DIR="$W6N/shim" bash "$DOCTOR" --fix 2>&1); rc=$?
+check "w6: unresolved after shim is FAIL" "but $W6N/shim is not on PATH" "$out"
+check "w6: FAIL carries the zsh snippet" "export PATH=\"$W6N/shim:\$PATH\"' >> ~/.zshrc" "$out"
+check_eq "w6: doctor exits 1 on that FAIL" "1" "$rc"
+# Windows: the shim is a COPY named headroom.exe and the hint names the user Path
+W6W="$W/w6win"; mkdir -p "$W6W/cd" "$W6W/venv/Scripts" "$W6W/shim"
+printf '#!/bin/sh\nexit 0\n' > "$W6W/venv/Scripts/python.exe";  chmod +x "$W6W/venv/Scripts/python.exe"
+# review #3: the Windows copy branch now refuses a non-PE CLI, so this fixture
+# must start with the "MZ" magic. It is still runnable here because the bytes
+# are also valid shell: bash falls back to running a non-binary file as a
+# script when execve returns ENOEXEC, so shim_runs' `--help` still succeeds.
+printf 'MZ() { :; }\nexit 0\n' > "$W6W/venv/Scripts/headroom.exe"; chmod +x "$W6W/venv/Scripts/headroom.exe"
+S6W="$W6W/s.json"; doc_settings_wired "$W6W/cd" > "$S6W"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6W" DOCTOR_CLAUDE_DIR="$W6W/cd" \
+      DOCTOR_VENV_DIR="$W6W/venv" DOCTOR_SHIM_DIR="$W6W/shim" bash "$DOCTOR" --fix 2>&1)
+if [ -f "$W6W/shim/headroom.exe" ] && [ ! -L "$W6W/shim/headroom.exe" ]; then
+  echo "ok - w6: windows shim is a copy named headroom.exe"; PASS=$((PASS+1))
+else
+  echo "FAIL - w6: windows shim is a copy named headroom.exe"; FAIL=$((FAIL+1))
+fi
+# review #14: the hint interpolates the SHIM_DIR this run actually uses instead
+# of a hardcoded %USERPROFILE%\.local\bin that contradicted the line beside it
+check "w6: windows hint names the shim dir this run uses" "add $W6W/shim to your user Path" "$out"
+# no engine at all → skip (check 2 already says fixable)
+out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6N" DOCTOR_CLAUDE_DIR="$W6N/cd" \
+      DOCTOR_VENV_DIR="$W/none" DOCTOR_SHIM_DIR="$W6N/shim2" bash "$DOCTOR" 2>&1)
+check "w6: no engine → CLI check skips" "headroom CLI on PATH (no engine yet" "$out"
+
+# w7. Windows status-line wiring + Git Bash prerequisite
+W7="$W/w7"; mkdir -p "$W7/cd" "$W7/bashdir"
+printf '#!/bin/sh\nexit 0\n' > "$W7/bashdir/bash.exe"; chmod +x "$W7/bashdir/bash.exe"
+S7="$W7/s.json"; printf '{}\n' > "$S7"
+# NOTE: CLAUDE_CODE_GIT_BASH_PATH is the REAL bash.exe fixture created above
+# ($W7/bashdir/bash.exe), not a fabricated 'C:\...' literal: check 0 does a
+# direct `-f` test with no cygpath translation (real Git Bash's MSYS runtime
+# already translates a native Windows path for free, so doctor.sh never needs
+# to convert it itself) -- a literal backslash string can never resolve to a
+# real file outside real Git Bash, so a hermetic non-Windows test host needs
+# an existing path here to exercise the "present" branch at all. See
+# task-7-report.md for why this departs from the brief's literal fixture.
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" CYGPATH_UNIX_DIR="$W7/cd" CLAUDE_CODE_GIT_BASH_PATH="$W7/bashdir/bash.exe" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S7" DOCTOR_CLAUDE_DIR="$W7/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W7/shim" bash "$DOCTOR" --fix 2>&1)
+check "w7: windows wire reports fixed" "statusLine wired to" "$out"
+# review #9: an ACCEPTED CLAUDE_CODE_GIT_BASH_PATH is normalized through
+# win_path too (it may be POSIX-spelled), so the stub cygpath rewrites this
+# fixture's own path the same way it rewrites the script path.
+check_eq "w7: windows statusLine command shape" '"C:\fake\bash.exe" "C:\fake\headroom-statusline.sh"' \
+  "$(jq -r '.statusLine.command' "$S7")"
+check "w7: doctor names Git Bash on Windows" "Windows (Git Bash)" "$out"
+# re-run: check 7 must recognise the backslash token as the canonical copy (no re-wire, no FAIL)
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" CYGPATH_UNIX_DIR="$W7/cd" CLAUDE_CODE_GIT_BASH_PATH="$W7/bashdir/bash.exe" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S7" DOCTOR_CLAUDE_DIR="$W7/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W7/shim" bash "$DOCTOR" 2>&1)
+check "w7: re-run sees the wiring as healthy" "statusLine wired (" "$out"
+check_absent "w7: re-run does not FAIL the windows path" "no such file exists" "$out"
+# CLAUDE_CODE_GIT_BASH_PATH pointing nowhere → FAIL
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows CLAUDE_CODE_GIT_BASH_PATH="$W7/missing/bash.exe" PATH="$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S7" DOCTOR_CLAUDE_DIR="$W7/cd" DOCTOR_VENV_DIR="$NOVENV" bash "$DOCTOR" 2>&1)
+check "w7: broken CLAUDE_CODE_GIT_BASH_PATH is FAIL" "hooks and the status line run through Git Bash" "$out"
+# the FAIL must be ACTIONABLE (review doc item 2): the usual cause is a stale
+# variable on a box that already has Git Bash, so it names where the value lives
+check "w7: that FAIL names settings.json env as the fix point" "fix that path in settings.json env" "$out"
+check "w7: that FAIL still names the Git for Windows requirement" "Git for Windows" "$out"
+# probe: same prerequisite, one problem line
+out=$(printf '{"session_id":"w7"}' | env -u HCAT_PYTHON DOCTOR_OS=windows CLAUDE_CODE_GIT_BASH_PATH="$W7/missing/bash.exe" \
+      HOME="$W7" HEADROOM_STATE_DIR="$W7/state" bash "$PROBE")
+check "w7: probe flags a broken Git Bash path" "Git Bash" "$out"
+# POSIX wiring unchanged
+S7U="$W7/su.json"; printf '{}\n' > "$S7U"
+env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S7U" DOCTOR_CLAUDE_DIR="$W7/cdu" \
+  DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W7/shim" bash "$DOCTOR" --fix >/dev/null 2>&1
+check_eq "w7: posix statusLine command unchanged" "bash \"$W7/cdu/headroom-statusline.sh\"" "$(jq -r '.statusLine.command' "$S7U")"
+
+# w9. CI files exist and are well-formed
+WF="$ROOT/.github/workflows/test.yml"
+check "w9: workflow has a windows-latest job" "windows-latest" "$(cat "$WF" 2>/dev/null)"
+check "w9: workflow runs the suite on ubuntu+macos" "macos-latest" "$(cat "$WF" 2>/dev/null)"
+check "w9: windows job runs windows-check.sh" "scripts/ci/windows-check.sh" "$(cat "$WF" 2>/dev/null)"
+check "w9: spawn probe exists" "child_process" "$(cat "$ROOT/scripts/ci/spawn-probe.mjs" 2>/dev/null)"
+if [ -x "$ROOT/scripts/ci/windows-check.sh" ]; then echo "ok - w9: windows-check.sh executable"; PASS=$((PASS+1)); else echo "FAIL - w9: windows-check.sh executable"; FAIL=$((FAIL+1)); fi
+
+# w10. docs + manifests
+check "w10: README has a Windows section"      "## Windows"           "$(cat "$ROOT/README.md")"
+check "w10: README names Git Bash prerequisite" "Git for Windows"     "$(cat "$ROOT/README.md")"
+check "w10: README upgrade note for the shim"   "headroom on PATH"    "$(cat "$ROOT/README.md")"
+check_absent "w10: README no launcher"          "mcp-launcher"        "$(cat "$ROOT/README.md")"
+check_eq "w10: plugin.json 2.8.0"      "2.8.0" "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")"
+check_eq "w10: marketplace.json 2.8.0" "2.8.0" "$(jq -r '.plugins[0].version // .version' "$ROOT/.claude-plugin/marketplace.json")"
+
+# w11. final whole-branch review fix wave (C1, I1, I2, I3, M4 + shim idempotency)
+
+# w11-C1. The window between a plugin update and the next `/doctor --fix`: a
+# v2.7.x install whose engine lives in the doctor's own venv still RESOLVES, but
+# the v2.8 .mcp.json spawns the bare name, so its MCP stops connecting with no
+# in-product signal (the badge's "idle" is indistinguishable from "nothing
+# compressed yet"). The SessionStart probe must nudge — via add_problem, NOT
+# note_error: this is a setup gap, not a breakage, so it must not flip the badge
+# to "broken" (same reasoning as the never-installed case).
+W11="$W/w11"; mkdir -p "$W11/venv/bin" "$W11/home"
+printf '#!/bin/sh\nexit 0\n'  > "$W11/venv/bin/python";   chmod +x "$W11/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W11/venv/bin/headroom"; chmod +x "$W11/venv/bin/headroom"
+out=$(printf '{"session_id":"w11"}' | env -u HCAT_PYTHON HOME="$W11/home" DOCTOR_VENV_DIR="$W11/venv" \
+      PATH="$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W11/state" bash "$PROBE"); rc=$?
+check        "w11: probe nudges when the engine resolves but headroom is off PATH" "not on PATH" "$out"
+check        "w11: the nudge names the v2.8 bare-name MCP spawn" "the bundled MCP spawns it by name" "$out"
+check_absent "w11: an off-PATH engine is not reported as never-installed" "engine not installed" "$out"
+check_eq     "w11: probe exits 0 on the PATH nudge" "0" "$rc"
+check_eq     "w11: probe still prints exactly one line" "1" "$(printf '%s\n' "$out" | grep -c .)"
+check_eq     "w11: the nudge is a well-formed SessionStart line" "SessionStart" \
+             "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.hookEventName' 2>/dev/null)"
+if [ -f "$W11/state/last-error" ]; then
+  echo "FAIL - w11: the PATH nudge does not flip the badge to broken"; FAIL=$((FAIL+1))
+else
+  echo "ok - w11: the PATH nudge does not flip the badge to broken"; PASS=$((PASS+1))
+fi
+# the same install with the engine's bin dir on PATH → silent
+out=$(printf '{"session_id":"w11b"}' | env -u HCAT_PYTHON HOME="$W11/home" DOCTOR_VENV_DIR="$W11/venv" \
+      PATH="$W11/venv/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W11/state" bash "$PROBE")
+check_absent "w11: no nudge once headroom resolves on PATH" "not on PATH" "$out"
+
+# w11-I1. spec §1: the doctor's lib-provisioning must ship engine-resolve.sh too.
+# A legacy FLAT install repaired with `/doctor --fix` (rather than by re-running
+# the SKILL.md installer) otherwise gets a ~/.claude/lib without it, and its flat
+# hcat / hcat-gate.sh / session-probe.sh permanently run on the minimal inline
+# fallback (HCAT_PYTHON → ~/.headroom-venv only) — no uv-tool, no shebang and no
+# Scripts/ resolution, for exactly the population that fallback exists to protect.
+W11D="$W/w11lib"; mkdir -p "$W11D/cd"
+S11D="$W11D/s.json"; printf '{}\n' > "$S11D"
+out=$(env -u HCAT_PYTHON PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S11D" \
+      DOCTOR_CLAUDE_DIR="$W11D/cd" DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W11D/shim" \
+      HEADROOM_STATE_DIR="$W11D/state" bash "$DOCTOR" --fix 2>&1)
+if cmp -s "$ROOT/scripts/lib/engine-resolve.sh" "$W11D/cd/lib/engine-resolve.sh"; then
+  echo "ok - w11: --fix provisions lib/engine-resolve.sh byte-identical to the plugin's"; PASS=$((PASS+1))
+else
+  echo "FAIL - w11: --fix provisions lib/engine-resolve.sh byte-identical to the plugin's"; FAIL=$((FAIL+1))
+fi
+# NOTE (review #13): engine-resolve.sh is reported on its OWN line, separate from
+# the badge deps — it is not a badge dep and is never demanded next to a
+# custom-path copy the doctor refuses to write to.
+check "w11: the badge deps are reported without engine-resolve.sh" \
+      "statusline lib deps current (attribution.jq, headroom-state.sh)" "$out"
+check "w11: the shared engine resolver gets its own ok line" \
+      "shared engine resolver current ($W11D/cd/lib/engine-resolve.sh)" "$out"
+# and a missing engine-resolve.sh ALONE is reported, not masked by the other two
+rm -f "$W11D/cd/lib/engine-resolve.sh"
+out=$(env -u HCAT_PYTHON PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S11D" \
+      DOCTOR_CLAUDE_DIR="$W11D/cd" DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W11D/shim" \
+      HEADROOM_STATE_DIR="$W11D/state" bash "$DOCTOR" 2>&1)
+check        "w11: a missing engine-resolve.sh alone is reported fixable" \
+             "shared engine resolver missing/stale (engine-resolve.sh)" "$out"
+check_absent "w11: a missing engine-resolve.sh does not drag the badge deps down with it" \
+             "statusline lib deps missing/stale" "$out"
+
+# w11-I3 + idempotency. The shim is verified by EXECUTION, not just by name
+# resolution, and the shim path stays idempotent (a second --fix prints no
+# `fixed` line at all — the one cross-platform regression the Windows gate exists
+# to catch).
+W11S="$W/w11shim"; mkdir -p "$W11S/cd/lib" "$W11S/venv/bin" "$W11S/shim"
+printf '#!/bin/sh\nexit 0\n'  > "$W11S/venv/bin/python";   chmod +x "$W11S/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W11S/venv/bin/headroom"; chmod +x "$W11S/venv/bin/headroom"
+S11S="$W11S/s.json"; doc_settings_wired "$W11S/cd" > "$S11S"
+cp "$ROOT/scripts/statusline.sh" "$W11S/cd/headroom-statusline.sh"
+cp "$ROOT/scripts/lib/attribution.jq" "$ROOT/scripts/lib/headroom-state.sh" \
+   "$ROOT/scripts/lib/engine-resolve.sh" "$W11S/cd/lib/"
+run1=$(env -u HCAT_PYTHON PATH="$W11S/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S11S" \
+       DOCTOR_CLAUDE_DIR="$W11S/cd" DOCTOR_VENV_DIR="$W11S/venv" DOCTOR_SHIM_DIR="$W11S/shim" \
+       HEADROOM_STATE_DIR="$W11S/state" bash "$DOCTOR" --fix 2>&1)
+run2=$(env -u HCAT_PYTHON PATH="$W11S/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S11S" \
+       DOCTOR_CLAUDE_DIR="$W11S/cd" DOCTOR_VENV_DIR="$W11S/venv" DOCTOR_SHIM_DIR="$W11S/shim" \
+       HEADROOM_STATE_DIR="$W11S/state" bash "$DOCTOR" --fix 2>&1)
+check    "w11: run 1 shims the venv CLI and verifies it runs" \
+         "headroom shimmed to $W11S/shim/headroom (resolves on PATH)" "$run1"
+check    "w11: run 2 sees the shim already on PATH" "headroom CLI on PATH ($W11S/shim/headroom)" "$run2"
+check_eq "w11: run 2 of --fix prints no ^fixed lines (idempotent shim path)" "0" \
+         "$(printf '%s\n' "$run2" | grep -cE '^fixed ')"
+# a shim that RESOLVES by name but does not start (uv's relocatable trampolines, a
+# name-squatted `headroom`, a broken console script) must not be reported `fixed`
+W11X="$W/w11norun"; mkdir -p "$W11X/cd" "$W11X/venv/bin" "$W11X/shim"
+printf '#!/bin/sh\nexit 0\n' > "$W11X/venv/bin/python";   chmod +x "$W11X/venv/bin/python"
+printf '#!/bin/sh\nexit 1\n' > "$W11X/venv/bin/headroom"; chmod +x "$W11X/venv/bin/headroom"
+S11X="$W11X/s.json"; doc_settings_wired "$W11X/cd" > "$S11X"
+out=$(env -u HCAT_PYTHON PATH="$W11X/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S11X" \
+      DOCTOR_CLAUDE_DIR="$W11X/cd" DOCTOR_VENV_DIR="$W11X/venv" DOCTOR_SHIM_DIR="$W11X/shim" \
+      HEADROOM_STATE_DIR="$W11X/state" bash "$DOCTOR" --fix 2>&1); rc=$?
+check        "w11: a shim that resolves but does not run is a FAIL" \
+             "headroom shimmed to $W11X/shim/headroom but it does not run (\`$W11X/shim/headroom --help\` failed)" "$out"
+check        "w11: the does-not-run FAIL carries the reinstall hint" \
+             "reinstall the engine: $W11X/venv/bin/python -m pip install \"headroom-ai[all]\"" "$out"
+check_absent "w11: a non-running shim is never reported fixed" "(resolves on PATH)" "$out"
+check_eq     "w11: doctor exits 1 on the does-not-run FAIL" "1" "$rc"
+
+# w11-I2. ~/.local/bin is NOT doctor-owned territory: pipx, `uv tool install` and
+# `pip install --user` put real binaries there. A pre-existing FOREIGN `headroom`
+# with that dir off the CURRENT PATH is the exact shape that used to be silently
+# replaced by a symlink into ~/.headroom-venv — unrecoverable, no backup. Refuse,
+# name it, and leave the file untouched.
+W11F="$W/w11foreign"; mkdir -p "$W11F/cd" "$W11F/shim"
+printf '#!/bin/sh\necho pipx-headroom\n' > "$W11F/shim/headroom"; chmod +x "$W11F/shim/headroom"
+w11f_before=$(cat "$W11F/shim/headroom")
+S11F="$W11F/s.json"; doc_settings_wired "$W11F/cd" > "$S11F"
+out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S11F" DOCTOR_CLAUDE_DIR="$W11F/cd" \
+      DOCTOR_VENV_DIR="$W11S/venv" DOCTOR_SHIM_DIR="$W11F/shim" HEADROOM_STATE_DIR="$W11F/state" \
+      bash "$DOCTOR" --fix 2>&1); rc=$?
+check    "w11: a foreign headroom in the shim dir is refused, not clobbered" \
+         "a different headroom already exists at $W11F/shim/headroom — not on PATH; add $W11F/shim to PATH or remove that file, then re-run --fix" "$out"
+check_eq "w11: the foreign binary is left byte-for-byte alone" "$w11f_before" "$(cat "$W11F/shim/headroom")"
+check_eq "w11: doctor exits 1 on the foreign-shim FAIL" "1" "$rc"
+if [ -L "$W11F/shim/headroom" ]; then
+  echo "FAIL - w11: the foreign binary was not turned into a symlink"; FAIL=$((FAIL+1))
+else
+  echo "ok - w11: the foreign binary was not turned into a symlink"; PASS=$((PASS+1))
+fi
+
+# w11-M4. "engine python found but no `headroom` CLI next to it" — the FAIL branch
+# had no fixture (deferred item 12), and its hint used to suggest pip-installing
+# into whatever $PY was, i.e. the SYSTEM interpreter for an HCAT_PYTHON user.
+W11M="$W/w11nocli"; mkdir -p "$W11M/cd" "$W11M/venv/bin"
+printf '#!/bin/sh\nexit 0\n' > "$W11M/venv/bin/python"; chmod +x "$W11M/venv/bin/python"
+S11M="$W11M/s.json"; doc_settings_wired "$W11M/cd" > "$S11M"
+out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S11M" DOCTOR_CLAUDE_DIR="$W11M/cd" \
+      DOCTOR_VENV_DIR="$W11M/venv" DOCTOR_SHIM_DIR="$W11M/shim" HEADROOM_STATE_DIR="$W11M/state" \
+      bash "$DOCTOR" 2>&1); rc=$?
+check    "w11: an engine python with no sibling CLI is a FAIL" \
+         "engine python found ($W11M/venv/bin/python) but no \`headroom\` CLI next to it" "$out"
+check    "w11: that FAIL's hint names the resolved interpreter" \
+         "reinstall: $W11M/venv/bin/python -m pip install \"headroom-ai[all]\"" "$out"
+check_eq "w11: the no-CLI FAIL exits 1" "1" "$rc"
+# with HCAT_PYTHON authoritative, pip-ing $PY may be the SYSTEM python — say so instead
+out=$(HCAT_PYTHON="$W11M/venv/bin/python" PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S11M" \
+      DOCTOR_CLAUDE_DIR="$W11M/cd" DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W11M/shim" \
+      HEADROOM_STATE_DIR="$W11M/state" bash "$DOCTOR" 2>&1)
+check        "w11: the HCAT_PYTHON hint names the override, not a pip command" \
+             "install headroom-ai into the interpreter HCAT_PYTHON points at, or unset HCAT_PYTHON" "$out"
+check_absent "w11: the HCAT_PYTHON hint does not suggest -m pip install" "-m pip install" "$out"
+
+
+# w12. verified-review wave: statusLine command injection (#2), execution
+# verification of an already-on-PATH headroom (#5), removal of a dead shim the
+# doctor itself wrote (#7), engine-resolve.sh off the custom-path badge-dep loop
+# (#13), the flat ~/.claude/lib resolver lookup (#11), the inline fallback's
+# PATH-sibling tier (#12), the Windows project-dir name hijack (#1) and the
+# stats-event write that used to die with `import fcntl` on Windows (#6).
+
+# w12-#2. CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT
+# settings.json — i.e. from repo config. `--fix` persists sl_hr_cmd's output into
+# ~/.claude/settings.json as statusLine.command, which Claude Code EXECUTES, so a
+# value carrying a double quote closes our quoting and appends commands. The
+# value must be refused (not merely FAILed elsewhere and then written anyway).
+W12A="$W/w12inj"; mkdir -p "$W12A/cd"
+S12A="$W12A/s.json"; printf '{}\n' > "$S12A"
+env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" \
+    CLAUDE_CODE_GIT_BASH_PATH='C:\bash.exe" & calc.exe & "' \
+    PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S12A" DOCTOR_CLAUDE_DIR="$W12A/cd" \
+    DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W12A/shim" bash "$DOCTOR" --fix >/dev/null 2>&1
+cmd12=$(jq -r '.statusLine.command' "$S12A")
+check_absent "w12: an injected CLAUDE_CODE_GIT_BASH_PATH never reaches statusLine.command" \
+             "calc.exe" "$cmd12"
+check_absent "w12: and not anywhere else in settings.json either" "calc.exe" "$(cat "$S12A")"
+check_eq     "w12: the quote-bearing value is dropped for the PATH bash fallback" \
+             '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' "$cmd12"
+# a quote-free value that simply does not exist is refused the same way
+S12A2="$W12A/s2.json"; printf '{}\n' > "$S12A2"
+env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" \
+    CLAUDE_CODE_GIT_BASH_PATH="$W12A/missing/bash.exe" \
+    PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S12A2" DOCTOR_CLAUDE_DIR="$W12A/cd2" \
+    DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W12A/shim" bash "$DOCTOR" --fix >/dev/null 2>&1
+check_eq "w12: a missing Git Bash override falls back rather than being written through" \
+         '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' "$(jq -r '.statusLine.command' "$S12A2")"
+
+# w12-#5. `command -v headroom` succeeding is a NAME lookup, nothing more. A
+# headroom on PATH that does not start (relocated uv trampoline, broken console
+# script, name squatter) means the bundled MCP cannot connect — so this branch
+# must verify by EXECUTION, exactly like the shim branch below it always has.
+W12C="$W/w12deadpath"; mkdir -p "$W12C/cd" "$W12C/bin" "$W12C/venv/bin"
+printf '#!/bin/sh\nexit 1\n' > "$W12C/bin/headroom";    chmod +x "$W12C/bin/headroom"
+printf '#!/bin/sh\nexit 0\n' > "$W12C/venv/bin/python"; chmod +x "$W12C/venv/bin/python"
+S12C="$W12C/s.json"; doc_settings_wired "$W12C/cd" > "$S12C"
+out=$(env -u HCAT_PYTHON PATH="$W12C/bin:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S12C" \
+      DOCTOR_CLAUDE_DIR="$W12C/cd" DOCTOR_VENV_DIR="$W12C/venv" DOCTOR_SHIM_DIR="$W12C/shim" \
+      HEADROOM_STATE_DIR="$W12C/state" bash "$DOCTOR" 2>&1); rc=$?
+check        "w12: a headroom on PATH that does not run is a FAIL" \
+             "headroom on PATH at $W12C/bin/headroom does not run" "$out"
+check        "w12: that FAIL says the bundled MCP will not connect" \
+             "the bundled MCP spawns \`headroom\` by name and will fail to connect" "$out"
+check        "w12: that FAIL carries the reinstall hint" \
+             "reinstall the engine: $W12C/venv/bin/python -m pip install \"headroom-ai[all]\"" "$out"
+check_absent "w12: a dead headroom on PATH is never greened as verified" \
+             "headroom CLI on PATH ($W12C/bin/headroom)" "$out"
+check_eq     "w12: doctor exits 1 on the dead-PATH-headroom FAIL" "1" "$rc"
+if [ -f "$W12C/bin/headroom" ]; then
+  echo "ok - w12: a headroom the doctor did not write is never deleted"; PASS=$((PASS+1))
+else
+  echo "FAIL - w12: a headroom the doctor did not write is never deleted"; FAIL=$((FAIL+1))
+fi
+
+# w12-#7. The shim branch's does-not-run FAIL used to LEAVE the dead file behind,
+# so the next run took #5's `command -v headroom` branch and greened it. Remove
+# what this run wrote, and say so.
+W12B="$W/w12deadshim"; mkdir -p "$W12B/cd" "$W12B/venv/bin" "$W12B/shim"
+printf '#!/bin/sh\nexit 0\n' > "$W12B/venv/bin/python";   chmod +x "$W12B/venv/bin/python"
+printf '#!/bin/sh\nexit 1\n' > "$W12B/venv/bin/headroom"; chmod +x "$W12B/venv/bin/headroom"
+S12B="$W12B/s.json"; doc_settings_wired "$W12B/cd" > "$S12B"
+out=$(env -u HCAT_PYTHON PATH="$W12B/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S12B" \
+      DOCTOR_CLAUDE_DIR="$W12B/cd" DOCTOR_VENV_DIR="$W12B/venv" DOCTOR_SHIM_DIR="$W12B/shim" \
+      HEADROOM_STATE_DIR="$W12B/state" bash "$DOCTOR" --fix 2>&1); rc=$?
+check    "w12: the does-not-run FAIL reports the shim was removed" \
+         "(the broken shim was removed)" "$out"
+check_eq "w12: doctor still exits 1 after removing the dead shim" "1" "$rc"
+if [ -e "$W12B/shim/headroom" ]; then
+  echo "FAIL - w12: the dead shim is gone from disk"; FAIL=$((FAIL+1))
+else
+  echo "ok - w12: the dead shim is gone from disk"; PASS=$((PASS+1))
+fi
+# and the run after it diagnoses the engine again instead of greening a dead file
+out=$(env -u HCAT_PYTHON PATH="$W12B/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S12B" \
+      DOCTOR_CLAUDE_DIR="$W12B/cd" DOCTOR_VENV_DIR="$W12B/venv" DOCTOR_SHIM_DIR="$W12B/shim" \
+      HEADROOM_STATE_DIR="$W12B/state" bash "$DOCTOR" 2>&1)
+check_absent "w12: the next run does not green the removed shim" \
+             "headroom CLI on PATH ($W12B/shim/headroom)" "$out"
+check        "w12: the next run reports the CLI as off PATH again" \
+             "headroom CLI not on PATH (engine at $W12B/venv/bin/headroom)" "$out"
+
+# w12-#13. engine-resolve.sh is not a badge dep. Demanding it next to a
+# custom-path statusline copy — a directory the doctor refuses to write into —
+# produced a FAIL that `--fix` could never clear, so the doctor exited nonzero
+# forever. It belongs on its own line, resolved and repaired under $CLAUDE_DIR.
+W12D="$W/w12custom"; mkdir -p "$W12D/cd" "$W12D/custom/lib"
+cp "$ROOT/scripts/statusline.sh" "$W12D/custom/headroom-statusline.sh"
+cp "$ROOT/scripts/lib/attribution.jq" "$ROOT/scripts/lib/headroom-state.sh" "$W12D/custom/lib/"
+jq -n --arg c "$W12D/custom/headroom-statusline.sh" \
+  '{statusLine:{type:"command",command:("bash \"" + $c + "\"")}}' > "$W12D/s.json"
+d12() {  # d12 [--fix] — one doctor run against the custom-path fixture
+  HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$W12D/s.json" DOCTOR_CLAUDE_DIR="$W12D/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W12D/shim" HEADROOM_STATE_DIR="$W12D/state" bash "$DOCTOR" "$@" 2>&1
+}
+out=$(d12)
+check        "w12: the custom copy's badge deps are current without engine-resolve.sh" \
+             "statusline lib deps current (attribution.jq, headroom-state.sh)" "$out"
+check_absent "w12: no unfixable custom-path FAIL about the missing engine-resolve.sh" \
+             "statusline lib deps at $W12D/custom missing/stale" "$out"
+check        "w12: the resolver is reported against \$CLAUDE_DIR instead, and is fixable" \
+             "shared engine resolver missing/stale (engine-resolve.sh)" "$out"
+fix12=$(d12 --fix)
+check "w12: --fix provisions the resolver into \$CLAUDE_DIR/lib" \
+      "installed the shared engine resolver to $W12D/cd/lib/engine-resolve.sh" "$fix12"
+if cmp -s "$ROOT/scripts/lib/engine-resolve.sh" "$W12D/cd/lib/engine-resolve.sh"; then
+  echo "ok - w12: the provisioned resolver is byte-identical to the plugin's"; PASS=$((PASS+1))
+else
+  echo "FAIL - w12: the provisioned resolver is byte-identical to the plugin's"; FAIL=$((FAIL+1))
+fi
+if [ -e "$W12D/custom/lib/engine-resolve.sh" ]; then
+  echo "FAIL - w12: --fix never writes into the custom-path lib dir"; FAIL=$((FAIL+1))
+else
+  echo "ok - w12: --fix never writes into the custom-path lib dir"; PASS=$((PASS+1))
+fi
+fix12b=$(d12 --fix)
+check_eq "w12: the second --fix is a no-op (idempotent)" "0" \
+         "$(printf '%s\n' "$fix12b" | grep -cE '^fixed ')"
+check    "w12: the second run reports the resolver current" \
+         "shared engine resolver current ($W12D/cd/lib/engine-resolve.sh)" "$fix12b"
+
+# w12-#11. A flat ~/.claude/hcat could never load what check 7c provisions FOR it:
+# its source loop tried ../scripts/lib and a flat sibling, but never $here/lib —
+# which is exactly where --fix installs the shared resolver. Discriminator: only
+# the shared resolver honours DOCTOR_VENV_DIR; the inline fallback does not.
+W12E="$W/w12flat"; mkdir -p "$W12E/cd/lib" "$W12E/home" "$W12E/venv/bin"
+cp "$HCAT" "$W12E/cd/hcat"; chmod +x "$W12E/cd/hcat"
+cp "$ROOT/scripts/lib/engine-resolve.sh" "$ROOT/scripts/lib/headroom-state.sh" "$W12E/cd/lib/"
+printf '#!/bin/sh\necho "shared-resolver-py $*"\n' > "$W12E/venv/bin/python"
+chmod +x "$W12E/venv/bin/python"
+printf '{"k":1}' > "$W12E/tiny.json"
+out=$(env -u HCAT_PYTHON HOME="$W12E/home" DOCTOR_VENV_DIR="$W12E/venv" PATH="/usr/bin:/bin" \
+      bash "$W12E/cd/hcat" "$W12E/tiny.json" 2>&1)
+check "w12: a flat ~/.claude/hcat loads the resolver from ~/.claude/lib/" "shared-resolver-py" "$out"
+# control: with that lib dir gone it falls back to the inline resolver, which
+# knows nothing about DOCTOR_VENV_DIR — proof the assertion above discriminates
+mv "$W12E/cd/lib" "$W12E/cd/lib-off"
+out=$(env -u HCAT_PYTHON HOME="$W12E/home" DOCTOR_VENV_DIR="$W12E/venv" PATH="/usr/bin:/bin" \
+      bash "$W12E/cd/hcat" "$W12E/tiny.json" 2>&1)
+check_absent "w12: control — without ~/.claude/lib the shared resolver is not loaded" \
+             "shared-resolver-py" "$out"
+mv "$W12E/cd/lib-off" "$W12E/cd/lib"
+
+# w12-#12. The inline fallback must not be narrower than what base hcat had
+# before the shared lib existed: HCAT_PYTHON, then a python sibling of `headroom`
+# on PATH (pipx / uv / pip --user), then ~/.headroom-venv. The flat install that
+# lands on this fallback is precisely the population it exists to protect.
+W12F="$W/w12inline"; mkdir -p "$W12F/flat" "$W12F/home" "$W12F/pathbin"
+cp "$HCAT" "$W12F/flat/hcat"; chmod +x "$W12F/flat/hcat"   # no lib anywhere
+printf '#!/bin/sh\nexit 0\n'                 > "$W12F/pathbin/headroom"
+printf '#!/bin/sh\necho "sibling-py $*"\n'   > "$W12F/pathbin/python"
+chmod +x "$W12F/pathbin/headroom" "$W12F/pathbin/python"
+out=$(env -u HCAT_PYTHON -u DOCTOR_VENV_DIR HOME="$W12F/home" PATH="$W12F/pathbin:/usr/bin:/bin" \
+      bash "$W12F/flat/hcat" "$W12E/tiny.json" 2>&1)
+check "w12: the inline fallback finds a PATH sibling python with no venv present" \
+      "sibling-py" "$out"
+# HCAT_PYTHON stays authoritative ahead of it (no fallback — the standing contract)
+out=$(env -u DOCTOR_VENV_DIR HCAT_PYTHON="$W12E/venv/bin/python" HOME="$W12F/home" \
+      PATH="$W12F/pathbin:/usr/bin:/bin" bash "$W12F/flat/hcat" "$W12E/tiny.json" 2>&1)
+check        "w12: HCAT_PYTHON still wins over the PATH sibling" "shared-resolver-py" "$out"
+check_absent "w12: the PATH sibling does not override HCAT_PYTHON" "sibling-py" "$out"
+# and all three copies of the fallback stay byte-identical to each other
+w12_fb() { sed -n '/resolve_engine_python() {  # partial legacy copy/,/^}/p' "$1"; }
+w12_fb_hcat=$(w12_fb "$HCAT")
+check_eq "w12: hcat and hcat-gate share one inline fallback" \
+         "$w12_fb_hcat" "$(w12_fb "$ROOT/scripts/hcat-gate.sh")"
+check_eq "w12: hcat and session-probe share one inline fallback" \
+         "$w12_fb_hcat" "$(w12_fb "$ROOT/scripts/session-probe.sh")"
+check    "w12: the inline fallback carries the PATH-sibling lookup" \
+         "command -v headroom" "$w12_fb_hcat"
+
+# w12-#1. .mcp.json spawns the BARE name `headroom` and cannot express a
+# per-platform or absolute command. On Windows a bare name is resolved from the
+# spawning process's current directory BEFORE PATH, so a headroom executable
+# committed to a repo would be spawned instead of the engine. Detection is the
+# mitigation: doctor FAILs, the session probe nudges, and neither fires on POSIX.
+W12G="$W/w12hijack"; mkdir -p "$W12G/cd" "$W12G/proj" "$W12G/clean" "$W12G/home"
+printf '#!/bin/sh\nexit 0\n' > "$W12G/proj/headroom.exe"; chmod +x "$W12G/proj/headroom.exe"
+S12G="$W12G/s.json"; doc_settings_wired "$W12G/cd" > "$S12G"
+d12g() {  # d12g <DOCTOR_OS> <project-dir>
+  env -u HCAT_PYTHON DOCTOR_OS="$1" DOCTOR_PROJECT_DIR="$2" PATH="$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S12G" DOCTOR_CLAUDE_DIR="$W12G/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W12G/shim" HEADROOM_STATE_DIR="$W12G/state" bash "$DOCTOR" 2>&1
+}
+out=$(d12g windows "$W12G/proj"); rc=$?
+check    "w12: a headroom.exe in the project dir is a FAIL on Windows" \
+         "an executable $W12G/proj/headroom.exe sits in the project directory" "$out"
+check    "w12: that FAIL explains Windows' project-dir-before-PATH resolution" \
+         "resolves from the project directory BEFORE PATH" "$out"
+check_eq "w12: doctor exits 1 on the name-hijack FAIL" "1" "$rc"
+out=$(d12g unix "$W12G/proj")
+check_absent "w12: the name-hijack check does not fire on POSIX" \
+             "sits in the project directory" "$out"
+out=$(d12g windows "$W12G/clean")
+check_absent "w12: no hijack FAIL for a clean project dir" \
+             "sits in the project directory" "$out"
+# the SessionStart probe carries the same one-line nudge (a setup problem, never
+# note_error: it must not flip the badge to broken)
+out=$(printf '{"session_id":"w12h"}' | env -u HCAT_PYTHON DOCTOR_OS=windows HOME="$W12G/home" \
+      DOCTOR_PROJECT_DIR="$W12G/proj" PATH="$STUB:/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W12G/pstate" bash "$PROBE"); rc=$?
+check    "w12: the probe nudges about a project-dir headroom on Windows" \
+         "sits in this project" "$out"
+check_eq "w12: the probe exits 0 on that nudge" "0" "$rc"
+check_eq "w12: the probe still prints exactly one line" "1" "$(printf '%s\n' "$out" | grep -c .)"
+if [ -f "$W12G/pstate/last-error" ]; then
+  echo "FAIL - w12: the hijack nudge does not flip the badge to broken"; FAIL=$((FAIL+1))
+else
+  echo "ok - w12: the hijack nudge does not flip the badge to broken"; PASS=$((PASS+1))
+fi
+out=$(printf '{"session_id":"w12h2"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W12G/home" \
+      DOCTOR_PROJECT_DIR="$W12G/proj" PATH="$STUB:/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W12G/pstate2" bash "$PROBE")
+check_absent "w12: the probe's hijack nudge does not fire on POSIX" "sits in this project" "$out"
+
+# w12-#6. `import fcntl` used to sit inside _append_event's one broad try/except,
+# so on Windows (no fcntl) EVERY hcat run silently failed to record its savings.
+# The import is guarded on its own now — this is the POSIX regression guard that
+# the flock path still writes the event after that refactor.
+W12PY=$(PATH=/usr/bin:/bin:/usr/local/bin command -v python3 2>/dev/null || echo /usr/bin/python3)
+if [ -x "$W12PY" ]; then
+  h12="$W/w12shim"; mkdir -p "$h12/headroom"
+  : > "$h12/headroom/__init__.py"
+  cat > "$h12/headroom/compress.py" <<'W12SHIM'
+class _R:
+    def __init__(self, raw):
+        self.messages = [{"content": "compressed"}]
+        self.tokens_before = 1000
+        self.tokens_after = 100   # 90% savings → the main engine tier
+def compress(_msgs):
+    return _R(_msgs[0]["content"])
+W12SHIM
+  cat > "$h12/headroom/paths.py" <<'W12SHIM'
+import os, pathlib
+def workspace_dir():
+    return pathlib.Path(os.environ["HEADROOM_WORKSPACE_DIR"])
+def session_stats_path():
+    return workspace_dir() / "stats.jsonl"
+W12SHIM
+  w12wrap="$W/w12-python"
+  printf '#!/bin/sh\nexport PYTHONPATH="%s:${PYTHONPATH:-}"\nexec "%s" "$@"\n' "$h12" "$W12PY" > "$w12wrap"
+  chmod +x "$w12wrap"
+  w12src="$W/w12-stats.json"; jq -n '[range(0;30) | {id:., name:"row"}]' > "$w12src"
+  out=$(HCAT_PYTHON="$w12wrap" HEADROOM_WORKSPACE_DIR="$W/w12-ws" bash "$HCAT" "$w12src"); rc=$?
+  check_eq "w12: hcat engine tier exit 0 after the fcntl refactor" "0" "$rc"
+  check    "w12: the engine tier still prints its receipt" "90.0% saved" "$out"
+  check    "w12: the stats event still lands via the POSIX flock path" \
+           '"strategy":"hcat"' "$(cat "$W/w12-ws/stats.jsonl" 2>/dev/null)"
+  check    "w12: the event carries the token counts" '"input_tokens":1000' \
+           "$(cat "$W/w12-ws/stats.jsonl" 2>/dev/null)"
+else
+  echo "skip - w12: hcat stats-event test (no python3)"
+fi
+
+
+# --- w13. second verified-review wave (findings #1, #2, #3, #4, #5, #9, #10,
+# #11, #12, #13, #14). Every fixture below reproduces the exact shape a reviewer
+# demonstrated, so a regression fails here rather than only on a Windows box.
+
+# w13-#1. The statusLine injection guard rejected ONLY the double quote. Inside
+# the double-quoted word sl_hr_cmd prints, `$` is just as active: a bash.exe
+# under a directory literally NAMED `$(cmd)` is a real file, so `[ -f ]` passes,
+# the value is persisted verbatim, and the substitution runs when Claude Code
+# executes the status line. Backtick, newline and carriage return are the same
+# class of bypass. A BACKSLASH must stay allowed — Windows paths need it.
+W13I="$W/w13inject"; mkdir -p "$W13I/cd"
+w13_evil="$W13I/"'$(touch pwned)dir'          # a REAL directory whose name is a command substitution
+mkdir -p "$w13_evil"
+printf '#!/bin/sh\nexit 0\n' > "$w13_evil/bash.exe"; chmod +x "$w13_evil/bash.exe"
+if [ -f "$w13_evil/bash.exe" ]; then
+  echo "ok - w13: the command-substitution fixture really is an existing file (the old -f guard would pass it)"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: the command-substitution fixture really is an existing file"; FAIL=$((FAIL+1))
+fi
+w13_inj() {  # w13_inj <settings> <claude-dir> <CLAUDE_CODE_GIT_BASH_PATH value>
+  env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" \
+      CLAUDE_CODE_GIT_BASH_PATH="$3" PATH="$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$1" DOCTOR_CLAUDE_DIR="$2" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W13I/shim" bash "$DOCTOR" --fix >/dev/null 2>&1
+  jq -r '.statusLine.command' "$1"
+}
+S13I="$W13I/s.json"; printf '{}\n' > "$S13I"
+cmd13=$(w13_inj "$S13I" "$W13I/cd" "$w13_evil/bash.exe")
+check_absent "w13: a \$(...) directory in the Git Bash override never reaches statusLine.command" \
+             '$(' "$cmd13"
+check_absent "w13: nor anywhere else in settings.json" '$(' "$(cat "$S13I")"
+check_eq     "w13: the \$-bearing value is dropped for the PATH bash fallback" \
+             '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' "$cmd13"
+# backtick and newline are the same class of bypass
+W13I2="$W13I/bt"; mkdir -p "$W13I2/"'`touch pwned`dir'
+printf '#!/bin/sh\nexit 0\n' > "$W13I2/"'`touch pwned`dir/bash.exe'
+chmod +x "$W13I2/"'`touch pwned`dir/bash.exe'
+S13I2="$W13I/s2.json"; printf '{}\n' > "$S13I2"
+check_eq "w13: a backtick value is refused too" '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' \
+         "$(w13_inj "$S13I2" "$W13I/cd2" "$W13I2/"'`touch pwned`dir/bash.exe')"
+# NOTE: a newline cannot come from $(printf '\n') — command substitution strips
+# trailing newlines, which would silently make this an ordinary "nldir" fixture
+w13_nl='
+'
+w13_nldir="$W13I/nl${w13_nl}dir"; mkdir -p "$w13_nldir"
+printf '#!/bin/sh\nexit 0\n' > "$w13_nldir/bash.exe"; chmod +x "$w13_nldir/bash.exe"
+S13I3="$W13I/s3.json"; printf '{}\n' > "$S13I3"
+check_eq "w13: a newline-bearing value is refused too" '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' \
+         "$(w13_inj "$S13I3" "$W13I/cd3" "$w13_nldir/bash.exe")"
+# ...and the guard must NOT reject a backslash: every native Windows path has them
+W13I4="$W13I/bs"; mkdir -p "$W13I4"
+printf '#!/bin/sh\nexit 0\n' > "$W13I4/back\\slash.exe"; chmod +x "$W13I4/back\\slash.exe"
+S13I4="$W13I/s4.json"; printf '{}\n' > "$S13I4"
+check_eq "w13: a backslash in the override is still accepted (Windows paths need it)" \
+         '"C:\fake\back\slash.exe" "C:\fake\headroom-statusline.sh"' \
+         "$(w13_inj "$S13I4" "$W13I/cd4" "$W13I4/back\\slash.exe")"
+
+# w13-#9. An ACCEPTED override was written raw while the script token beside it
+# went through win_path, so a perfectly valid POSIX-spelled value was persisted
+# unconverted — and Claude Code runs that command outside Git Bash, where only
+# the native spelling resolves.
+W13W="$W/w13winpath"; mkdir -p "$W13W/cd" "$W13W/c/Program Files/Git/bin"
+w13_posix_bash="$W13W/c/Program Files/Git/bin/bash.exe"
+printf '#!/bin/sh\nexit 0\n' > "$w13_posix_bash"; chmod +x "$w13_posix_bash"
+S13W="$W13W/s.json"; printf '{}\n' > "$S13W"
+cmd13w=$(w13_inj "$S13W" "$W13W/cd" "$w13_posix_bash")
+check_eq     "w13: a POSIX-spelled accepted override is persisted in Windows form" \
+             '"C:\fake\bash.exe" "C:\fake\headroom-statusline.sh"' "$cmd13w"
+check_absent "w13: the raw POSIX spelling never survives into settings.json" \
+             "$w13_posix_bash" "$(cat "$S13W")"
+
+# w13-#5. A pre-existing SYMLINK at the shim path used to fall straight through
+# to `ln -sfn` and be repointed with no backup — and pipx installs ~/.local/bin
+# console scripts as symlinks. A link that already names the resolved CLI is
+# ours (idempotent); anything else is foreign and gets the rc 2 refusal.
+W13L="$W/w13symlink"; mkdir -p "$W13L/cd" "$W13L/venv/bin" "$W13L/shim" "$W13L/pipx"
+printf '#!/bin/sh\nexit 0\n'   > "$W13L/venv/bin/python";  chmod +x "$W13L/venv/bin/python"
+printf '#!/bin/sh\necho hr\n'  > "$W13L/venv/bin/headroom"; chmod +x "$W13L/venv/bin/headroom"
+printf '#!/bin/sh\necho pipx\n'> "$W13L/pipx/headroom";     chmod +x "$W13L/pipx/headroom"
+ln -sfn "$W13L/pipx/headroom" "$W13L/shim/headroom"
+S13L="$W13L/s.json"; doc_settings_wired "$W13L/cd" > "$S13L"
+w13_shim() {  # w13_shim <shim-dir> <settings> <claude-dir> <extra-PATH-prefix> [--fix]
+  local sd=$1 st=$2 cd=$3 pre=$4; shift 4
+  env -u HCAT_PYTHON PATH="$pre$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$st" \
+      DOCTOR_CLAUDE_DIR="$cd" DOCTOR_VENV_DIR="$W13L/venv" DOCTOR_SHIM_DIR="$sd" \
+      HEADROOM_STATE_DIR="$W13L/state" bash "$DOCTOR" "$@" 2>&1
+}
+out=$(w13_shim "$W13L/shim" "$S13L" "$W13L/cd" "" --fix); rc=$?
+check    "w13: a foreign SYMLINK at the shim path is refused, not repointed" \
+         "a different headroom already exists at $W13L/shim/headroom" "$out"
+check_eq "w13: the foreign symlink still points where it did" "$W13L/pipx/headroom" \
+         "$(readlink "$W13L/shim/headroom")"
+check_absent "w13: a refused symlink is never reported as shimmed" "headroom shimmed to" "$out"
+check_eq "w13: doctor exits 1 on the foreign-symlink FAIL" "1" "$rc"
+# a link that ALREADY names the resolved CLI is ours: adopted, not refused
+W13L2="$W/w13symlink-ours"; mkdir -p "$W13L2/cd" "$W13L2/shim"
+ln -sfn "$W13L/venv/bin/headroom" "$W13L2/shim/headroom"
+S13L2="$W13L2/s.json"; doc_settings_wired "$W13L2/cd" > "$S13L2"
+out=$(w13_shim "$W13L2/shim" "$S13L2" "$W13L2/cd" "" --fix)
+check_absent "w13: a link that already names the resolved CLI is not called foreign" \
+             "a different headroom already exists" "$out"
+check_eq "w13: and it is left exactly as it was" "$W13L/venv/bin/headroom" \
+         "$(readlink "$W13L2/shim/headroom")"
+# ...and with that dir on PATH the run is a plain ok with no `fixed` line at all
+out=$(w13_shim "$W13L2/shim" "$S13L2" "$W13L2/cd" "$W13L2/shim:" --fix)
+check    "w13: an adopted shim resolves on PATH" "headroom CLI on PATH ($W13L2/shim/headroom)" "$out"
+check_eq "w13: adopting an existing symlink prints no ^fixed line (idempotent)" "0" \
+         "$(printf '%s\n' "$out" | grep -cE '^fixed ')"
+
+# w13-#3. On Windows the shim is a COPY. Copying a `#!`-shebang console script
+# to headroom.exe produces a file Windows cannot spawn — while shim_runs (which
+# goes through bash) succeeds, so the doctor used to report `fixed` over an MCP
+# that can never connect. A bin/ venv holding a shebang `headroom` is exactly
+# the layout venv_bindir and resolve_headroom_cli both select.
+W13N="$W/w13nonpe"; mkdir -p "$W13N/cd" "$W13N/venv/bin" "$W13N/shim"
+printf '#!/bin/sh\nexit 0\n'  > "$W13N/venv/bin/python";   chmod +x "$W13N/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W13N/venv/bin/headroom"; chmod +x "$W13N/venv/bin/headroom"
+S13N="$W13N/s.json"; doc_settings_wired "$W13N/cd" > "$S13N"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13N/shim:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13N" DOCTOR_CLAUDE_DIR="$W13N/cd" DOCTOR_VENV_DIR="$W13N/venv" \
+      DOCTOR_SHIM_DIR="$W13N/shim" HEADROOM_STATE_DIR="$W13N/state" bash "$DOCTOR" --fix 2>&1); rc=$?
+check        "w13: a non-PE headroom is refused on the Windows copy branch" \
+             "is not a Windows executable" "$out"
+check        "w13: that FAIL explains Windows cannot spawn a #! console script" \
+             "console script (no MZ/PE header), and Windows cannot spawn one shell-less" "$out"
+check        "w13: that FAIL names the py -3 venv remedy" "py -3 -m venv $W13N/venv" "$out"
+check        "w13: that FAIL names the uv remedy too" "uv tool install headroom-ai" "$out"
+check_absent "w13: a non-PE CLI is never reported as shimmed" "headroom shimmed to" "$out"
+check_eq     "w13: doctor exits 1 on the non-PE FAIL" "1" "$rc"
+if [ -e "$W13N/shim/headroom.exe" ]; then
+  echo "FAIL - w13: no headroom.exe is written for a non-PE CLI"; FAIL=$((FAIL+1))
+else
+  echo "ok - w13: no headroom.exe is written for a non-PE CLI"; PASS=$((PASS+1))
+fi
+# control: the same fixture with a PE-magic CLI shims and verifies normally
+printf 'MZ() { :; }\nexit 0\n' > "$W13N/venv/bin/headroom"; chmod +x "$W13N/venv/bin/headroom"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13N/shim:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13N" DOCTOR_CLAUDE_DIR="$W13N/cd" DOCTOR_VENV_DIR="$W13N/venv" \
+      DOCTOR_SHIM_DIR="$W13N/shim" HEADROOM_STATE_DIR="$W13N/state" bash "$DOCTOR" --fix 2>&1)
+check "w13: control — a PE CLI still shims (so the check above discriminates)" \
+      "headroom shimmed to $W13N/shim/headroom.exe" "$out"
+
+# w13-#11. A dead shim in the doctor's OWN shim dir produced the identical FAIL
+# on every --fix run with the file untouched, and its "reinstall the engine"
+# hint misdirected — check 2 had just found a healthy engine. Read-only says how
+# to clear it; --fix clears it and repairs in the same run.
+W13R="$W/w13deadown"; mkdir -p "$W13R/cd" "$W13R/venv/bin" "$W13R/shim"
+printf '#!/bin/sh\nexit 0\n'  > "$W13R/venv/bin/python";   chmod +x "$W13R/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W13R/venv/bin/headroom"; chmod +x "$W13R/venv/bin/headroom"
+printf '#!/bin/sh\nexit 1\n'  > "$W13R/shim/headroom";     chmod +x "$W13R/shim/headroom"
+S13R="$W13R/s.json"; doc_settings_wired "$W13R/cd" > "$S13R"
+w13_dead() {
+  env -u HCAT_PYTHON PATH="$W13R/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13R" \
+      DOCTOR_CLAUDE_DIR="$W13R/cd" DOCTOR_VENV_DIR="$W13R/venv" DOCTOR_SHIM_DIR="$W13R/shim" \
+      HEADROOM_STATE_DIR="$W13R/state" bash "$DOCTOR" "$@" 2>&1
+}
+out=$(w13_dead)
+check "w13: a dead OWN shim is diagnosed as the doctor's own file" \
+      "this file is the doctor's own shim from an earlier run: delete it and re-run /doctor --fix" "$out"
+if [ -f "$W13R/shim/headroom" ]; then
+  echo "ok - w13: a read-only run never deletes it"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: a read-only run never deletes it"; FAIL=$((FAIL+1))
+fi
+out=$(w13_dead --fix)
+check        "w13: --fix removes the dead own shim and repairs in the same run" \
+             "headroom shimmed to $W13R/shim/headroom (resolves on PATH)" "$out"
+check_absent "w13: the repaired run no longer reports the does-not-run FAIL" \
+             "does not run" "$out"
+check_eq     "w13: the repaired shim points at the engine CLI" "$W13R/venv/bin/headroom" \
+             "$(readlink "$W13R/shim/headroom")"
+out=$(w13_dead --fix)
+check_eq     "w13: the next --fix is a no-op (no ^fixed line)" "0" \
+             "$(printf '%s\n' "$out" | grep -cE '^fixed ')"
+check        "w13: and it greens the repaired shim" "headroom CLI on PATH ($W13R/shim/headroom)" "$out"
+
+# w13-#10. shim_runs executes whatever `command -v headroom` resolves on every
+# plain /doctor run — by its own comment that may be a name squatter or a wedged
+# binary — and it had no time bound at all.
+W13T="$W/w13timeout"; mkdir -p "$W13T/cd" "$W13T/bin" "$W13T/venv/bin" "$W13T/shim"
+printf '#!/bin/sh\nsleep 120\n' > "$W13T/bin/headroom";   chmod +x "$W13T/bin/headroom"
+printf '#!/bin/sh\nexit 0\n'    > "$W13T/venv/bin/python"; chmod +x "$W13T/venv/bin/python"
+S13T="$W13T/s.json"; doc_settings_wired "$W13T/cd" > "$S13T"
+w13_t0=$(date +%s)
+out=$(env -u HCAT_PYTHON PATH="$W13T/bin:$STUB:/usr/bin:/bin" DOCTOR_SHIM_RUNS_TIMEOUT=1 \
+      DOCTOR_SETTINGS="$S13T" DOCTOR_CLAUDE_DIR="$W13T/cd" DOCTOR_VENV_DIR="$W13T/venv" \
+      DOCTOR_SHIM_DIR="$W13T/shim" HEADROOM_STATE_DIR="$W13T/state" bash "$DOCTOR" 2>&1)
+w13_elapsed=$(( $(date +%s) - w13_t0 ))
+check "w13: a headroom that never returns is reported as not running, not hung" \
+      "headroom on PATH at $W13T/bin/headroom does not run" "$out"
+if [ "$w13_elapsed" -lt 30 ]; then
+  echo "ok - w13: the doctor finished in ${w13_elapsed}s despite a 120s headroom (bounded probe)"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: the doctor took ${w13_elapsed}s — the shim_runs probe is not bounded"; FAIL=$((FAIL+1))
+fi
+# The run above took the portable watchdog branch (no timeout(1) on the fixture
+# PATH). Cover the coreutils branch too — that is the one every Linux box and CI
+# takes — with a faithful mini-`timeout` so the assertion is deterministic here.
+W13T2="$W13T/withtimeout"; mkdir -p "$W13T2" "$W13T2/live"
+cat > "$W13T2/timeout" <<'W13TO'
+#!/bin/sh
+s=$1; shift
+"$@" & p=$!
+i=0
+while kill -0 "$p" 2>/dev/null; do
+  if [ "$i" -ge "$s" ]; then kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; exit 124; fi
+  sleep 1; i=$((i+1))
+done
+wait "$p"
+W13TO
+chmod +x "$W13T2/timeout"
+w13_t0=$(date +%s)
+out=$(env -u HCAT_PYTHON PATH="$W13T2:$W13T/bin:$STUB:/usr/bin:/bin" DOCTOR_SHIM_RUNS_TIMEOUT=1 \
+      DOCTOR_SETTINGS="$S13T" DOCTOR_CLAUDE_DIR="$W13T/cd" DOCTOR_VENV_DIR="$W13T/venv" \
+      DOCTOR_SHIM_DIR="$W13T/shim" HEADROOM_STATE_DIR="$W13T/state" bash "$DOCTOR" 2>&1)
+w13_elapsed2=$(( $(date +%s) - w13_t0 ))
+check "w13: the timeout(1) branch bounds the probe as well" \
+      "headroom on PATH at $W13T/bin/headroom does not run" "$out"
+if [ "$w13_elapsed2" -lt 30 ]; then
+  echo "ok - w13: the timeout(1) branch finished in ${w13_elapsed2}s"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: the timeout(1) branch took ${w13_elapsed2}s"; FAIL=$((FAIL+1))
+fi
+# a healthy CLI through the SAME branch must still report its own (zero) status
+printf '#!/bin/sh\necho hr\n' > "$W13T2/live/headroom"; chmod +x "$W13T2/live/headroom"
+out=$(env -u HCAT_PYTHON PATH="$W13T2:$W13T2/live:$STUB:/usr/bin:/bin" DOCTOR_SHIM_RUNS_TIMEOUT=5 \
+      DOCTOR_SETTINGS="$S13T" DOCTOR_CLAUDE_DIR="$W13T/cd" DOCTOR_VENV_DIR="$W13T/venv" \
+      DOCTOR_SHIM_DIR="$W13T/shim" HEADROOM_STATE_DIR="$W13T/state" bash "$DOCTOR" 2>&1)
+check "w13: a healthy CLI still passes through the bounded probe" \
+      "headroom CLI on PATH ($W13T2/live/headroom)" "$out"
+
+# w13-#12. The merge-aware statusLine template applied sl_hr_cmd to the badge
+# fragment ONLY: the surrounding chain was raw POSIX shell, and on Windows that
+# whole string became the persisted command — so a user who already had a status
+# line lost both theirs and the badge. The chain now lives in a script file.
+W13C="$W/w13chain"; mkdir -p "$W13C/cd"
+S13C="$W13C/s.json"
+jq -n '{statusLine:{type:"command",command:"printf LEFT-SIDE"}}' > "$S13C"
+w13_chain() {
+  env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" CYGPATH_UNIX_DIR="$W13C/cd" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13C" DOCTOR_CLAUDE_DIR="$W13C/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13C/shim" \
+      HEADROOM_STATE_DIR="$W13C/state" bash "$DOCTOR" "$@" 2>&1
+}
+out=$(w13_chain --fix)
+w13_chain_file="$W13C/cd/headroom-statusline-chain.sh"
+check    "w13: the windows merge still reports the merge" \
+         "statusLine merged — your command kept and backed up under _headroomStatusLineBackup" "$out"
+check_eq "w13: the persisted command keeps the \"<bash>\" \"<win path>\" shape" \
+         '"C:\fake\bash" "C:\fake\headroom-statusline-chain.sh"' \
+         "$(jq -r '.statusLine.command' "$S13C")"
+check_absent "w13: no raw POSIX chain is persisted on Windows" 'in=$(cat)' \
+             "$(jq -r '.statusLine.command' "$S13C")"
+check_eq "w13: the user's own command is still backed up verbatim" "printf LEFT-SIDE" \
+         "$(jq -r '._headroomStatusLineBackup.command' "$S13C")"
+if [ -f "$w13_chain_file" ]; then
+  echo "ok - w13: the chain script was written next to the statusline copy"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: the chain script was written next to the statusline copy"; FAIL=$((FAIL+1))
+fi
+check "w13: the chain script runs the user's command" "printf LEFT-SIDE" "$(cat "$w13_chain_file" 2>/dev/null)"
+check "w13: the chain script runs the badge" "bash \"$W13C/cd/headroom-statusline.sh\"" \
+      "$(cat "$w13_chain_file" 2>/dev/null)"
+# and it actually renders both halves when Git Bash runs it
+w13_rendered=$(printf '{"transcript_path":"","model":{"id":"claude-opus-4-8"},"session_id":"w13c"}' \
+  | HEADROOM_STATE_DIR="$W13C/state" bash "$w13_chain_file" 2>/dev/null)
+check "w13: the chain renders the user's status line" "LEFT-SIDE" "$w13_rendered"
+check "w13: the chain renders the headroom badge after it" "headroom" "$w13_rendered"
+out=$(w13_chain --fix)
+check_eq "w13: a second windows --fix is a no-op" "0" "$(printf '%s\n' "$out" | grep -cE '^fixed ')"
+check    "w13: and the chain wiring reads as healthy" "statusLine wired (" "$out"
+# POSIX control: the inline chain is unchanged and no chain script is written
+W13CU="$W/w13chain-posix"; mkdir -p "$W13CU/cd"
+S13CU="$W13CU/s.json"; jq -n '{statusLine:{type:"command",command:"printf LEFT-SIDE"}}' > "$S13CU"
+env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13CU" \
+    DOCTOR_CLAUDE_DIR="$W13CU/cd" DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13CU/shim" \
+    HEADROOM_STATE_DIR="$W13CU/state" bash "$DOCTOR" --fix >/dev/null 2>&1
+check "w13: POSIX still gets the inline chain" 'in=$(cat); left=$(printf' \
+      "$(jq -r '.statusLine.command' "$S13CU")"
+if [ -e "$W13CU/cd/headroom-statusline-chain.sh" ]; then
+  echo "FAIL - w13: POSIX writes no chain script"; FAIL=$((FAIL+1))
+else
+  echo "ok - w13: POSIX writes no chain script"; PASS=$((PASS+1))
+fi
+
+# w13-#14. The Windows PATH hint hardcoded %USERPROFILE%\.local\bin while the
+# message beside it named the real $SHIM_DIR.
+W13H="$W/w13hint"; mkdir -p "$W13H/cd" "$W13H/venv/Scripts" "$W13H/customshim"
+printf '#!/bin/sh\nexit 0\n'    > "$W13H/venv/Scripts/python.exe";   chmod +x "$W13H/venv/Scripts/python.exe"
+printf 'MZ() { :; }\nexit 0\n'  > "$W13H/venv/Scripts/headroom.exe"; chmod +x "$W13H/venv/Scripts/headroom.exe"
+S13H="$W13H/s.json"; doc_settings_wired "$W13H/cd" > "$S13H"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13H" \
+      DOCTOR_CLAUDE_DIR="$W13H/cd" DOCTOR_VENV_DIR="$W13H/venv" DOCTOR_SHIM_DIR="$W13H/customshim" \
+      HEADROOM_STATE_DIR="$W13H/state" bash "$DOCTOR" --fix 2>&1)
+check        "w13: the windows PATH hint names the shim dir actually in use" \
+             "add $W13H/customshim to your user Path" "$out"
+check_absent "w13: the hint no longer hardcodes %USERPROFILE%" '%USERPROFILE%' "$out"
+# and the dir is converted to its native spelling when cygpath is available
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" PATH="$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13H" DOCTOR_CLAUDE_DIR="$W13H/cd" DOCTOR_VENV_DIR="$W13H/venv" \
+      DOCTOR_SHIM_DIR="$W13H/customshim" HEADROOM_STATE_DIR="$W13H/state" bash "$DOCTOR" --fix 2>&1)
+check "w13: the hint uses the native spelling of that dir" 'add C:\fake\customshim to your user Path' "$out"
+
+# w13-#2. The Windows bootstrap order is `py:-3 python python3`, whose colon
+# splitting hands `-3` to the py launcher — nothing exercised it (the Windows
+# order fixture supplied only `python`, and CI pre-creates the venv). Stub a py
+# launcher that ONLY accepts `-3 -m venv DIR`, with python/python3 failing, so
+# the assertion can come from nowhere else.
+W13B="$W/w13pyboot"; mkdir -p "$W13B/stub" "$W13B/cd" "$W13B/shim"
+ln -sf "$(command -v jq)" "$W13B/stub/jq"
+cat > "$W13B/stub/py" <<'W13PY'
+#!/bin/sh
+# the real Windows py launcher: a version selector, then the python arguments
+[ "$1" = "-3" ] || exit 1
+shift
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  mkdir -p "$3/Scripts"
+  printf '#!/bin/sh\necho "$@" >> "$(dirname "$0")/../pip.calls"\n' > "$3/Scripts/pip.exe"
+  printf '#!/bin/sh\nexit 0\n'   > "$3/Scripts/python.exe"
+  printf 'MZ() { :; }\nexit 0\n' > "$3/Scripts/headroom.exe"   # PE magic, still shell-runnable
+  chmod +x "$3/Scripts/pip.exe" "$3/Scripts/python.exe" "$3/Scripts/headroom.exe"
+  exit 0
+fi
+exit 1
+W13PY
+chmod +x "$W13B/stub/py"
+printf '#!/bin/sh\nexit 1\n' > "$W13B/stub/python";  chmod +x "$W13B/stub/python"
+printf '#!/bin/sh\nexit 1\n' > "$W13B/stub/python3"; chmod +x "$W13B/stub/python3"
+S13B="$W13B/s.json"; doc_settings_wired "$W13B/cd" > "$S13B"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13B/shim:$W13B/stub:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13B" DOCTOR_CLAUDE_DIR="$W13B/cd" DOCTOR_VENV_DIR="$W13B/venv" \
+      DOCTOR_SHIM_DIR="$W13B/shim" HEADROOM_STATE_DIR="$W13B/state" bash "$DOCTOR" --fix 2>&1)
+check "w13: the py launcher bootstraps the engine (colon-split -3 argument)" \
+      "engine bootstrapped: py -3 -m venv $W13B/venv" "$out"
+check "w13: it pip-installed through the Scripts layout" "Scripts/pip.exe install" "$out"
+check "w13: the stub pip really was called" "install headroom-ai[all]" \
+      "$(cat "$W13B/venv/pip.calls" 2>/dev/null)"
+check_absent "w13: no bootstrap FAIL when only py works" "engine bootstrap failed" "$out"
+if [ -x "$W13B/venv/Scripts/python.exe" ]; then
+  echo "ok - w13: py -3 -m venv produced a Scripts/ venv"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: py -3 -m venv produced a Scripts/ venv"; FAIL=$((FAIL+1))
+fi
+# control: with py gone, the same toolchain honestly fails (so the check above
+# is really attributing the bootstrap to the py launcher)
+W13B2="$W/w13pyboot-nopy"; mkdir -p "$W13B2/stub" "$W13B2/cd"
+ln -sf "$(command -v jq)" "$W13B2/stub/jq"
+printf '#!/bin/sh\nexit 1\n' > "$W13B2/stub/python";  chmod +x "$W13B2/stub/python"
+printf '#!/bin/sh\nexit 1\n' > "$W13B2/stub/python3"; chmod +x "$W13B2/stub/python3"
+S13B2="$W13B2/s.json"; doc_settings_wired "$W13B2/cd" > "$S13B2"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13B2/stub:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13B2" DOCTOR_CLAUDE_DIR="$W13B2/cd" DOCTOR_VENV_DIR="$W13B2/venv" \
+      DOCTOR_SHIM_DIR="$W13B2/shim" HEADROOM_STATE_DIR="$W13B2/state" bash "$DOCTOR" --fix 2>&1)
+check "w13: control — without py the bootstrap FAILs honestly" "engine bootstrap failed" "$out"
+
+# w13-#13. The FLAT (non-lib/) engine-resolve.sh tier of check 7c-2 — the legacy
+# manual-install layout — had no fixture at all.
+W13E="$W/w13flatres"; mkdir -p "$W13E/cd/lib"
+cp "$ROOT/scripts/statusline.sh" "$W13E/cd/headroom-statusline.sh"
+cp "$ROOT/scripts/lib/attribution.jq" "$ROOT/scripts/lib/headroom-state.sh" "$W13E/cd/lib/"
+cp "$ROOT/scripts/lib/engine-resolve.sh" "$W13E/cd/engine-resolve.sh"   # FLAT sibling, no lib/ copy
+S13E="$W13E/s.json"; doc_settings_wired "$W13E/cd" > "$S13E"
+out=$(HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13E" \
+      DOCTOR_CLAUDE_DIR="$W13E/cd" DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13E/shim" \
+      HEADROOM_STATE_DIR="$W13E/state" bash "$DOCTOR" 2>&1)
+check        "w13: a flat \$CLAUDE_DIR/engine-resolve.sh is recognised as current" \
+             "shared engine resolver current ($W13E/cd/engine-resolve.sh)" "$out"
+check_absent "w13: the flat copy is not reported missing/stale" \
+             "shared engine resolver missing/stale" "$out"
+check_absent "w13: and nothing is reported as fixable for it" \
+             "--fix installs it to $W13E/cd/lib" "$out"
+check_absent "w13: no --fix line is printed for the flat resolver" \
+             "installed the shared engine resolver" "$out"
+# a STALE flat copy is still caught (the branch is currency-checked, not just existence)
+printf '\n# drift\n' >> "$W13E/cd/engine-resolve.sh"
+out=$(HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13E" \
+      DOCTOR_CLAUDE_DIR="$W13E/cd" DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13E/shim" \
+      HEADROOM_STATE_DIR="$W13E/state" bash "$DOCTOR" 2>&1)
+check "w13: a stale flat resolver is reported fixable" \
+      "shared engine resolver missing/stale (engine-resolve.sh)" "$out"
+
+# w13-#4. Windows' default PATHEXT resolves .COM FIRST, and both hijack lists
+# omitted exactly that spelling. The list now lives in the shared lib so the two
+# call sites cannot drift apart again.
+check_eq "w13: .com leads the shared name list" "headroom.com" "$(er headroom_name_variants | head -1)"
+check_eq "w13: the shared list carries all five spellings" "5" "$(er headroom_name_variants | grep -c .)"
+check    "w13: doctor uses the shared list"        "headroom_name_variants" "$(cat "$DOCTOR")"
+check    "w13: session-probe uses the shared list" "headroom_name_variants" "$(cat "$PROBE")"
+W13X="$W/w13com"; mkdir -p "$W13X/cd" "$W13X/proj" "$W13X/home"
+printf 'MZ() { :; }\nexit 0\n' > "$W13X/proj/headroom.com"    # no +x: Windows needs none
+S13X="$W13X/s.json"; doc_settings_wired "$W13X/cd" > "$S13X"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_PROJECT_DIR="$W13X/proj" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13X" DOCTOR_CLAUDE_DIR="$W13X/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13X/shim" HEADROOM_STATE_DIR="$W13X/state" \
+      bash "$DOCTOR" 2>&1)
+check "w13: doctor FAILs on a project-dir headroom.com (PATHEXT's first match)" \
+      "an executable $W13X/proj/headroom.com sits in the project directory" "$out"
+out=$(printf '{"session_id":"w13com"}' | env -u HCAT_PYTHON DOCTOR_OS=windows HOME="$W13X/home" \
+      DOCTOR_PROJECT_DIR="$W13X/proj" PATH="$STUB:/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W13X/pstate" bash "$PROBE")
+check    "w13: the probe nudges about a project-dir headroom.com too" \
+         "$W13X/proj/headroom.com sits in this project" "$out"
+check_eq "w13: the probe still prints exactly one line" "1" "$(printf '%s\n' "$out" | grep -c .)"
+
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
 if command -v shellcheck >/dev/null 2>&1; then
   if shellcheck --severity=warning "$SCRIPT" "$DANGI" "$ROOT/scripts/hcat-gate.sh" \
-       "$ROOT/scripts/doctor.sh" "$ROOT/scripts/mcp-launcher.sh" \
+       "$ROOT/scripts/doctor.sh" \
        "$ROOT/scripts/session-probe.sh" "$ROOT/scripts/ledger-hook.sh" \
-       "$ROOT/scripts/lib/headroom-state.sh"; then
+       "$ROOT/scripts/lib/headroom-state.sh" \
+       "$ROOT/scripts/lib/engine-resolve.sh" \
+       "$HCAT" "$ROOT/scripts/ci/windows-check.sh"; then
     echo "ok - shellcheck"; PASS=$((PASS+1))
   else
     echo "FAIL - shellcheck"; FAIL=$((FAIL+1))

@@ -22,6 +22,27 @@ _here="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
 for _sl in "$_here/lib/headroom-state.sh" "$_here/headroom-state.sh"; do
   [ -f "$_sl" ] && { . "$_sl"; break; }
 done
+# shellcheck disable=SC1090,SC1091
+for _er in "$_here/lib/engine-resolve.sh" "$_here/engine-resolve.sh"; do
+  [ -f "$_er" ] && { . "$_er"; break; }
+done
+type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # partial legacy copy
+  # Deliberately NARROWER than scripts/lib/engine-resolve.sh: no uv tool dir and
+  # no shebang-interpreter tier. Keep the PATH-sibling lookup though — a flat
+  # install that lands here is exactly the pipx/uv population that needs it.
+  local c d
+  if [ -n "${HCAT_PYTHON:-}" ]; then printf '%s\n' "$HCAT_PYTHON"; return 0; fi
+  if d=$(command -v headroom 2>/dev/null) && [ -n "$d" ]; then
+    d=$(dirname "$d")
+    for c in "$d/python" "$d/python.exe"; do
+      [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+  fi
+  for c in "${HOME:-}/.headroom-venv/bin/python" "${HOME:-}/.headroom-venv/Scripts/python.exe"; do
+    [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
 type note_error >/dev/null 2>&1 || note_error() { :; }
 type canon_path >/dev/null 2>&1 || canon_path() { printf '%s' "$1"; }
 # Eligibility predicates come from the same lib (one definition shared with
@@ -109,12 +130,7 @@ if [ ! -x "$HCAT" ]; then
   legacy=1
 fi
 [ -x "$HCAT" ] || exit 0
-py=""
-if [ -n "${HCAT_PYTHON:-}" ]; then
-  py="$HCAT_PYTHON"
-elif [ -x "${HOME:-}/.headroom-venv/bin/python" ]; then
-  py="$HOME/.headroom-venv/bin/python"
-fi
+py=$(resolve_engine_python) || py=""
 if [ -n "$py" ]; then
   # A resolved-but-broken engine is a real outage the fail-open would otherwise
   # hide — record it so the badge can show "broken" instead of mimicking idle.
@@ -127,7 +143,7 @@ if [ -n "$py" ]; then
   # A half-created venv passes -x yet cannot `import headroom.compress` (hcat
   # exits 4) — verify the import and fail OPEN (allow the Read) on a broken
   # engine. `.compress` also distinguishes the real headroom-ai package from
-  # a name-squatted `headroom` on PyPI (see doctor.sh/bin/hcat/mcp-launcher.sh).
+  # a name-squatted `headroom` on PyPI (see doctor.sh/bin/hcat).
   # Only runs on the rare deny path, so the interpreter spawn is fine.
   if ! "$py" -c 'import headroom.compress' >/dev/null 2>&1; then
     note_error engine "engine import failed ($py) — gate failing open; run /doctor"
