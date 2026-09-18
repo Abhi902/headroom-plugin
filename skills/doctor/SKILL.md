@@ -8,9 +8,11 @@ description: Use when the headroom setup needs a health check or repair — the 
 ## Overview
 
 `scripts/doctor.sh` validates the whole headroom setup end-to-end: jq, the
-headroom engine python (`$HCAT_PYTHON` → sibling of `headroom` on PATH → the
-`headroom` console script's shebang interpreter, which covers pip --user and
-pipx layouts → `~/.headroom-venv`), a real `bin/hcat` smoke compression of a
+headroom engine python (`$HCAT_PYTHON` → sibling `python`/`python.exe` of
+`headroom` on PATH → the `headroom` console script's shebang interpreter, which
+covers pip --user and pipx layouts and is skipped for MZ/PE launchers such as uv
+trampolines and pip's `headroom.exe` → the `uv tool` dir → `~/.headroom-venv` in
+either the `bin/` or the `Scripts/` layout), a real `bin/hcat` smoke compression of a
 generated ~26 KB JSON, the plugin-native `hooks/hooks.json` (SessionStart,
 PreToolUse, PostToolUse, Stop, SessionEnd), the bundled `.mcp.json` (parses
 and names the bare `headroom mcp serve` command — since v2.8 there is no
@@ -28,10 +30,13 @@ directory with `DOCTOR_PROJECT_DIR`, default the current working directory) —
 they all double-fire alongside the plugin-native hooks — the statusLine
 wiring (including a doctor-blessed custom, hand-wired path, not just the
 canonical `~/.claude/headroom-statusline.sh` copy), that the wired copy
-matches the plugin's script **and that the installed lib deps (`attribution.jq`,
-`headroom-state.sh`, `engine-resolve.sh`) are present and current** — under `~/.claude/lib/`, or,
+matches the plugin's script **and that the installed badge deps (`attribution.jq`,
+`headroom-state.sh`) are present and current** — under `~/.claude/lib/`, or,
 for the legacy full-manual install layout, as flat siblings next to the copy
-(without them the badge is stuck at a permanent "idle" showing zero savings),
+(without them the badge is stuck at a permanent "idle" showing zero savings) —
+plus the shared engine resolver `engine-resolve.sh`, which is not a badge dep and
+is therefore checked (and provisioned) under `~/.claude` only, wherever the
+status-line copy itself happens to live,
 stale pre-plugin script copies in `~/.claude`, and whether a recorded
 ambient-health failure (the `last-error` file that flips the statusline badge
 to "broken") can now be cleared. On Windows the doctor also confirms it is
@@ -102,16 +107,28 @@ Each line is aligned `<status> - <what>`:
     wired command itself would still never resolve it
   - headroom CLI not on PATH (engine found, bare name unresolved) → the
     resolved `headroom` is shimmed into `~/.local/bin` (symlink; on Windows a
-    copy named `headroom.exe`), then re-checked — if `~/.local/bin` is not on
-    PATH the line turns `FAIL` and carries the exact one-line PATH addition for
-    your shell (or the Windows user Path steps); the doctor never edits rc
-    files or the registry
+    copy named `headroom.exe`), then re-checked by name **and by execution** —
+    three `FAIL`s can come out of that re-check instead of a fix: (1) the shim
+    landed but `~/.local/bin` is not on PATH — the line carries the exact
+    one-line PATH addition for your shell (or the Windows user Path steps);
+    (2) the shim resolves by name but will not start (`headroom --help` fails),
+    e.g. a uv trampoline copied away from the interpreter it resolves relative
+    to — the doctor deletes the shim it just wrote (so the next run diagnoses
+    the engine again instead of greening a dead file) and tells you to reinstall
+    the engine; (3) a `headroom` that was *already* on PATH does not start —
+    same reason, same remedy, but nothing is deleted because the file is not
+    the doctor's. The doctor never edits rc files or the registry
   - stale statusline copy → refreshed from the plugin's `scripts/statusline.sh`
-  - missing/stale lib deps → `attribution.jq`, `headroom-state.sh` and
-    `engine-resolve.sh` (re)installed into `~/.claude/lib/`; the first two are
-    what the badge needs to attribute savings, so without them it silently reads
-    zero, and the third is the shared engine resolver a legacy flat install's
-    `hcat`/hooks source before their minimal inline fallback
+  - missing/stale badge deps → `attribution.jq` and `headroom-state.sh`
+    (re)installed into `~/.claude/lib/`; they are what the badge needs to
+    attribute savings, so without them it silently reads zero. A custom-path
+    install is `FAIL` here, not `fixable` — the doctor detects its health but
+    never writes into it
+  - missing/stale shared engine resolver → `engine-resolve.sh` (re)installed
+    into `~/.claude/lib/`. It is reported on its own line because it is not a
+    badge dep: it is what a legacy flat install's `hcat`/hooks source before
+    their narrower inline fallback, so it is checked and provisioned under
+    `~/.claude` regardless of where the status-line copy lives
   - stale `~/.claude` copies → deleted, but only once plugin-native hooks are
     confirmed and no legacy entries remain in `settings.json`,
     `settings.local.json`, or the current project's settings — project-level

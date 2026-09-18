@@ -4,9 +4,14 @@
 # Every assertion here is something the macOS fixtures can only simulate.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0; SKIP_NAMES=""
 ok()   { echo "ok - $1"; PASS=$((PASS+1)); }
 fail() { echo "FAIL - $1"; shift; [ $# -gt 0 ] && printf '    %s\n' "$@"; FAIL=$((FAIL+1)); }
+# A skip must be COUNTED. The workflow makes `uv tool install` non-fatal on
+# purpose (a transient PyPI failure must not red a required gate), so a bare
+# `echo skip` let a whole layout stop being tested while the summary still read
+# "N passed, 0 failed". Visibility is the fix, not fatality.
+skip() { echo "skip - $1"; SKIP=$((SKIP+1)); SKIP_NAMES="${SKIP_NAMES:+$SKIP_NAMES; }$1"; }
 need() { [ -n "${!1:-}" ] || { echo "windows-check: env $1 is required" >&2; exit 2; }; }
 need VENV_DIR          # a venv the workflow created with `python -m venv` + pip install headroom-ai
 need HOME
@@ -33,7 +38,7 @@ if command -v uv >/dev/null 2>&1 && [ -d "$(uv tool dir)/headroom-ai" ]; then
   got=$(env -u HCAT_PYTHON PATH="$(dirname "$(command -v uv)"):/usr/bin:/bin" DOCTOR_VENV_DIR=/nonexistent bash -c ". '$ROOT/scripts/lib/engine-resolve.sh'; resolve_engine_python")
   case $got in *headroom-ai*python*) ok "uv tool dir python found ($got)" ;; *) fail "uv tool dir resolution" "got: $got" ;; esac
 else
-  echo "skip - uv tool layout (uv not installed on this runner)"
+  skip "uv tool layout (uv not installed on this runner)"
 fi
 
 # 4. hcat on non-ASCII JSON with the real engine (UTF-8 regression)
@@ -44,8 +49,23 @@ rows = [{"id": i, "name": "naïve ✓ 日本 %d" % i, "note": "ünïcode"} for i
 open(sys.argv[1], "w", encoding="utf-8").write(json.dumps(rows, ensure_ascii=False, indent=2))
 PY
 out=$(env -u HCAT_PYTHON DOCTOR_VENV_DIR="$VENV_DIR" PATH="/usr/bin:/bin" bash "$ROOT/bin/hcat" "$TMPD/uni.json" 2>"$TMPD/hcat.err"); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "── hcat:"; then ok "hcat compresses non-ASCII JSON on Windows (rc=0, receipt printed)"
-else fail "hcat on non-ASCII JSON" "rc=$rc" "$(head -3 "$TMPD/hcat.err")"; fi
+# "rc=0 + receipt" alone can never fail: hcat prints the SAME `── hcat:` receipt
+# with rc 0 from three tiers, including the pure-jq tier it falls back to when no
+# engine resolves at all. Require the engine tier explicitly — then prove the
+# assertion can tell them apart with the negative control right below.
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "── hcat:" \
+   && ! printf '%s' "$out" | grep -q "engine absent"; then
+  ok "hcat compresses non-ASCII JSON on Windows with the REAL engine (rc=0, receipt, no engine-absent tier)"
+else fail "hcat on non-ASCII JSON" "rc=$rc" "$(printf '%s' "$out" | head -1)" "$(head -3 "$TMPD/hcat.err")"; fi
+# negative control: same file, resolver deliberately broken (no HCAT_PYTHON, venv
+# pointed at nothing, engine nowhere on PATH) must land in the jq tier and SAY so.
+neg=$(env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent \
+      PATH="$(dirname "$(command -v jq)"):/usr/bin:/bin" bash "$ROOT/bin/hcat" "$TMPD/uni.json" 2>/dev/null)
+if printf '%s' "$neg" | grep -q "engine absent"; then
+  ok "negative control: with no engine, hcat's receipt says 'engine absent' (the check above can fail)"
+else
+  fail "negative control: hcat without an engine did not report 'engine absent'" "$(printf '%s' "$neg" | head -1)"
+fi
 
 # 5. doctor --fix in a sandbox HOME with the real venv: engine ok, shim created,
 # status line wired with Windows paths.
@@ -83,5 +103,8 @@ printf '%s\n' "$out2" | grep -qE '^fixed ' && fail "doctor: second --fix not ide
 printf '%s\n' "$out2" | grep -qE '^ok +- headroom CLI on PATH' && ok "doctor: run 2 resolves the shimmed headroom on PATH" || fail "doctor: run 2 did not report headroom CLI on PATH" "$out2"
 printf '%s\n' "$cmd" > "$ROOT/statusline.cmd"   # consumed by the PowerShell step
 
-echo; echo "$PASS passed, $FAIL failed"
+echo
+summary="$PASS passed, $FAIL failed, $SKIP skipped"
+[ "$SKIP" -gt 0 ] && summary="$summary — skipped: $SKIP_NAMES"
+echo "$summary"
 [ "$FAIL" -eq 0 ]

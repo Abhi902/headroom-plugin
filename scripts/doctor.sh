@@ -120,7 +120,10 @@ backup_settings() {
 # --- 0. platform — on Windows every hook and the status line run through Git Bash
 if is_windows; then
   if [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
-    say FAIL "CLAUDE_CODE_GIT_BASH_PATH points at a missing file ($CLAUDE_CODE_GIT_BASH_PATH) — Git for Windows is required: hooks and the status line run through Git Bash"
+    # Actionable like session-probe.sh's twin line: the usual cause is a STALE
+    # variable on a box that has Git Bash, so name where the value lives before
+    # suggesting an install.
+    say FAIL "CLAUDE_CODE_GIT_BASH_PATH points at a missing file ($CLAUDE_CODE_GIT_BASH_PATH) — hooks and the status line run through Git Bash: fix that path in settings.json env, or unset it when Git for Windows is already on PATH (and install Git for Windows if it is not)"
   else
     say ok "Windows (Git Bash) — hooks and the status line run through it"
   fi
@@ -217,16 +220,22 @@ shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the
   # so refuse and let 2b say so. A symlink is ours to replace; a byte-identical
   # regular file already IS the shim, so leave it alone — that keeps --fix
   # idempotent on Windows, where the shim is a copy rather than a link.
+  # $TMPD/shim-written records whether this run actually WROTE the file (as
+  # opposed to finding a byte-identical one already in place). The verify
+  # branch below removes a shim that does not start, and it must only ever
+  # remove one the doctor itself just created. This is a marker FILE rather
+  # than a variable because the caller runs us in a command substitution.
   local target; target=$(shim_target)
+  rm -f "$TMPD/shim-written"
   if [ -e "$target" ] && [ ! -L "$target" ]; then
     cmp -s "$1" "$target" || return 2
     printf '%s' "$target"; return 0
   fi
   mkdir -p "$SHIM_DIR" 2>/dev/null || return 1
   if is_windows; then
-    cp "$1" "$target" 2>/dev/null && printf '%s' "$target"
+    cp "$1" "$target" 2>/dev/null && { : > "$TMPD/shim-written"; printf '%s' "$target"; }
   else
-    ln -sfn "$1" "$target" 2>/dev/null && printf '%s' "$target"
+    ln -sfn "$1" "$target" 2>/dev/null && { : > "$TMPD/shim-written"; printf '%s' "$target"; }
   fi
 }
 shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves
@@ -250,8 +259,16 @@ reinstall_hint() {  # how to repair an engine whose `headroom` CLI is missing or
 sl_hr_cmd() {  # sl_hr_cmd <script> — the statusLine.command to write for this platform
   local b
   if is_windows; then
+    # CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT-scoped
+    # settings.json — i.e. from repo config. `--fix` persists what we print here
+    # into ~/.claude/settings.json as statusLine.command, which Claude Code then
+    # EXECUTES, so a value carrying a double quote (`C:\bash.exe" & calc.exe & "`)
+    # would close our quoting and append commands of its own. Accept the value
+    # only when it is an existing file with no quote character in it; otherwise
+    # fall back to the bash this doctor is running under.
     b=${CLAUDE_CODE_GIT_BASH_PATH:-}
-    [ -n "$b" ] || b=$(win_path "$(command -v bash)")
+    case $b in *'"'*) b="" ;; esac
+    if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(win_path "$(command -v bash)"); fi
     printf '"%s" "%s"' "$b" "$(win_path "$1")"
   else
     printf 'bash "%s"' "$1"
@@ -268,7 +285,17 @@ path_hint() {  # the one line the user must run/do to put SHIM_DIR on PATH
   fi
 }
 if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
-  say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
+  # Name resolution alone is not "verified": the shim branch below has always
+  # re-checked by EXECUTION, and this branch must hold the same bar — a
+  # `headroom` on PATH that resolves and then dies (a relocated uv trampoline,
+  # a broken console script, a name squatter) would otherwise be greened here,
+  # including on the doctor run right after this branch's own FAIL removed a
+  # dead shim.
+  if shim_runs "$cli_now"; then
+    say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
+  else
+    say FAIL "headroom on PATH at $cli_now does not run (\`$cli_now --help\` failed) — the bundled MCP spawns \`headroom\` by name and will fail to connect; reinstall the engine: $(reinstall_hint)"
+  fi
 elif cli_res=$(resolve_headroom_cli); then
   if [ "$FIX" -eq 1 ]; then
     shim=$(shim_headroom "$cli_res"); shim_rc=$?
@@ -281,7 +308,16 @@ elif cli_res=$(resolve_headroom_cli); then
       if ! command -v headroom >/dev/null 2>&1; then
         say FAIL "headroom shimmed to $shim but $SHIM_DIR is not on PATH — $(path_hint)"
       elif ! shim_runs "$shim"; then
-        say FAIL "headroom shimmed to $shim but it does not run (\`$shim --help\` failed) — reinstall the engine: $(reinstall_hint)"
+        # Remove the dead file we just wrote. Leaving it behind is worse than
+        # never writing it: the next run's `command -v headroom` branch would
+        # find it, and a shim that resolves is exactly what that branch used to
+        # green. Only ever delete a shim THIS run created — a byte-identical
+        # pre-existing file is the user's, not ours.
+        shim_gone=""
+        if [ -f "$TMPD/shim-written" ]; then
+          rm -f "$shim" && shim_gone=" (the broken shim was removed)"
+        fi
+        say FAIL "headroom shimmed to $shim but it does not run (\`$shim --help\` failed)$shim_gone — reinstall the engine: $(reinstall_hint)"
       else
         say fixed "headroom shimmed to $shim (resolves on PATH)"
       fi
@@ -293,6 +329,27 @@ elif [ -z "$PY" ]; then
   say skip "headroom CLI on PATH (no engine yet — fix the engine first)"
 else
   say FAIL "engine python found ($PY) but no \`headroom\` CLI next to it — reinstall: $(reinstall_hint)"
+fi
+
+# 2b-win. Windows resolves a BARE command name from the spawning process's current
+# directory before it looks at PATH. The bundled .mcp.json can express neither a
+# per-platform nor an absolute command, so it spawns the bare `headroom` — which
+# means an executable of that name sitting in the project you just opened would be
+# spawned instead of the installed engine. Nothing in .mcp.json can prevent that;
+# the doctor can at least see it and say so.
+if is_windows; then
+  hj_dir=${DOCTOR_PROJECT_DIR:-$PWD}
+  hj_found=""
+  for hj in headroom.exe headroom.cmd headroom.bat headroom; do
+    [ -f "$hj_dir/$hj" ] || continue
+    # .exe/.cmd/.bat are executable to Windows by extension; the extensionless
+    # name only matters when Git Bash would run it
+    case $hj in headroom) [ -x "$hj_dir/$hj" ] || continue ;; esac
+    hj_found="$hj_dir/$hj"; break
+  done
+  if [ -n "$hj_found" ]; then
+    say FAIL "an executable $hj_found sits in the project directory — on Windows a bare command name resolves from the project directory BEFORE PATH, so the bundled MCP would spawn that file instead of the installed headroom engine; remove or rename it"
+  fi
 fi
 
 # --- 3. bin/hcat + a real smoke compression of a generated ~26 KB JSON
@@ -719,14 +776,14 @@ JQEOF
     say fixable "statusline copy differs from the plugin's scripts/statusline.sh — --fix refreshes it"
   fi
 
-  # 7c. the installed lib deps. statusline.sh's runtime deps (attribution.jq +
+  # 7c. the installed BADGE deps. statusline.sh's runtime deps (attribution.jq +
   # headroom-state.sh) must sit next to the installed copy, or compute() silently
   # degrades to a permanent idle badge showing zero savings (issue #2). The plain
   # cmp in 7b only covers the script itself — these are separate files and were
-  # never provisioned. engine-resolve.sh is checked here too (v2.8, spec §1): it
-  # is not a badge dep, but a legacy FLAT install's hcat / hcat-gate.sh /
-  # session-probe.sh source "$here/lib/engine-resolve.sh" ahead of their inline
-  # fallback, so this is the one place /doctor --fix can repair those.
+  # never provisioned. engine-resolve.sh is NOT one of these: it is not loaded by
+  # statusline.sh at all, it has no business being demanded next to a custom-path
+  # copy the doctor refuses to write to (that combination FAILs forever, since
+  # --fix can never clear it), and it gets its own check just below.
   # statusline.sh resolves each dep from EITHER a lib/ subdir OR a flat sibling
   # (the legacy full-manual install layout), preferring lib/. Mirror that here so
   # a healthy flat install is not falsely flagged (which would also block block 9's
@@ -736,7 +793,7 @@ JQEOF
   else
     sl_dep_dir=$(dirname "$sl_copy")
     lib_stale=""
-    for f in attribution.jq headroom-state.sh engine-resolve.sh; do
+    for f in attribution.jq headroom-state.sh; do
       # Resolve each dep exactly as statusline.sh does — by EXISTENCE, lib/ first,
       # else the flat sibling next to the copy actually wired (canonical or
       # custom-path), then currency-check only the file it would load.
@@ -754,20 +811,46 @@ JQEOF
       fi
     done
     if [ -z "$lib_stale" ]; then
-      say ok "statusline lib deps current (attribution.jq, headroom-state.sh, engine-resolve.sh)"
+      say ok "statusline lib deps current (attribution.jq, headroom-state.sh)"
     elif [ "$sl_custom_copy" -eq 1 ]; then
       say FAIL "statusline lib deps at $sl_dep_dir missing/stale —$lib_stale (custom-path install is yours to update; doctor will not write there)"
     elif [ "$FIX" -eq 1 ]; then
       mkdir -p "$CLAUDE_DIR/lib"
       if cp "$PLUGIN_ROOT/scripts/lib/attribution.jq"    "$CLAUDE_DIR/lib/" \
-         && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/" \
-         && cp "$PLUGIN_ROOT/scripts/lib/engine-resolve.sh" "$CLAUDE_DIR/lib/"; then
+         && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/"; then
         say fixed "installed statusline lib deps to $CLAUDE_DIR/lib —$lib_stale"
       else
         say FAIL "could not copy statusline lib deps to $CLAUDE_DIR/lib"
       fi
     else
-      say fixable "statusline lib deps missing/stale —$lib_stale (badge shows zero savings without them, and a legacy flat install loses the shared engine resolver; --fix installs attribution.jq + headroom-state.sh + engine-resolve.sh)"
+      say fixable "statusline lib deps missing/stale —$lib_stale (badge shows zero savings without them; --fix installs attribution.jq + headroom-state.sh)"
+    fi
+
+    # 7c-2. the shared engine resolver. engine-resolve.sh is not a badge dep —
+    # statusline.sh never loads it — but a legacy FLAT install's hcat /
+    # hcat-gate.sh / session-probe.sh source it ahead of their (narrower) inline
+    # fallback, so /doctor --fix is the one place that population gets it
+    # (spec §1, v2.8). It is resolved and repaired against $CLAUDE_DIR ONLY,
+    # never next to a custom-path statusline copy: the doctor refuses to write
+    # into a custom path, so demanding the file there produced a FAIL that --fix
+    # could never clear and the doctor could never exit 0 from. It rides in this
+    # branch (rather than standing alone) so it keeps the same "there is an
+    # installed statusline copy to look after" scope the deps above have had.
+    er_dep=""
+    if   [ -f "$CLAUDE_DIR/lib/engine-resolve.sh" ]; then er_dep="$CLAUDE_DIR/lib/engine-resolve.sh"
+    elif [ -f "$CLAUDE_DIR/engine-resolve.sh" ];     then er_dep="$CLAUDE_DIR/engine-resolve.sh"
+    fi
+    if [ -n "$er_dep" ] && cmp -s "$PLUGIN_ROOT/scripts/lib/engine-resolve.sh" "$er_dep"; then
+      say ok "shared engine resolver current ($er_dep)"
+    elif [ "$FIX" -eq 1 ]; then
+      mkdir -p "$CLAUDE_DIR/lib"
+      if cp "$PLUGIN_ROOT/scripts/lib/engine-resolve.sh" "$CLAUDE_DIR/lib/"; then
+        say fixed "installed the shared engine resolver to $CLAUDE_DIR/lib/engine-resolve.sh"
+      else
+        say FAIL "could not copy engine-resolve.sh to $CLAUDE_DIR/lib"
+      fi
+    else
+      say fixable "shared engine resolver missing/stale (engine-resolve.sh) — a legacy flat install's hcat and hooks fall back to a narrower engine lookup without it; --fix installs it to $CLAUDE_DIR/lib"
     fi
   fi
 

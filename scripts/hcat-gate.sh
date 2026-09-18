@@ -27,8 +27,17 @@ for _er in "$_here/lib/engine-resolve.sh" "$_here/engine-resolve.sh"; do
   [ -f "$_er" ] && { . "$_er"; break; }
 done
 type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # partial legacy copy
-  local c
+  # Deliberately NARROWER than scripts/lib/engine-resolve.sh: no uv tool dir and
+  # no shebang-interpreter tier. Keep the PATH-sibling lookup though — a flat
+  # install that lands here is exactly the pipx/uv population that needs it.
+  local c d
   if [ -n "${HCAT_PYTHON:-}" ]; then printf '%s\n' "$HCAT_PYTHON"; return 0; fi
+  if d=$(command -v headroom 2>/dev/null) && [ -n "$d" ]; then
+    d=$(dirname "$d")
+    for c in "$d/python" "$d/python.exe"; do
+      [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+  fi
   for c in "${HOME:-}/.headroom-venv/bin/python" "${HOME:-}/.headroom-venv/Scripts/python.exe"; do
     [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
   done

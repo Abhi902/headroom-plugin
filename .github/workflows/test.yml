@@ -37,7 +37,12 @@ jobs:
           $env:PATH = "$env:VENV_DIR\Scripts;" + $env:PATH
           node scripts/ci/spawn-probe.mjs headroom mcp serve
           if ($LASTEXITCODE -ne 0) { throw "bare 'headroom mcp serve' failed to spawn/handshake ($LASTEXITCODE)" }
-          node scripts/ci/spawn-probe.mjs "$PWD\scripts\session-probe.sh"
+          # spawn-probe maps ENOENT and EFTYPE to the same exit 3, so a renamed
+          # or moved target would "pass" this control without ever demonstrating
+          # that Windows refuses a shell-less .sh. Prove the target exists first.
+          $shTarget = "$PWD\scripts\session-probe.sh"
+          if (-not (Test-Path -LiteralPath $shTarget)) { throw "negative control target is missing: $shTarget" }
+          node scripts/ci/spawn-probe.mjs $shTarget
           if ($LASTEXITCODE -eq 0) { throw "negative control: a .sh spawned without a shell should NOT work" }
           Write-Host "negative control ok (exit $LASTEXITCODE)"
           exit 0

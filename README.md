@@ -173,7 +173,9 @@ Works under **Git for Windows (Git Bash)** — Claude Code runs its hooks and th
 
 1. `winget install jqlang.jq` and a Python 3.10+ (`winget install Python.Python.3.12`, or `uv`).
 2. Install the plugin as in the Quickstart and run `/headroom-usage-indicator:doctor --fix`. The doctor finds a venv in the `Scripts\` layout, `uv tool install headroom-ai` trampolines and pip's `headroom.exe` launchers, bootstraps a venv with `py -3`/`python` if nothing is installed, shims `headroom.exe` into `%USERPROFILE%\.local\bin`, and writes the status line as `"C:\…\Git\bin\bash.exe" "C:\Users\you\.claude\headroom-statusline.sh"`.
-3. If the doctor ends with *`…\.local\bin is not on PATH`*, add that directory to your user **Path** (Settings → System → About → Advanced system settings → Environment Variables) and restart Claude Code. Installing the engine with `uv tool install headroom-ai` or `pipx` instead puts `headroom` on PATH for you.
+3. If the doctor ends with *`…/.local/bin is not on PATH`* (it prints the Git Bash spelling of the path, forward slashes and all), add that directory to your user **Path** (Settings → System → About → Advanced system settings → Environment Variables) and restart Claude Code. Installing the engine with `uv tool install headroom-ai` or `pipx` instead puts `headroom` on PATH for you.
+
+One Windows caveat worth knowing: the bundled MCP is spawned by the **bare name** `headroom`, and Windows resolves a bare command name from the spawning process's **project directory before PATH**. So a `headroom.exe` committed to a repository you open would take precedence over your installed engine. The doctor and the session probe both flag such a file if they find one — remove or rename it.
 
 `hcat` output is UTF-8 on every platform (`PYTHONIOENCODING=utf-8`). Desktop notifications from Dangi are macOS/Linux only for now. CI runs the resolver, `hcat`, the doctor and a shell-less MCP spawn on a real `windows-latest` runner — what it cannot run is Claude Code itself; see [#9](https://github.com/Abhi902/headroom-plugin/issues/9).
 

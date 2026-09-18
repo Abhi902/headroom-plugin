@@ -22,8 +22,17 @@ for _er in "$here/lib/engine-resolve.sh" "$here/engine-resolve.sh"; do
   [ -f "$_er" ] && { . "$_er"; break; }
 done
 type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # partial legacy copy
-  local c
+  # Deliberately NARROWER than scripts/lib/engine-resolve.sh: no uv tool dir and
+  # no shebang-interpreter tier. Keep the PATH-sibling lookup though — a flat
+  # install that lands here is exactly the pipx/uv population that needs it.
+  local c d
   if [ -n "${HCAT_PYTHON:-}" ]; then printf '%s\n' "$HCAT_PYTHON"; return 0; fi
+  if d=$(command -v headroom 2>/dev/null) && [ -n "$d" ]; then
+    d=$(dirname "$d")
+    for c in "$d/python" "$d/python.exe"; do
+      [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+  fi
   for c in "${HOME:-}/.headroom-venv/bin/python" "${HOME:-}/.headroom-venv/Scripts/python.exe"; do
     [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
   done
@@ -86,6 +95,23 @@ engine_off_path() {
   command -v headroom >/dev/null 2>&1 && return 0
   add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /doctor --fix to shim it"
 }
+# ...and the other half of "spawned by name": on Windows a bare command name is
+# resolved from the spawning process's current directory BEFORE PATH, so a
+# headroom executable committed to the repo you just opened would be spawned
+# instead of the installed engine. .mcp.json cannot express an absolute or
+# per-platform command, so detection is the mitigation.
+engine_name_hijack() {
+  is_windows || return 0
+  local d f
+  d=${DOCTOR_PROJECT_DIR:-$PWD}
+  for f in headroom.exe headroom.cmd headroom.bat headroom; do
+    [ -f "$d/$f" ] || continue
+    case $f in headroom) [ -x "$d/$f" ] || continue ;; esac
+    add_problem "an executable $d/$f sits in this project — on Windows a bare command name resolves from the project directory before PATH, so the bundled MCP would spawn it instead of the headroom engine; remove or rename it"
+    return 0
+  done
+}
+engine_name_hijack
 if [ -n "${HCAT_PYTHON:-}" ]; then
   # An explicit override pointing nowhere is a breakage, not an absence.
   if [ ! -x "$HCAT_PYTHON" ]; then
