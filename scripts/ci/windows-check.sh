@@ -37,6 +37,13 @@ case $got in *python.exe|*python) ok "PATH sibling python.exe wins next to MZ la
 if command -v uv >/dev/null 2>&1 && [ -d "$(uv tool dir)/headroom-ai" ]; then
   got=$(env -u HCAT_PYTHON PATH="$(dirname "$(command -v uv)"):/usr/bin:/bin" DOCTOR_VENV_DIR=/nonexistent bash -c ". '$ROOT/scripts/lib/engine-resolve.sh'; resolve_engine_python")
   case $got in *headroom-ai*python*) ok "uv tool dir python found ($got)" ;; *) fail "uv tool dir resolution" "got: $got" ;; esac
+elif [ "${UV_EXPECTED:-0}" = "1" ]; then
+  # the workflow exports UV_EXPECTED=1 only when `uv tool install headroom-ai`
+  # SUCCEEDED in this job — the layout must exist, so a skip here would be the
+  # gate quietly agreeing to stop testing it (review #6)
+  fail "uv tool layout absent although \`uv tool install headroom-ai\` succeeded in this job (UV_EXPECTED=1)" \
+       "uv: $(command -v uv 2>/dev/null || echo 'not on PATH')" \
+       "uv tool dir: $(uv tool dir 2>/dev/null || echo 'n/a')"
 else
   skip "uv tool layout (uv not installed on this runner)"
 fi
@@ -102,6 +109,11 @@ printf '%s\n' "$out2" | grep -qE '^FAIL' && fail "doctor --fix run 2 printed a F
 printf '%s\n' "$out2" | grep -qE '^fixed ' && fail "doctor: second --fix not idempotent" "$out2" || ok "doctor: second --fix is a no-op"
 printf '%s\n' "$out2" | grep -qE '^ok +- headroom CLI on PATH' && ok "doctor: run 2 resolves the shimmed headroom on PATH" || fail "doctor: run 2 did not report headroom CLI on PATH" "$out2"
 printf '%s\n' "$cmd" > "$ROOT/statusline.cmd"   # consumed by the PowerShell step
+# Hand the sandbox shim dir off the same way, in its NATIVE spelling: the
+# PowerShell step prepends it to PATH and spawns the doctor's own `headroom.exe`
+# shell-lessly. Without this the only thing ever proven about that copy was that
+# Git Bash could run `--help` on it (review #7).
+printf '%s\n' "$(cygpath -w "$SB/.local/bin")" > "$ROOT/shimdir.path"
 
 echo
 summary="$PASS passed, $FAIL failed, $SKIP skipped"

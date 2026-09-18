@@ -11,7 +11,11 @@
 #                        and wire settings.json statusLine at it (.bak first);
 #                        merge-aware: an existing non-headroom command is kept
 #                        under _headroomStatusLineBackup and chained before the
-#                        badge (same semantics as the SKILL.md installer)
+#                        badge (same semantics as the SKILL.md installer). On
+#                        Windows that chain lives in a script file next to the
+#                        copy (headroom-statusline-chain.sh) so the persisted
+#                        command stays the `"<bash.exe>" "<C:\...>"` pair
+#                        Claude Code can actually spawn there
 #   * wired-missing copy — re-copy statusline.sh (+ lib deps, price table) to
 #                        ~/.claude when settings already point at the canonical
 #                        path but the script is absent; if the wiring named it
@@ -41,6 +45,7 @@
 #   DOCTOR_OS          windows|unix — force platform branches (default: detect)
 #   DOCTOR_SHIM_DIR    where --fix shims `headroom` (default ~/.local/bin)
 #   DOCTOR_CYGPATH     cygpath stub for tests (default: cygpath when present)
+#   DOCTOR_SHIM_RUNS_TIMEOUT  seconds a `headroom --help` probe may take (default 5)
 #
 # Exit codes: 0 no FAILs · 1 at least one FAIL · 2 usage
 set -u
@@ -225,25 +230,78 @@ shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the
   # branch below removes a shim that does not start, and it must only ever
   # remove one the doctor itself just created. This is a marker FILE rather
   # than a variable because the caller runs us in a command substitution.
-  local target; target=$(shim_target)
+  local target link; target=$(shim_target)
   rm -f "$TMPD/shim-written"
-  if [ -e "$target" ] && [ ! -L "$target" ]; then
+  if [ -L "$target" ]; then
+    # A SYMLINK here is NOT automatically ours. pipx (and `pip install --user`
+    # on some layouts) install ~/.local/bin console scripts as symlinks, so
+    # `ln -sfn` over one silently repointed somebody else's install with no
+    # backup and no way back — the very thing the foreign-file refusal below
+    # exists to prevent. Only a link that ALREADY names the CLI we resolved is
+    # ours to keep (that is what makes the POSIX shim path idempotent);
+    # anything else — including a dangling link — gets the same rc 2 refusal.
+    link=$(readlink "$target" 2>/dev/null) || link=""
+    [ "$link" = "$1" ] || return 2
+    printf '%s' "$target"; return 0
+  elif [ -e "$target" ]; then
     cmp -s "$1" "$target" || return 2
     printf '%s' "$target"; return 0
   fi
   mkdir -p "$SHIM_DIR" 2>/dev/null || return 1
   if is_windows; then
+    # rc 3 = the resolved CLI is not a PE image. CreateProcess can only spawn a
+    # real executable, but a venv built with a bin/ layout (or a pip --user /
+    # pipx console script) leaves a `#!`-shebang SCRIPT named `headroom` — which
+    # venv_bindir and resolve_headroom_cli both happily select. Copying that to
+    # headroom.exe yields a file Windows cannot start while shim_runs (which
+    # runs it through bash) still succeeds, so the doctor used to report `fixed`
+    # over an MCP that can never connect. Refuse instead; 2b explains the remedy.
+    _er_is_pe "$1" || return 3
+    # never write the copy THROUGH a link someone else left here (cp would
+    # follow it and clobber its target); the guards above already refused to
+    # adopt any link that is not ours
+    rm -f "$target" 2>/dev/null
     cp "$1" "$target" 2>/dev/null && { : > "$TMPD/shim-written"; printf '%s' "$target"; }
   else
     ln -sfn "$1" "$target" 2>/dev/null && { : > "$TMPD/shim-written"; printf '%s' "$target"; }
   fi
+}
+run_bounded() {  # run_bounded <seconds> <cmd> [args...] — the command's own status, nonzero if it overran
+  # Portable bounded wait: coreutils `timeout` when the box has it (gtimeout on a
+  # brew-installed macOS), else a background child plus a watchdog loop. Keep it
+  # bash-3.2 safe — no `wait -n`, no arrays, no process substitution.
+  local secs pid waited
+  secs=$1; shift
+  if   command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"; return $?
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?
+  fi
+  "$@" &
+  pid=$!
+  waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 124          # same status coreutils `timeout` uses for a kill
+    fi
+    sleep 1
+    waited=$((waited+1))
+  done
+  wait "$pid"             # finished on its own: report ITS status, not ours
+  return $?
 }
 shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves
   # Name resolution alone proves nothing: uv's relocatable trampolines resolve the
   # interpreter relative to their own directory (so a copy elsewhere resolves and
   # then dies at spawn), and a name-squatted `headroom` on PyPI would greenlight
   # the line that stands in for "the MCP will connect". Cheap flag, engine env.
-  HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 "$1" --help >/dev/null 2>&1
+  #
+  # BOUNDED: a plain `/doctor` executes whatever `command -v headroom` resolves —
+  # by this function's own reasoning that may be a squatter or a wedged binary —
+  # so a hang here would hang the doctor (and the skill that runs it) forever.
+  # `env` carries the engine vars because run_bounded is a function, not a command.
+  run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
+    env HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 "$1" --help >/dev/null 2>&1
 }
 reinstall_hint() {  # how to repair an engine whose `headroom` CLI is missing or broken
   # HCAT_PYTHON is authoritative with no fallback, so "$PY -m pip install …" would
@@ -257,18 +315,34 @@ reinstall_hint() {  # how to repair an engine whose `headroom` CLI is missing or
   fi
 }
 sl_hr_cmd() {  # sl_hr_cmd <script> — the statusLine.command to write for this platform
-  local b
+  local b nl cr
   if is_windows; then
     # CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT-scoped
     # settings.json — i.e. from repo config. `--fix` persists what we print here
     # into ~/.claude/settings.json as statusLine.command, which Claude Code then
-    # EXECUTES, so a value carrying a double quote (`C:\bash.exe" & calc.exe & "`)
-    # would close our quoting and append commands of its own. Accept the value
-    # only when it is an existing file with no quote character in it; otherwise
-    # fall back to the bash this doctor is running under.
+    # EXECUTES, so a hostile value must not survive into it.
+    #
+    # Rejecting only the double quote was not enough: inside the double-quoted
+    # word we print, exactly four things stay ACTIVE — `"` (closes the quoting),
+    # `$` (parameter AND command substitution: a path under a directory literally
+    # named `$(cmd)` is a real, existing file, so the -f test below passes), a
+    # backtick (command substitution) and a newline/carriage return (starts a
+    # second command line). Reject all four. A BACKSLASH is deliberately
+    # ALLOWED: every native Windows path is full of them, and with the four
+    # above gone a backslash can neither introduce an expansion nor terminate
+    # the quoting — the worst it can do is name a file that does not exist,
+    # which the -f test already catches.
+    nl='
+'
+    cr=$(printf '\r')
     b=${CLAUDE_CODE_GIT_BASH_PATH:-}
-    case $b in *'"'*) b="" ;; esac
-    if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(win_path "$(command -v bash)"); fi
+    case $b in *'"'*|*'$'*|*'`'*|*"$nl"*|*"$cr"*) b="" ;; esac
+    if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(command -v bash); fi
+    # normalize the ACCEPTED value too, not just the fallback: an override may be
+    # POSIX-spelled (/c/Program Files/Git/bin/bash.exe) and Claude Code executes
+    # this command outside Git Bash, where only the native spelling resolves.
+    # `cygpath -w` on an already-Windows path is a no-op, so one pass covers both.
+    b=$(win_path "$b")
     printf '"%s" "%s"' "$b" "$(win_path "$1")"
   else
     printf 'bash "%s"' "$1"
@@ -277,13 +351,23 @@ sl_hr_cmd() {  # sl_hr_cmd <script> — the statusLine.command to write for this
 path_hint() {  # the one line the user must run/do to put SHIM_DIR on PATH
   local rc
   if is_windows; then
-    printf 'add %%USERPROFILE%%\\.local\\bin to your user Path (Settings → System → About → Advanced system settings → Environment Variables), then restart Claude Code'
+    # name the dir this run actually shims into (DOCTOR_SHIM_DIR overrides the
+    # default) — the surrounding FAIL text already names it, and a hardcoded
+    # %USERPROFILE%\.local\bin contradicted it whenever they differed
+    printf 'add %s to your user Path (Settings → System → About → Advanced system settings → Environment Variables), then restart Claude Code' "$(win_path "$SHIM_DIR")"
   else
     # shellcheck disable=SC2088  # literal ~ is intentional — a display string, not a path to expand
     case "${SHELL:-}" in *zsh) rc="~/.zshrc" ;; *) rc="~/.bashrc" ;; esac
     printf "run: echo 'export PATH=\"%s:\$PATH\"' >> %s — then restart Claude Code" "$SHIM_DIR" "$rc"
   fi
 }
+# cli_healed guards the one self-repair retry below: a dead shim the doctor
+# itself wrote is removed under --fix and the whole check re-runs once, so the
+# same run can rewrite it instead of telling the user to reinstall a healthy
+# engine. Never more than once — a second dead file is a real diagnosis.
+cli_healed=0; cli_retry=1
+while [ "$cli_retry" -eq 1 ]; do
+  cli_retry=0
 if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
   # Name resolution alone is not "verified": the shim branch below has always
   # re-checked by EXECUTION, and this branch must hold the same bar — a
@@ -293,14 +377,29 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
   # dead shim.
   if shim_runs "$cli_now"; then
     say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
+  elif [ "$FIX" -eq 1 ] && [ "$cli_healed" -eq 0 ] && [ "$cli_now" = "$(shim_target)" ] \
+       && rm -f "$cli_now" 2>/dev/null; then
+    # The dead file is the doctor's OWN shim from an earlier run. Reporting it
+    # as "reinstall the engine" misdiagnoses an engine that check 2 just found
+    # healthy, and the identical FAIL repeated on every subsequent --fix with
+    # the file untouched. Delete it and re-run this check so the shim path
+    # below can repair it in this same run.
+    hash -r 2>/dev/null
+    cli_healed=1; cli_retry=1
+    continue
   else
-    say FAIL "headroom on PATH at $cli_now does not run (\`$cli_now --help\` failed) — the bundled MCP spawns \`headroom\` by name and will fail to connect; reinstall the engine: $(reinstall_hint)"
+    cli_own=""
+    [ "$cli_now" = "$(shim_target)" ] \
+      && cli_own=" — this file is the doctor's own shim from an earlier run: delete it and re-run /doctor --fix to rewrite it"
+    say FAIL "headroom on PATH at $cli_now does not run (\`$cli_now --help\` failed) — the bundled MCP spawns \`headroom\` by name and will fail to connect; reinstall the engine: $(reinstall_hint)$cli_own"
   fi
 elif cli_res=$(resolve_headroom_cli); then
   if [ "$FIX" -eq 1 ]; then
     shim=$(shim_headroom "$cli_res"); shim_rc=$?
     if [ "$shim_rc" -eq 2 ]; then
       say FAIL "a different headroom already exists at $(shim_target) — not on PATH; add $SHIM_DIR to PATH or remove that file, then re-run --fix"
+    elif [ "$shim_rc" -eq 3 ]; then
+      say FAIL "the resolved headroom CLI ($cli_res) is not a Windows executable — it is a \`#!\` console script (no MZ/PE header), and Windows cannot spawn one shell-less, so copying it to $(shim_target) would leave the bundled MCP unable to connect; reinstall the engine with a Windows layout so pip produces a real Scripts\\headroom.exe: py -3 -m venv $VENV_DIR && $VENV_DIR/Scripts/python.exe -m pip install \"headroom-ai[all]\" (or: uv tool install headroom-ai)"
     elif [ "$shim_rc" -ne 0 ]; then
       say FAIL "could not shim $cli_res into $SHIM_DIR"
     else
@@ -330,6 +429,7 @@ elif [ -z "$PY" ]; then
 else
   say FAIL "engine python found ($PY) but no \`headroom\` CLI next to it — reinstall: $(reinstall_hint)"
 fi
+done   # end of the one-shot self-repair retry that begins at `while [ "$cli_retry" ...`
 
 # 2b-win. Windows resolves a BARE command name from the spawning process's current
 # directory before it looks at PATH. The bundled .mcp.json can express neither a
@@ -340,7 +440,9 @@ fi
 if is_windows; then
   hj_dir=${DOCTOR_PROJECT_DIR:-$PWD}
   hj_found=""
-  for hj in headroom.exe headroom.cmd headroom.bat headroom; do
+  # the spellings come from scripts/lib/engine-resolve.sh (PATHEXT order, .com
+  # FIRST) so this list and session-probe.sh's cannot drift apart again
+  for hj in $(headroom_name_variants); do
     [ -f "$hj_dir/$hj" ] || continue
     # .exe/.cmd/.bat are executable to Windows by extension; the extensionless
     # name only matters when Git Bash would run it
@@ -684,7 +786,11 @@ else
     # the badge) -- but the badge command itself comes from sl_hr_cmd, not a
     # hardcoded `bash "<path>"`: POSIX gets `bash "<path>"`, Windows gets
     # `"<bash.exe>" "<C:\...>"`. The SKILL.md installer stays POSIX-only.
-    sl_merge_jq=$(cat <<'JQEOF'
+    # the ONE definition of "which command is chained ahead of the badge" (an
+    # existing _headroomStatusLineBackup wins, else a non-headroom statusLine).
+    # Shared by the base EXTRACTION below (which the Windows chain script needs)
+    # and by the merge program, so the two can never disagree about the base.
+    sl_base_sel=$(cat <<'JQEOF'
 (._headroomStatusLineBackup // null) as $bak
 | (.statusLine // null) as $ex
 | (if ($bak | type) == "object" and $bak.type == "command" and (($bak.command // "") != "") then $bak
@@ -692,18 +798,26 @@ else
         and (($ex.command | contains("headroom-statusline.sh")) | not)
         and (($ex.command | contains("mcp__headroom__headroom_compress")) | not)
    then $ex else null end) as $base
+JQEOF
+)
+    # $chain (empty on POSIX) is the pre-built command for a chain SCRIPT; when
+    # it is set the inline POSIX chain is not written at all — see below.
+    sl_merge_tail=$(cat <<'JQEOF'
 | if $base != null then
     ._headroomStatusLineBackup = $base
     | .statusLine = {type: "command",
-        command: ("in=$(cat); left=$(printf '%s' \"$in\" | { " + $base.command
-                  + "; }); hr=$(printf '%s' \"$in\" | " + $hr
-                  + "); printf '%s  %s' \"$left\" \"$hr\""),
+        command: (if $chain != "" then $chain else
+                    ("in=$(cat); left=$(printf '%s' \"$in\" | { " + $base.command
+                     + "; }); hr=$(printf '%s' \"$in\" | " + $hr
+                     + "); printf '%s  %s' \"$left\" \"$hr\"") end),
         refreshInterval: 1}
   else
     .statusLine = {type: "command", command: $hr, refreshInterval: 1}
   end
 JQEOF
 )
+    sl_merge_jq="$sl_base_sel
+$sl_merge_tail"
     if [ "$sl_bak_ok" -eq 0 ]; then
       say FAIL "could not back up settings.json before wiring the statusLine — refusing to overwrite without one"
     else
@@ -720,18 +834,54 @@ JQEOF
       # minimal inline fallback (spec §1, v2.8). Provision them alongside the
       # copy, and gate the "fixed" claim on them actually landing -- a
       # silently-failed lib-dep copy must not be reported as a successful wire.
+      # WINDOWS MERGE. statusLine.command is executed by Claude Code OUTSIDE Git
+      # Bash, which is why sl_hr_cmd writes it as a `"<bash.exe>" "<C:\...>"`
+      # pair. A merge used to wrap that pair in a raw POSIX chain
+      # (`in=$(cat); left=$(...); hr=$(...); printf ...`) and persist the whole
+      # string — not a runnable command there, so the user lost BOTH their own
+      # status line and the badge. Put the same chain body in a script file next
+      # to the statusline copy and point the command at THAT file instead, so
+      # the persisted command keeps its two-token shape. The POSIX branch is
+      # untouched: it still gets the inline chain, exactly as before.
+      # $chain is "" on POSIX (and when there is nothing to chain), and the jq
+      # program falls back to the inline chain whenever it is empty.
+      sl_chain=""; sl_chain_ok=1
+      sl_base_cmd=$(jq -r "$sl_base_sel
+| (\$base.command // \"\")" "$SETTINGS" 2>/dev/null) || sl_base_cmd=""
+      if is_windows && [ -n "$sl_base_cmd" ]; then
+        sl_chain_path="$CLAUDE_DIR/headroom-statusline-chain.sh"
+        {
+          cat <<'CHEOF'
+#!/usr/bin/env bash
+# headroom-statusline-chain.sh — written by `/doctor --fix` on Windows.
+# Claude Code executes statusLine.command without a POSIX shell, so the command
+# it stores must stay a `"<bash.exe>" "<C:\path>"` pair; the shell chain that
+# renders your own status line first and the headroom badge after it lives here.
+# Regenerated (identically) by every --fix. Your original command is also kept
+# verbatim under _headroomStatusLineBackup in settings.json.
+in=$(cat)
+CHEOF
+          printf 'left=$(printf %s "$in" | { %s; })\n' "'%s'" "$sl_base_cmd"
+          printf 'hr=$(printf %s "$in" | bash "%s")\n'  "'%s'" "$sl_path"
+          printf '%s\n' "printf '%s  %s' \"\$left\" \"\$hr\""
+        } > "$sl_chain_path" && chmod +x "$sl_chain_path" || sl_chain_ok=0
+        [ "$sl_chain_ok" -eq 1 ] && sl_chain=$(sl_hr_cmd "$sl_chain_path")
+      fi
       mkdir -p "$CLAUDE_DIR/lib"
-      if cp "$PLUGIN_ROOT/scripts/lib/attribution.jq"    "$CLAUDE_DIR/lib/" \
+      if [ "$sl_chain_ok" -eq 1 ] \
+         && cp "$PLUGIN_ROOT/scripts/lib/attribution.jq"    "$CLAUDE_DIR/lib/" \
          && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/" \
          && cp "$PLUGIN_ROOT/scripts/lib/engine-resolve.sh" "$CLAUDE_DIR/lib/" \
          && cp "$PLUGIN_ROOT/scripts/statusline.sh" "$sl_path" && chmod +x "$sl_path" \
-         && jq --arg hr "$(sl_hr_cmd "$sl_path")" "$sl_merge_jq" \
+         && jq --arg hr "$(sl_hr_cmd "$sl_path")" --arg chain "$sl_chain" "$sl_merge_jq" \
             "$SETTINGS" > "$TMPD/settings.sl" && cat "$TMPD/settings.sl" > "$SETTINGS"; then
         if [ -n "$sl" ] && ! printf '%s' "$sl" | grep -q "mcp__headroom__headroom_compress"; then
           say fixed "statusLine merged — your command kept and backed up under _headroomStatusLineBackup, badge appended ($sl_disp)"
         else
           say fixed "statusLine wired to $sl_disp (script copied, backup: settings.json.bak.*)"
         fi
+      elif [ "$sl_chain_ok" -eq 0 ]; then
+        say FAIL "could not write the status-line chain script to $CLAUDE_DIR/headroom-statusline-chain.sh — settings.json left untouched"
       else
         say FAIL "could not copy statusline.sh (+ lib deps) to $sl_path and wire settings.json"
       fi

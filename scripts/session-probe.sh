@@ -104,7 +104,11 @@ engine_name_hijack() {
   is_windows || return 0
   local d f
   d=${DOCTOR_PROJECT_DIR:-$PWD}
-  for f in headroom.exe headroom.cmd headroom.bat headroom; do
+  # the spellings come from scripts/lib/engine-resolve.sh (PATHEXT order, .com
+  # FIRST -- Windows resolves it before .exe), with the same inline fallback the
+  # rest of this file keeps for a partial/legacy copy with no lib beside it
+  for f in $(headroom_name_variants 2>/dev/null \
+             || printf '%s\n' headroom.com headroom.exe headroom.bat headroom.cmd headroom); do
     [ -f "$d/$f" ] || continue
     case $f in headroom) [ -x "$d/$f" ] || continue ;; esac
     add_problem "an executable $d/$f sits in this project — on Windows a bare command name resolves from the project directory before PATH, so the bundled MCP would spawn it instead of the headroom engine; remove or rename it"

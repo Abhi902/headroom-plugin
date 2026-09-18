@@ -245,7 +245,7 @@ If you can't (or won't) use the plugin marketplace, the copy-everything-to-`~/.c
 Two honest caveats about the legacy flow:
 
 - **`hcat` is NOT on Claude's PATH** in a legacy install — the "on PATH" convenience only exists while the plugin is enabled. Claude must invoke it by full path: `~/.claude/hcat <file>`. The gate is install-aware: in a legacy layout its deny message cites that full sibling path (`~/.claude/hcat "<path>"`), and the bare-`hcat`/on-PATH wording appears only for plugin installs.
-- You must also install the **headroom engine** yourself (→ https://github.com/headroomlabs-ai/headroom) — the plugin's `.mcp.json` spawns `headroom mcp serve` by name, so it must be on PATH — and you need `jq` (`brew install jq` or `apt install jq`).
+- You must install the **headroom engine** yourself (→ https://github.com/headroomlabs-ai/headroom) **and register its MCP server yourself** — this repo's `.mcp.json` is only read when Claude Code loads it as the enabled plugin (or while you are working inside this repo), never in your other projects, so a legacy install has to add the server (`headroom mcp serve`) to its own MCP configuration. Putting `headroom` on PATH is necessary but not sufficient: it is what makes the registered bare-name command spawn once you have registered it. You also need `jq` (`brew install jq` or `apt install jq`).
 
 Do **not** run the legacy installer if the plugin is installed — you'd register every hook twice.
 

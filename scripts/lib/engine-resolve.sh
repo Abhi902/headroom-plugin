@@ -20,6 +20,16 @@ is_windows() {  # exit 0 on Git Bash / MSYS / Cygwin
 
 _er_venv() { printf '%s' "${DOCTOR_VENV_DIR:-${HOME:-}/.headroom-venv}"; }
 
+headroom_name_variants() {  # every spelling Windows resolves for a bare `headroom`, in search order
+  # Windows' DEFAULT PATHEXT is `.COM;.EXE;.BAT;.CMD;...` and it is searched IN
+  # THAT ORDER, so `.com` is tried FIRST -- a headroom.com sitting in the
+  # spawning process's current directory beats every other spelling. The
+  # extensionless name comes last: only Git Bash would ever run it.
+  # ONE definition, shared by doctor.sh (check 2b-win) and session-probe.sh
+  # (engine_name_hijack), so the two lists cannot drift apart again.
+  printf '%s\n' headroom.com headroom.exe headroom.bat headroom.cmd headroom
+}
+
 venv_bindir() {  # venv_bindir <venv> — "bin" or "Scripts"; exit 1 if neither holds an interpreter
   if   [ -e "$1/bin/python" ];         then printf 'bin'
   elif [ -e "$1/Scripts/python.exe" ]; then printf 'Scripts'

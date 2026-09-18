@@ -42,12 +42,21 @@ ambient-health failure (the `last-error` file that flips the statusline badge
 to "broken") can now be cleared. On Windows the doctor also confirms it is
 running under Git Bash (a stale `CLAUDE_CODE_GIT_BASH_PATH` is `FAIL`) and
 writes the status-line command with explicit Windows paths (`"C:\…\bash.exe"
-"C:\…\headroom-statusline.sh"`).
+"C:\…\headroom-statusline.sh"`; when it has to merge with a status line you
+already had, the chain lives in `~/.claude/headroom-statusline-chain.sh` so the
+stored command keeps that two-token shape).
+It also `FAIL`s when an executable named `headroom` (`.com`, `.exe`, `.bat`,
+`.cmd` or extensionless) sits in the project directory — on Windows a bare
+command name resolves from the spawning process's current directory *before*
+PATH, so that file, not the installed engine, is what the bundled MCP would
+spawn.
 
 A companion SessionStart hook, `scripts/session-probe.sh`, runs a much
 lighter version of this check automatically every session (jq present, `hcat`
-executable, engine python resolvable by existence only, price table parses)
-and stays silent when healthy — this doctor is the deeper, on-demand check
+executable, the shared libs present, engine python resolvable by existence
+only, price table parses, plus — v2.8 — a stale `CLAUDE_CODE_GIT_BASH_PATH`,
+a nudge when the engine resolves but `headroom` is not on PATH, and the Windows
+project-directory name hijack described above) and stays silent when healthy — this doctor is the deeper, on-demand check
 Claude runs when something actually needs diagnosis or repair.
 
 Invoked as `/headroom-usage-indicator:doctor`.
@@ -152,7 +161,10 @@ Never run `--fix` unprompted. If anything is `fixable`, list exactly what
 `.claude/settings.json` / `.claude/settings.local.json`, each with its own
 timestamped backup; may create a venv and run pip; may delete stale script
 copies; may create or replace a `headroom` shim in `~/.local/bin` (symlink;
-`headroom.exe` copy on Windows); may re-copy the statusline script
+`headroom.exe` copy on Windows); may write
+`~/.claude/headroom-statusline-chain.sh` when it merges an existing status line
+on Windows (the chain has to live in a file there, because the persisted
+command must stay a plain `"<bash.exe>" "<script>"` pair); may re-copy the statusline script
 plus its `lib/` deps and price table to `~/.claude` — both when wiring
 statusLine for the first time and when settings already point at a missing
 canonical copy; and may rewrite `statusLine.command` to an absolute path (same

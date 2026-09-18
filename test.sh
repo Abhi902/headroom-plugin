@@ -2802,7 +2802,7 @@ if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
   mkdir -p "$3/Scripts"
   printf '#!/bin/sh\necho "$@" >> "$(dirname "$0")/../pip.calls"\n' > "$3/Scripts/pip.exe"
   printf '#!/bin/sh\nexit 0\n' > "$3/Scripts/python.exe"
-  printf '#!/bin/sh\necho hr\n' > "$3/Scripts/headroom.exe"
+  printf 'MZ() { :; }\nexit 0\n' > "$3/Scripts/headroom.exe"   # PE magic (review #3) yet still shell-runnable
   chmod +x "$3/Scripts/pip.exe" "$3/Scripts/python.exe" "$3/Scripts/headroom.exe"
 fi
 exit 0
@@ -2861,7 +2861,11 @@ check_eq "w6: doctor exits 1 on that FAIL" "1" "$rc"
 # Windows: the shim is a COPY named headroom.exe and the hint names the user Path
 W6W="$W/w6win"; mkdir -p "$W6W/cd" "$W6W/venv/Scripts" "$W6W/shim"
 printf '#!/bin/sh\nexit 0\n' > "$W6W/venv/Scripts/python.exe";  chmod +x "$W6W/venv/Scripts/python.exe"
-printf '#!/bin/sh\necho hr\n' > "$W6W/venv/Scripts/headroom.exe"; chmod +x "$W6W/venv/Scripts/headroom.exe"
+# review #3: the Windows copy branch now refuses a non-PE CLI, so this fixture
+# must start with the "MZ" magic. It is still runnable here because the bytes
+# are also valid shell: bash falls back to running a non-binary file as a
+# script when execve returns ENOEXEC, so shim_runs' `--help` still succeeds.
+printf 'MZ() { :; }\nexit 0\n' > "$W6W/venv/Scripts/headroom.exe"; chmod +x "$W6W/venv/Scripts/headroom.exe"
 S6W="$W6W/s.json"; doc_settings_wired "$W6W/cd" > "$S6W"
 out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6W" DOCTOR_CLAUDE_DIR="$W6W/cd" \
       DOCTOR_VENV_DIR="$W6W/venv" DOCTOR_SHIM_DIR="$W6W/shim" bash "$DOCTOR" --fix 2>&1)
@@ -2870,7 +2874,9 @@ if [ -f "$W6W/shim/headroom.exe" ] && [ ! -L "$W6W/shim/headroom.exe" ]; then
 else
   echo "FAIL - w6: windows shim is a copy named headroom.exe"; FAIL=$((FAIL+1))
 fi
-check "w6: windows hint names the user Path" '%USERPROFILE%\.local\bin' "$out"
+# review #14: the hint interpolates the SHIM_DIR this run actually uses instead
+# of a hardcoded %USERPROFILE%\.local\bin that contradicted the line beside it
+check "w6: windows hint names the shim dir this run uses" "add $W6W/shim to your user Path" "$out"
 # no engine at all → skip (check 2 already says fixable)
 out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S6N" DOCTOR_CLAUDE_DIR="$W6N/cd" \
       DOCTOR_VENV_DIR="$W/none" DOCTOR_SHIM_DIR="$W6N/shim2" bash "$DOCTOR" 2>&1)
@@ -2892,7 +2898,10 @@ out=$(env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" CYGPATH_U
       PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S7" DOCTOR_CLAUDE_DIR="$W7/cd" DOCTOR_VENV_DIR="$NOVENV" \
       DOCTOR_SHIM_DIR="$W7/shim" bash "$DOCTOR" --fix 2>&1)
 check "w7: windows wire reports fixed" "statusLine wired to" "$out"
-check_eq "w7: windows statusLine command shape" "\"$W7/bashdir/bash.exe\" \"C:\\fake\\headroom-statusline.sh\"" \
+# review #9: an ACCEPTED CLAUDE_CODE_GIT_BASH_PATH is normalized through
+# win_path too (it may be POSIX-spelled), so the stub cygpath rewrites this
+# fixture's own path the same way it rewrites the script path.
+check_eq "w7: windows statusLine command shape" '"C:\fake\bash.exe" "C:\fake\headroom-statusline.sh"' \
   "$(jq -r '.statusLine.command' "$S7")"
 check "w7: doctor names Git Bash on Windows" "Windows (Git Bash)" "$out"
 # re-run: check 7 must recognise the backslash token as the canonical copy (no re-wire, no FAIL)
@@ -3340,6 +3349,411 @@ W12SHIM
 else
   echo "skip - w12: hcat stats-event test (no python3)"
 fi
+
+
+# --- w13. second verified-review wave (findings #1, #2, #3, #4, #5, #9, #10,
+# #11, #12, #13, #14). Every fixture below reproduces the exact shape a reviewer
+# demonstrated, so a regression fails here rather than only on a Windows box.
+
+# w13-#1. The statusLine injection guard rejected ONLY the double quote. Inside
+# the double-quoted word sl_hr_cmd prints, `$` is just as active: a bash.exe
+# under a directory literally NAMED `$(cmd)` is a real file, so `[ -f ]` passes,
+# the value is persisted verbatim, and the substitution runs when Claude Code
+# executes the status line. Backtick, newline and carriage return are the same
+# class of bypass. A BACKSLASH must stay allowed — Windows paths need it.
+W13I="$W/w13inject"; mkdir -p "$W13I/cd"
+w13_evil="$W13I/"'$(touch pwned)dir'          # a REAL directory whose name is a command substitution
+mkdir -p "$w13_evil"
+printf '#!/bin/sh\nexit 0\n' > "$w13_evil/bash.exe"; chmod +x "$w13_evil/bash.exe"
+if [ -f "$w13_evil/bash.exe" ]; then
+  echo "ok - w13: the command-substitution fixture really is an existing file (the old -f guard would pass it)"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: the command-substitution fixture really is an existing file"; FAIL=$((FAIL+1))
+fi
+w13_inj() {  # w13_inj <settings> <claude-dir> <CLAUDE_CODE_GIT_BASH_PATH value>
+  env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" \
+      CLAUDE_CODE_GIT_BASH_PATH="$3" PATH="$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$1" DOCTOR_CLAUDE_DIR="$2" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W13I/shim" bash "$DOCTOR" --fix >/dev/null 2>&1
+  jq -r '.statusLine.command' "$1"
+}
+S13I="$W13I/s.json"; printf '{}\n' > "$S13I"
+cmd13=$(w13_inj "$S13I" "$W13I/cd" "$w13_evil/bash.exe")
+check_absent "w13: a \$(...) directory in the Git Bash override never reaches statusLine.command" \
+             '$(' "$cmd13"
+check_absent "w13: nor anywhere else in settings.json" '$(' "$(cat "$S13I")"
+check_eq     "w13: the \$-bearing value is dropped for the PATH bash fallback" \
+             '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' "$cmd13"
+# backtick and newline are the same class of bypass
+W13I2="$W13I/bt"; mkdir -p "$W13I2/"'`touch pwned`dir'
+printf '#!/bin/sh\nexit 0\n' > "$W13I2/"'`touch pwned`dir/bash.exe'
+chmod +x "$W13I2/"'`touch pwned`dir/bash.exe'
+S13I2="$W13I/s2.json"; printf '{}\n' > "$S13I2"
+check_eq "w13: a backtick value is refused too" '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' \
+         "$(w13_inj "$S13I2" "$W13I/cd2" "$W13I2/"'`touch pwned`dir/bash.exe')"
+# NOTE: a newline cannot come from $(printf '\n') — command substitution strips
+# trailing newlines, which would silently make this an ordinary "nldir" fixture
+w13_nl='
+'
+w13_nldir="$W13I/nl${w13_nl}dir"; mkdir -p "$w13_nldir"
+printf '#!/bin/sh\nexit 0\n' > "$w13_nldir/bash.exe"; chmod +x "$w13_nldir/bash.exe"
+S13I3="$W13I/s3.json"; printf '{}\n' > "$S13I3"
+check_eq "w13: a newline-bearing value is refused too" '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' \
+         "$(w13_inj "$S13I3" "$W13I/cd3" "$w13_nldir/bash.exe")"
+# ...and the guard must NOT reject a backslash: every native Windows path has them
+W13I4="$W13I/bs"; mkdir -p "$W13I4"
+printf '#!/bin/sh\nexit 0\n' > "$W13I4/back\\slash.exe"; chmod +x "$W13I4/back\\slash.exe"
+S13I4="$W13I/s4.json"; printf '{}\n' > "$S13I4"
+check_eq "w13: a backslash in the override is still accepted (Windows paths need it)" \
+         '"C:\fake\back\slash.exe" "C:\fake\headroom-statusline.sh"' \
+         "$(w13_inj "$S13I4" "$W13I/cd4" "$W13I4/back\\slash.exe")"
+
+# w13-#9. An ACCEPTED override was written raw while the script token beside it
+# went through win_path, so a perfectly valid POSIX-spelled value was persisted
+# unconverted — and Claude Code runs that command outside Git Bash, where only
+# the native spelling resolves.
+W13W="$W/w13winpath"; mkdir -p "$W13W/cd" "$W13W/c/Program Files/Git/bin"
+w13_posix_bash="$W13W/c/Program Files/Git/bin/bash.exe"
+printf '#!/bin/sh\nexit 0\n' > "$w13_posix_bash"; chmod +x "$w13_posix_bash"
+S13W="$W13W/s.json"; printf '{}\n' > "$S13W"
+cmd13w=$(w13_inj "$S13W" "$W13W/cd" "$w13_posix_bash")
+check_eq     "w13: a POSIX-spelled accepted override is persisted in Windows form" \
+             '"C:\fake\bash.exe" "C:\fake\headroom-statusline.sh"' "$cmd13w"
+check_absent "w13: the raw POSIX spelling never survives into settings.json" \
+             "$w13_posix_bash" "$(cat "$S13W")"
+
+# w13-#5. A pre-existing SYMLINK at the shim path used to fall straight through
+# to `ln -sfn` and be repointed with no backup — and pipx installs ~/.local/bin
+# console scripts as symlinks. A link that already names the resolved CLI is
+# ours (idempotent); anything else is foreign and gets the rc 2 refusal.
+W13L="$W/w13symlink"; mkdir -p "$W13L/cd" "$W13L/venv/bin" "$W13L/shim" "$W13L/pipx"
+printf '#!/bin/sh\nexit 0\n'   > "$W13L/venv/bin/python";  chmod +x "$W13L/venv/bin/python"
+printf '#!/bin/sh\necho hr\n'  > "$W13L/venv/bin/headroom"; chmod +x "$W13L/venv/bin/headroom"
+printf '#!/bin/sh\necho pipx\n'> "$W13L/pipx/headroom";     chmod +x "$W13L/pipx/headroom"
+ln -sfn "$W13L/pipx/headroom" "$W13L/shim/headroom"
+S13L="$W13L/s.json"; doc_settings_wired "$W13L/cd" > "$S13L"
+w13_shim() {  # w13_shim <shim-dir> <settings> <claude-dir> <extra-PATH-prefix> [--fix]
+  local sd=$1 st=$2 cd=$3 pre=$4; shift 4
+  env -u HCAT_PYTHON PATH="$pre$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$st" \
+      DOCTOR_CLAUDE_DIR="$cd" DOCTOR_VENV_DIR="$W13L/venv" DOCTOR_SHIM_DIR="$sd" \
+      HEADROOM_STATE_DIR="$W13L/state" bash "$DOCTOR" "$@" 2>&1
+}
+out=$(w13_shim "$W13L/shim" "$S13L" "$W13L/cd" "" --fix); rc=$?
+check    "w13: a foreign SYMLINK at the shim path is refused, not repointed" \
+         "a different headroom already exists at $W13L/shim/headroom" "$out"
+check_eq "w13: the foreign symlink still points where it did" "$W13L/pipx/headroom" \
+         "$(readlink "$W13L/shim/headroom")"
+check_absent "w13: a refused symlink is never reported as shimmed" "headroom shimmed to" "$out"
+check_eq "w13: doctor exits 1 on the foreign-symlink FAIL" "1" "$rc"
+# a link that ALREADY names the resolved CLI is ours: adopted, not refused
+W13L2="$W/w13symlink-ours"; mkdir -p "$W13L2/cd" "$W13L2/shim"
+ln -sfn "$W13L/venv/bin/headroom" "$W13L2/shim/headroom"
+S13L2="$W13L2/s.json"; doc_settings_wired "$W13L2/cd" > "$S13L2"
+out=$(w13_shim "$W13L2/shim" "$S13L2" "$W13L2/cd" "" --fix)
+check_absent "w13: a link that already names the resolved CLI is not called foreign" \
+             "a different headroom already exists" "$out"
+check_eq "w13: and it is left exactly as it was" "$W13L/venv/bin/headroom" \
+         "$(readlink "$W13L2/shim/headroom")"
+# ...and with that dir on PATH the run is a plain ok with no `fixed` line at all
+out=$(w13_shim "$W13L2/shim" "$S13L2" "$W13L2/cd" "$W13L2/shim:" --fix)
+check    "w13: an adopted shim resolves on PATH" "headroom CLI on PATH ($W13L2/shim/headroom)" "$out"
+check_eq "w13: adopting an existing symlink prints no ^fixed line (idempotent)" "0" \
+         "$(printf '%s\n' "$out" | grep -cE '^fixed ')"
+
+# w13-#3. On Windows the shim is a COPY. Copying a `#!`-shebang console script
+# to headroom.exe produces a file Windows cannot spawn — while shim_runs (which
+# goes through bash) succeeds, so the doctor used to report `fixed` over an MCP
+# that can never connect. A bin/ venv holding a shebang `headroom` is exactly
+# the layout venv_bindir and resolve_headroom_cli both select.
+W13N="$W/w13nonpe"; mkdir -p "$W13N/cd" "$W13N/venv/bin" "$W13N/shim"
+printf '#!/bin/sh\nexit 0\n'  > "$W13N/venv/bin/python";   chmod +x "$W13N/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W13N/venv/bin/headroom"; chmod +x "$W13N/venv/bin/headroom"
+S13N="$W13N/s.json"; doc_settings_wired "$W13N/cd" > "$S13N"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13N/shim:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13N" DOCTOR_CLAUDE_DIR="$W13N/cd" DOCTOR_VENV_DIR="$W13N/venv" \
+      DOCTOR_SHIM_DIR="$W13N/shim" HEADROOM_STATE_DIR="$W13N/state" bash "$DOCTOR" --fix 2>&1); rc=$?
+check        "w13: a non-PE headroom is refused on the Windows copy branch" \
+             "is not a Windows executable" "$out"
+check        "w13: that FAIL explains Windows cannot spawn a #! console script" \
+             "console script (no MZ/PE header), and Windows cannot spawn one shell-less" "$out"
+check        "w13: that FAIL names the py -3 venv remedy" "py -3 -m venv $W13N/venv" "$out"
+check        "w13: that FAIL names the uv remedy too" "uv tool install headroom-ai" "$out"
+check_absent "w13: a non-PE CLI is never reported as shimmed" "headroom shimmed to" "$out"
+check_eq     "w13: doctor exits 1 on the non-PE FAIL" "1" "$rc"
+if [ -e "$W13N/shim/headroom.exe" ]; then
+  echo "FAIL - w13: no headroom.exe is written for a non-PE CLI"; FAIL=$((FAIL+1))
+else
+  echo "ok - w13: no headroom.exe is written for a non-PE CLI"; PASS=$((PASS+1))
+fi
+# control: the same fixture with a PE-magic CLI shims and verifies normally
+printf 'MZ() { :; }\nexit 0\n' > "$W13N/venv/bin/headroom"; chmod +x "$W13N/venv/bin/headroom"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13N/shim:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13N" DOCTOR_CLAUDE_DIR="$W13N/cd" DOCTOR_VENV_DIR="$W13N/venv" \
+      DOCTOR_SHIM_DIR="$W13N/shim" HEADROOM_STATE_DIR="$W13N/state" bash "$DOCTOR" --fix 2>&1)
+check "w13: control — a PE CLI still shims (so the check above discriminates)" \
+      "headroom shimmed to $W13N/shim/headroom.exe" "$out"
+
+# w13-#11. A dead shim in the doctor's OWN shim dir produced the identical FAIL
+# on every --fix run with the file untouched, and its "reinstall the engine"
+# hint misdirected — check 2 had just found a healthy engine. Read-only says how
+# to clear it; --fix clears it and repairs in the same run.
+W13R="$W/w13deadown"; mkdir -p "$W13R/cd" "$W13R/venv/bin" "$W13R/shim"
+printf '#!/bin/sh\nexit 0\n'  > "$W13R/venv/bin/python";   chmod +x "$W13R/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W13R/venv/bin/headroom"; chmod +x "$W13R/venv/bin/headroom"
+printf '#!/bin/sh\nexit 1\n'  > "$W13R/shim/headroom";     chmod +x "$W13R/shim/headroom"
+S13R="$W13R/s.json"; doc_settings_wired "$W13R/cd" > "$S13R"
+w13_dead() {
+  env -u HCAT_PYTHON PATH="$W13R/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13R" \
+      DOCTOR_CLAUDE_DIR="$W13R/cd" DOCTOR_VENV_DIR="$W13R/venv" DOCTOR_SHIM_DIR="$W13R/shim" \
+      HEADROOM_STATE_DIR="$W13R/state" bash "$DOCTOR" "$@" 2>&1
+}
+out=$(w13_dead)
+check "w13: a dead OWN shim is diagnosed as the doctor's own file" \
+      "this file is the doctor's own shim from an earlier run: delete it and re-run /doctor --fix" "$out"
+if [ -f "$W13R/shim/headroom" ]; then
+  echo "ok - w13: a read-only run never deletes it"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: a read-only run never deletes it"; FAIL=$((FAIL+1))
+fi
+out=$(w13_dead --fix)
+check        "w13: --fix removes the dead own shim and repairs in the same run" \
+             "headroom shimmed to $W13R/shim/headroom (resolves on PATH)" "$out"
+check_absent "w13: the repaired run no longer reports the does-not-run FAIL" \
+             "does not run" "$out"
+check_eq     "w13: the repaired shim points at the engine CLI" "$W13R/venv/bin/headroom" \
+             "$(readlink "$W13R/shim/headroom")"
+out=$(w13_dead --fix)
+check_eq     "w13: the next --fix is a no-op (no ^fixed line)" "0" \
+             "$(printf '%s\n' "$out" | grep -cE '^fixed ')"
+check        "w13: and it greens the repaired shim" "headroom CLI on PATH ($W13R/shim/headroom)" "$out"
+
+# w13-#10. shim_runs executes whatever `command -v headroom` resolves on every
+# plain /doctor run — by its own comment that may be a name squatter or a wedged
+# binary — and it had no time bound at all.
+W13T="$W/w13timeout"; mkdir -p "$W13T/cd" "$W13T/bin" "$W13T/venv/bin" "$W13T/shim"
+printf '#!/bin/sh\nsleep 120\n' > "$W13T/bin/headroom";   chmod +x "$W13T/bin/headroom"
+printf '#!/bin/sh\nexit 0\n'    > "$W13T/venv/bin/python"; chmod +x "$W13T/venv/bin/python"
+S13T="$W13T/s.json"; doc_settings_wired "$W13T/cd" > "$S13T"
+w13_t0=$(date +%s)
+out=$(env -u HCAT_PYTHON PATH="$W13T/bin:$STUB:/usr/bin:/bin" DOCTOR_SHIM_RUNS_TIMEOUT=1 \
+      DOCTOR_SETTINGS="$S13T" DOCTOR_CLAUDE_DIR="$W13T/cd" DOCTOR_VENV_DIR="$W13T/venv" \
+      DOCTOR_SHIM_DIR="$W13T/shim" HEADROOM_STATE_DIR="$W13T/state" bash "$DOCTOR" 2>&1)
+w13_elapsed=$(( $(date +%s) - w13_t0 ))
+check "w13: a headroom that never returns is reported as not running, not hung" \
+      "headroom on PATH at $W13T/bin/headroom does not run" "$out"
+if [ "$w13_elapsed" -lt 30 ]; then
+  echo "ok - w13: the doctor finished in ${w13_elapsed}s despite a 120s headroom (bounded probe)"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: the doctor took ${w13_elapsed}s — the shim_runs probe is not bounded"; FAIL=$((FAIL+1))
+fi
+# The run above took the portable watchdog branch (no timeout(1) on the fixture
+# PATH). Cover the coreutils branch too — that is the one every Linux box and CI
+# takes — with a faithful mini-`timeout` so the assertion is deterministic here.
+W13T2="$W13T/withtimeout"; mkdir -p "$W13T2" "$W13T2/live"
+cat > "$W13T2/timeout" <<'W13TO'
+#!/bin/sh
+s=$1; shift
+"$@" & p=$!
+i=0
+while kill -0 "$p" 2>/dev/null; do
+  if [ "$i" -ge "$s" ]; then kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; exit 124; fi
+  sleep 1; i=$((i+1))
+done
+wait "$p"
+W13TO
+chmod +x "$W13T2/timeout"
+w13_t0=$(date +%s)
+out=$(env -u HCAT_PYTHON PATH="$W13T2:$W13T/bin:$STUB:/usr/bin:/bin" DOCTOR_SHIM_RUNS_TIMEOUT=1 \
+      DOCTOR_SETTINGS="$S13T" DOCTOR_CLAUDE_DIR="$W13T/cd" DOCTOR_VENV_DIR="$W13T/venv" \
+      DOCTOR_SHIM_DIR="$W13T/shim" HEADROOM_STATE_DIR="$W13T/state" bash "$DOCTOR" 2>&1)
+w13_elapsed2=$(( $(date +%s) - w13_t0 ))
+check "w13: the timeout(1) branch bounds the probe as well" \
+      "headroom on PATH at $W13T/bin/headroom does not run" "$out"
+if [ "$w13_elapsed2" -lt 30 ]; then
+  echo "ok - w13: the timeout(1) branch finished in ${w13_elapsed2}s"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: the timeout(1) branch took ${w13_elapsed2}s"; FAIL=$((FAIL+1))
+fi
+# a healthy CLI through the SAME branch must still report its own (zero) status
+printf '#!/bin/sh\necho hr\n' > "$W13T2/live/headroom"; chmod +x "$W13T2/live/headroom"
+out=$(env -u HCAT_PYTHON PATH="$W13T2:$W13T2/live:$STUB:/usr/bin:/bin" DOCTOR_SHIM_RUNS_TIMEOUT=5 \
+      DOCTOR_SETTINGS="$S13T" DOCTOR_CLAUDE_DIR="$W13T/cd" DOCTOR_VENV_DIR="$W13T/venv" \
+      DOCTOR_SHIM_DIR="$W13T/shim" HEADROOM_STATE_DIR="$W13T/state" bash "$DOCTOR" 2>&1)
+check "w13: a healthy CLI still passes through the bounded probe" \
+      "headroom CLI on PATH ($W13T2/live/headroom)" "$out"
+
+# w13-#12. The merge-aware statusLine template applied sl_hr_cmd to the badge
+# fragment ONLY: the surrounding chain was raw POSIX shell, and on Windows that
+# whole string became the persisted command — so a user who already had a status
+# line lost both theirs and the badge. The chain now lives in a script file.
+W13C="$W/w13chain"; mkdir -p "$W13C/cd"
+S13C="$W13C/s.json"
+jq -n '{statusLine:{type:"command",command:"printf LEFT-SIDE"}}' > "$S13C"
+w13_chain() {
+  env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" CYGPATH_UNIX_DIR="$W13C/cd" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13C" DOCTOR_CLAUDE_DIR="$W13C/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13C/shim" \
+      HEADROOM_STATE_DIR="$W13C/state" bash "$DOCTOR" "$@" 2>&1
+}
+out=$(w13_chain --fix)
+w13_chain_file="$W13C/cd/headroom-statusline-chain.sh"
+check    "w13: the windows merge still reports the merge" \
+         "statusLine merged — your command kept and backed up under _headroomStatusLineBackup" "$out"
+check_eq "w13: the persisted command keeps the \"<bash>\" \"<win path>\" shape" \
+         '"C:\fake\bash" "C:\fake\headroom-statusline-chain.sh"' \
+         "$(jq -r '.statusLine.command' "$S13C")"
+check_absent "w13: no raw POSIX chain is persisted on Windows" 'in=$(cat)' \
+             "$(jq -r '.statusLine.command' "$S13C")"
+check_eq "w13: the user's own command is still backed up verbatim" "printf LEFT-SIDE" \
+         "$(jq -r '._headroomStatusLineBackup.command' "$S13C")"
+if [ -f "$w13_chain_file" ]; then
+  echo "ok - w13: the chain script was written next to the statusline copy"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: the chain script was written next to the statusline copy"; FAIL=$((FAIL+1))
+fi
+check "w13: the chain script runs the user's command" "printf LEFT-SIDE" "$(cat "$w13_chain_file" 2>/dev/null)"
+check "w13: the chain script runs the badge" "bash \"$W13C/cd/headroom-statusline.sh\"" \
+      "$(cat "$w13_chain_file" 2>/dev/null)"
+# and it actually renders both halves when Git Bash runs it
+w13_rendered=$(printf '{"transcript_path":"","model":{"id":"claude-opus-4-8"},"session_id":"w13c"}' \
+  | HEADROOM_STATE_DIR="$W13C/state" bash "$w13_chain_file" 2>/dev/null)
+check "w13: the chain renders the user's status line" "LEFT-SIDE" "$w13_rendered"
+check "w13: the chain renders the headroom badge after it" "headroom" "$w13_rendered"
+out=$(w13_chain --fix)
+check_eq "w13: a second windows --fix is a no-op" "0" "$(printf '%s\n' "$out" | grep -cE '^fixed ')"
+check    "w13: and the chain wiring reads as healthy" "statusLine wired (" "$out"
+# POSIX control: the inline chain is unchanged and no chain script is written
+W13CU="$W/w13chain-posix"; mkdir -p "$W13CU/cd"
+S13CU="$W13CU/s.json"; jq -n '{statusLine:{type:"command",command:"printf LEFT-SIDE"}}' > "$S13CU"
+env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13CU" \
+    DOCTOR_CLAUDE_DIR="$W13CU/cd" DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13CU/shim" \
+    HEADROOM_STATE_DIR="$W13CU/state" bash "$DOCTOR" --fix >/dev/null 2>&1
+check "w13: POSIX still gets the inline chain" 'in=$(cat); left=$(printf' \
+      "$(jq -r '.statusLine.command' "$S13CU")"
+if [ -e "$W13CU/cd/headroom-statusline-chain.sh" ]; then
+  echo "FAIL - w13: POSIX writes no chain script"; FAIL=$((FAIL+1))
+else
+  echo "ok - w13: POSIX writes no chain script"; PASS=$((PASS+1))
+fi
+
+# w13-#14. The Windows PATH hint hardcoded %USERPROFILE%\.local\bin while the
+# message beside it named the real $SHIM_DIR.
+W13H="$W/w13hint"; mkdir -p "$W13H/cd" "$W13H/venv/Scripts" "$W13H/customshim"
+printf '#!/bin/sh\nexit 0\n'    > "$W13H/venv/Scripts/python.exe";   chmod +x "$W13H/venv/Scripts/python.exe"
+printf 'MZ() { :; }\nexit 0\n'  > "$W13H/venv/Scripts/headroom.exe"; chmod +x "$W13H/venv/Scripts/headroom.exe"
+S13H="$W13H/s.json"; doc_settings_wired "$W13H/cd" > "$S13H"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13H" \
+      DOCTOR_CLAUDE_DIR="$W13H/cd" DOCTOR_VENV_DIR="$W13H/venv" DOCTOR_SHIM_DIR="$W13H/customshim" \
+      HEADROOM_STATE_DIR="$W13H/state" bash "$DOCTOR" --fix 2>&1)
+check        "w13: the windows PATH hint names the shim dir actually in use" \
+             "add $W13H/customshim to your user Path" "$out"
+check_absent "w13: the hint no longer hardcodes %USERPROFILE%" '%USERPROFILE%' "$out"
+# and the dir is converted to its native spelling when cygpath is available
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" PATH="$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13H" DOCTOR_CLAUDE_DIR="$W13H/cd" DOCTOR_VENV_DIR="$W13H/venv" \
+      DOCTOR_SHIM_DIR="$W13H/customshim" HEADROOM_STATE_DIR="$W13H/state" bash "$DOCTOR" --fix 2>&1)
+check "w13: the hint uses the native spelling of that dir" 'add C:\fake\customshim to your user Path' "$out"
+
+# w13-#2. The Windows bootstrap order is `py:-3 python python3`, whose colon
+# splitting hands `-3` to the py launcher — nothing exercised it (the Windows
+# order fixture supplied only `python`, and CI pre-creates the venv). Stub a py
+# launcher that ONLY accepts `-3 -m venv DIR`, with python/python3 failing, so
+# the assertion can come from nowhere else.
+W13B="$W/w13pyboot"; mkdir -p "$W13B/stub" "$W13B/cd" "$W13B/shim"
+ln -sf "$(command -v jq)" "$W13B/stub/jq"
+cat > "$W13B/stub/py" <<'W13PY'
+#!/bin/sh
+# the real Windows py launcher: a version selector, then the python arguments
+[ "$1" = "-3" ] || exit 1
+shift
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  mkdir -p "$3/Scripts"
+  printf '#!/bin/sh\necho "$@" >> "$(dirname "$0")/../pip.calls"\n' > "$3/Scripts/pip.exe"
+  printf '#!/bin/sh\nexit 0\n'   > "$3/Scripts/python.exe"
+  printf 'MZ() { :; }\nexit 0\n' > "$3/Scripts/headroom.exe"   # PE magic, still shell-runnable
+  chmod +x "$3/Scripts/pip.exe" "$3/Scripts/python.exe" "$3/Scripts/headroom.exe"
+  exit 0
+fi
+exit 1
+W13PY
+chmod +x "$W13B/stub/py"
+printf '#!/bin/sh\nexit 1\n' > "$W13B/stub/python";  chmod +x "$W13B/stub/python"
+printf '#!/bin/sh\nexit 1\n' > "$W13B/stub/python3"; chmod +x "$W13B/stub/python3"
+S13B="$W13B/s.json"; doc_settings_wired "$W13B/cd" > "$S13B"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13B/shim:$W13B/stub:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13B" DOCTOR_CLAUDE_DIR="$W13B/cd" DOCTOR_VENV_DIR="$W13B/venv" \
+      DOCTOR_SHIM_DIR="$W13B/shim" HEADROOM_STATE_DIR="$W13B/state" bash "$DOCTOR" --fix 2>&1)
+check "w13: the py launcher bootstraps the engine (colon-split -3 argument)" \
+      "engine bootstrapped: py -3 -m venv $W13B/venv" "$out"
+check "w13: it pip-installed through the Scripts layout" "Scripts/pip.exe install" "$out"
+check "w13: the stub pip really was called" "install headroom-ai[all]" \
+      "$(cat "$W13B/venv/pip.calls" 2>/dev/null)"
+check_absent "w13: no bootstrap FAIL when only py works" "engine bootstrap failed" "$out"
+if [ -x "$W13B/venv/Scripts/python.exe" ]; then
+  echo "ok - w13: py -3 -m venv produced a Scripts/ venv"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: py -3 -m venv produced a Scripts/ venv"; FAIL=$((FAIL+1))
+fi
+# control: with py gone, the same toolchain honestly fails (so the check above
+# is really attributing the bootstrap to the py launcher)
+W13B2="$W/w13pyboot-nopy"; mkdir -p "$W13B2/stub" "$W13B2/cd"
+ln -sf "$(command -v jq)" "$W13B2/stub/jq"
+printf '#!/bin/sh\nexit 1\n' > "$W13B2/stub/python";  chmod +x "$W13B2/stub/python"
+printf '#!/bin/sh\nexit 1\n' > "$W13B2/stub/python3"; chmod +x "$W13B2/stub/python3"
+S13B2="$W13B2/s.json"; doc_settings_wired "$W13B2/cd" > "$S13B2"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13B2/stub:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13B2" DOCTOR_CLAUDE_DIR="$W13B2/cd" DOCTOR_VENV_DIR="$W13B2/venv" \
+      DOCTOR_SHIM_DIR="$W13B2/shim" HEADROOM_STATE_DIR="$W13B2/state" bash "$DOCTOR" --fix 2>&1)
+check "w13: control — without py the bootstrap FAILs honestly" "engine bootstrap failed" "$out"
+
+# w13-#13. The FLAT (non-lib/) engine-resolve.sh tier of check 7c-2 — the legacy
+# manual-install layout — had no fixture at all.
+W13E="$W/w13flatres"; mkdir -p "$W13E/cd/lib"
+cp "$ROOT/scripts/statusline.sh" "$W13E/cd/headroom-statusline.sh"
+cp "$ROOT/scripts/lib/attribution.jq" "$ROOT/scripts/lib/headroom-state.sh" "$W13E/cd/lib/"
+cp "$ROOT/scripts/lib/engine-resolve.sh" "$W13E/cd/engine-resolve.sh"   # FLAT sibling, no lib/ copy
+S13E="$W13E/s.json"; doc_settings_wired "$W13E/cd" > "$S13E"
+out=$(HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13E" \
+      DOCTOR_CLAUDE_DIR="$W13E/cd" DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13E/shim" \
+      HEADROOM_STATE_DIR="$W13E/state" bash "$DOCTOR" 2>&1)
+check        "w13: a flat \$CLAUDE_DIR/engine-resolve.sh is recognised as current" \
+             "shared engine resolver current ($W13E/cd/engine-resolve.sh)" "$out"
+check_absent "w13: the flat copy is not reported missing/stale" \
+             "shared engine resolver missing/stale" "$out"
+check_absent "w13: and nothing is reported as fixable for it" \
+             "--fix installs it to $W13E/cd/lib" "$out"
+check_absent "w13: no --fix line is printed for the flat resolver" \
+             "installed the shared engine resolver" "$out"
+# a STALE flat copy is still caught (the branch is currency-checked, not just existence)
+printf '\n# drift\n' >> "$W13E/cd/engine-resolve.sh"
+out=$(HCAT_PYTHON="$FENG/python" PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13E" \
+      DOCTOR_CLAUDE_DIR="$W13E/cd" DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13E/shim" \
+      HEADROOM_STATE_DIR="$W13E/state" bash "$DOCTOR" 2>&1)
+check "w13: a stale flat resolver is reported fixable" \
+      "shared engine resolver missing/stale (engine-resolve.sh)" "$out"
+
+# w13-#4. Windows' default PATHEXT resolves .COM FIRST, and both hijack lists
+# omitted exactly that spelling. The list now lives in the shared lib so the two
+# call sites cannot drift apart again.
+check_eq "w13: .com leads the shared name list" "headroom.com" "$(er headroom_name_variants | head -1)"
+check_eq "w13: the shared list carries all five spellings" "5" "$(er headroom_name_variants | grep -c .)"
+check    "w13: doctor uses the shared list"        "headroom_name_variants" "$(cat "$DOCTOR")"
+check    "w13: session-probe uses the shared list" "headroom_name_variants" "$(cat "$PROBE")"
+W13X="$W/w13com"; mkdir -p "$W13X/cd" "$W13X/proj" "$W13X/home"
+printf 'MZ() { :; }\nexit 0\n' > "$W13X/proj/headroom.com"    # no +x: Windows needs none
+S13X="$W13X/s.json"; doc_settings_wired "$W13X/cd" > "$S13X"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_PROJECT_DIR="$W13X/proj" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13X" DOCTOR_CLAUDE_DIR="$W13X/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W13X/shim" HEADROOM_STATE_DIR="$W13X/state" \
+      bash "$DOCTOR" 2>&1)
+check "w13: doctor FAILs on a project-dir headroom.com (PATHEXT's first match)" \
+      "an executable $W13X/proj/headroom.com sits in the project directory" "$out"
+out=$(printf '{"session_id":"w13com"}' | env -u HCAT_PYTHON DOCTOR_OS=windows HOME="$W13X/home" \
+      DOCTOR_PROJECT_DIR="$W13X/proj" PATH="$STUB:/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W13X/pstate" bash "$PROBE")
+check    "w13: the probe nudges about a project-dir headroom.com too" \
+         "$W13X/proj/headroom.com sits in this project" "$out"
+check_eq "w13: the probe still prints exactly one line" "1" "$(printf '%s\n' "$out" | grep -c .)"
 
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
