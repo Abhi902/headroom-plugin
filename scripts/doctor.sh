@@ -189,12 +189,25 @@ elif [ "$FIX" -eq 1 ]; then
   boot_bindir=""; [ -n "$boot_used" ] && boot_bindir=$(venv_bindir "$VENV_DIR" 2>/dev/null) || boot_bindir=""
   boot_py="python"; boot_pip="pip"
   [ "$boot_bindir" = "Scripts" ] && { boot_py="python.exe"; boot_pip="pip.exe"; }
-  if [ -n "$boot_used" ] && [ -n "$boot_bindir" ] \
-     && [ -x "$VENV_DIR/$boot_bindir/$boot_pip" ] \
-     && "$VENV_DIR/$boot_bindir/$boot_pip" install "headroom-ai[all]" >/dev/null 2>&1 \
+  # `[all]` is preferred, but it is NOT safe to require: on Windows it resolves
+  # the `ml` extra → torch>=2.12.1 (~2.5 GB), because that dependency's
+  # `sys_platform != "darwin"` marker applies there. On a slow link that is a
+  # long silent hang followed by "engine bootstrap failed" for what would have
+  # been a perfectly usable engine. The CI step has always hedged with
+  # `|| pip install headroom-ai`; the doctor must hedge identically. The bare
+  # package still carries everything hcat and the MCP server need.
+  boot_pkg=""
+  if [ -n "$boot_used" ] && [ -n "$boot_bindir" ] && [ -x "$VENV_DIR/$boot_bindir/$boot_pip" ]; then
+    if "$VENV_DIR/$boot_bindir/$boot_pip" install "headroom-ai[all]" >/dev/null 2>&1; then
+      boot_pkg="headroom-ai[all]"
+    elif "$VENV_DIR/$boot_bindir/$boot_pip" install "headroom-ai" >/dev/null 2>&1; then
+      boot_pkg="headroom-ai"
+    fi
+  fi
+  if [ -n "$boot_pkg" ] \
      && [ -x "$VENV_DIR/$boot_bindir/$boot_py" ] \
      && "$VENV_DIR/$boot_bindir/$boot_py" -c 'import headroom.compress' >/dev/null 2>&1; then
-    say fixed "engine bootstrapped: $boot_used -m venv $VENV_DIR + $boot_bindir/$boot_pip install \"headroom-ai[all]\""
+    say fixed "engine bootstrapped: $boot_used -m venv $VENV_DIR + $boot_bindir/$boot_pip install \"$boot_pkg\""
     PY="$VENV_DIR/$boot_bindir/$boot_py"
   else
     # never leave a half-created venv behind: its python would pass -x
@@ -256,7 +269,16 @@ shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the
     # headroom.exe yields a file Windows cannot start while shim_runs (which
     # runs it through bash) still succeeds, so the doctor used to report `fixed`
     # over an MCP that can never connect. Refuse instead; 2b explains the remedy.
-    _er_is_pe "$1" || return 3
+    # DOCTOR_FAKE_PE is a TEST-ONLY seam, in the same family as DOCTOR_OS and
+    # DOCTOR_CYGPATH. The suite's Windows fixtures fake the OS while building
+    # their fake engine as a POSIX `#!` script — it has to stay runnable by
+    # whichever host is actually executing the suite. On a POSIX host that is
+    # self-consistent; on a GENUINE Windows host is_windows() is really true,
+    # so this guard correctly refuses those fixtures and they could never pass
+    # there. The seam lets such a fixture say "treat the engine as a PE image";
+    # the fixture that tests THIS refusal deliberately leaves it unset. No real
+    # user ever sets it, so the guard stays at full strength in production.
+    [ "${DOCTOR_FAKE_PE:-0}" = "1" ] || _er_is_pe "$1" || return 3
     # never write the copy THROUGH a link someone else left here (cp would
     # follow it and clobber its target); the guards above already refused to
     # adopt any link that is not ours
@@ -314,36 +336,64 @@ reinstall_hint() {  # how to repair an engine whose `headroom` CLI is missing or
     printf 'pip install "headroom-ai[all]" into the engine environment'
   fi
 }
-sl_hr_cmd() {  # sl_hr_cmd <script> — the statusLine.command to write for this platform
+# Git for Windows ships TWO bash binaries and they are NOT interchangeable for
+# our purpose. <gitroot>/usr/bin/bash.exe is the MSYS-INTERNAL one: spawned
+# from a native Windows process — which is exactly how Claude Code spawns the
+# status line — its PATH carries no MSYS coreutils, so dirname/cat/wc/tr are
+# all "command not found", the badge degrades to a permanent idle and stderr
+# fills with noise. <gitroot>/bin/bash.exe is the wrapper Git for Windows ships
+# FOR external invocation precisely because it sets that PATH up first.
+# `command -v bash` inside Git Bash resolves to the usr/bin one, so whenever
+# that bin/ sibling really exists on disk we must promote to it.
+# CI cannot catch this: windows-latest has Git\usr\bin on PATH, which masks it.
+sl_prefer_wrapper_bash() {  # <bash path, native or POSIX spelling> → possibly promoted
+  local p=$1 sep base root cand
+  case $p in
+    *[\\/]usr[\\/]bin[\\/]bash|*[\\/]usr[\\/]bin[\\/]bash.exe) ;;
+    *) printf '%s\n' "$p"; return ;;
+  esac
+  base=${p##*[\\/]}                       # bash | bash.exe
+  root=${p%[\\/]*}; root=${root%[\\/]*}; root=${root%[\\/]*}   # strip /usr/bin/<base>
+  case $p in *\\*) sep='\' ;; *) sep='/' ;; esac
+  cand="${root}${sep}bin${sep}${base}"
+  # `-f` has to be applied to a path THIS shell can stat: inside Git Bash that
+  # is the POSIX spelling, and unix_path is a no-op on one that already is.
+  [ -f "$(unix_path "$cand")" ] && p=$cand
+  printf '%s\n' "$p"
+}
+sl_bash_path() {  # → the bash a Windows statusLine.command should run through
   local b nl cr
-  if is_windows; then
-    # CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT-scoped
-    # settings.json — i.e. from repo config. `--fix` persists what we print here
-    # into ~/.claude/settings.json as statusLine.command, which Claude Code then
-    # EXECUTES, so a hostile value must not survive into it.
-    #
-    # Rejecting only the double quote was not enough: inside the double-quoted
-    # word we print, exactly four things stay ACTIVE — `"` (closes the quoting),
-    # `$` (parameter AND command substitution: a path under a directory literally
-    # named `$(cmd)` is a real, existing file, so the -f test below passes), a
-    # backtick (command substitution) and a newline/carriage return (starts a
-    # second command line). Reject all four. A BACKSLASH is deliberately
-    # ALLOWED: every native Windows path is full of them, and with the four
-    # above gone a backslash can neither introduce an expansion nor terminate
-    # the quoting — the worst it can do is name a file that does not exist,
-    # which the -f test already catches.
-    nl='
+  # CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT-scoped
+  # settings.json — i.e. from repo config. `--fix` persists what we print here
+  # into ~/.claude/settings.json as statusLine.command, which Claude Code then
+  # EXECUTES, so a hostile value must not survive into it.
+  #
+  # Rejecting only the double quote was not enough: inside the double-quoted
+  # word we print, exactly four things stay ACTIVE — `"` (closes the quoting),
+  # `$` (parameter AND command substitution: a path under a directory literally
+  # named `$(cmd)` is a real, existing file, so the -f test below passes), a
+  # backtick (command substitution) and a newline/carriage return (starts a
+  # second command line). Reject all four. A BACKSLASH is deliberately
+  # ALLOWED: every native Windows path is full of them, and with the four
+  # above gone a backslash can neither introduce an expansion nor terminate
+  # the quoting — the worst it can do is name a file that does not exist,
+  # which the -f test already catches.
+  nl='
 '
-    cr=$(printf '\r')
-    b=${CLAUDE_CODE_GIT_BASH_PATH:-}
-    case $b in *'"'*|*'$'*|*'`'*|*"$nl"*|*"$cr"*) b="" ;; esac
-    if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(command -v bash); fi
-    # normalize the ACCEPTED value too, not just the fallback: an override may be
-    # POSIX-spelled (/c/Program Files/Git/bin/bash.exe) and Claude Code executes
-    # this command outside Git Bash, where only the native spelling resolves.
-    # `cygpath -w` on an already-Windows path is a no-op, so one pass covers both.
-    b=$(win_path "$b")
-    printf '"%s" "%s"' "$b" "$(win_path "$1")"
+  cr=$(printf '\r')
+  b=${CLAUDE_CODE_GIT_BASH_PATH:-}
+  case $b in *'"'*|*'$'*|*'`'*|*"$nl"*|*"$cr"*) b="" ;; esac
+  if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(command -v bash); fi
+  b=$(sl_prefer_wrapper_bash "$b")
+  # normalize the ACCEPTED value too, not just the fallback: an override may be
+  # POSIX-spelled (/c/Program Files/Git/bin/bash.exe) and Claude Code executes
+  # this command outside Git Bash, where only the native spelling resolves.
+  # `cygpath -w` on an already-Windows path is a no-op, so one pass covers both.
+  win_path "$b"
+}
+sl_hr_cmd() {  # sl_hr_cmd <script> — the statusLine.command to write for this platform
+  if is_windows; then
+    printf '"%s" "%s"' "$(sl_bash_path)" "$(win_path "$1")"
   else
     printf 'bash "%s"' "$1"
   fi
@@ -669,8 +719,25 @@ else
     # trust rule below, same as before.
     sl_present=0; sl_seen=0; sl_canonical_missing=0; sl_respelled_raw=""
     sl_respelled_delim=""; sl_custom_missing=""; sl_wired_path=""
+    sl_interp_missing=""
     while IFS= read -r sl_tok; do
       [ -n "$sl_tok" ] || continue
+      # The INTERPRETER half of a Windows wiring ("<bash.exe>" "<script>") was
+      # never validated — only the script token was — so a stale or simply
+      # wrong bash path read as `ok - statusLine wired` over a command that
+      # cannot execute, and --fix would not repair it. Combined with a bash
+      # that lacks coreutils that is exactly how a silently dead badge gets a
+      # clean bill of health. Match ONLY an absolute bash: every other token
+      # keeps falling through untouched, so a foreign chained script (which
+      # may legitimately live anywhere, or nowhere we can stat) never starts
+      # failing this check.
+      case $sl_tok in
+        /*bash | /*bash.exe | [A-Za-z]:[\\/]*bash | [A-Za-z]:[\\/]*bash.exe)
+          # stat it the way THIS shell can: inside Git Bash the native
+          # spelling needs translating, and unix_path no-ops on a POSIX one.
+          [ -f "$sl_tok" ] || [ -f "$(unix_path "$sl_tok")" ] || sl_interp_missing=$sl_tok
+          continue ;;
+      esac
       # shellcheck disable=SC2088 # matching a LITERAL ~ the shell never expanded — this just structurally validates the token shape
       case $sl_tok in
         "~/"*headroom-statusline.sh | /*headroom-statusline.sh) ;;
@@ -707,7 +774,29 @@ else
     # A present token from one candidate must not mask a co-occurring missing
     # signal from a DIFFERENT candidate token in the same command -- require
     # no missing signal was raised by ANY token, not just that ONE resolved.
-    if [ "$sl_present" -eq 1 ] && [ -z "$sl_respelled_raw" ] \
+    if [ -n "$sl_interp_missing" ]; then
+      # repair the interpreter IN PLACE rather than re-running the whole merge:
+      # it swaps the one dead token for the bash this platform resolves now and
+      # leaves everything else (a chained foreign command included) untouched.
+      sl_good_bash=$(sl_bash_path)
+      if [ "$FIX" -ne 1 ]; then
+        say fixable "statusLine runs through $sl_interp_missing but no such interpreter exists — the badge cannot render; --fix repoints it at $sl_good_bash"
+      elif [ ! -f "$sl_good_bash" ] && [ ! -f "$(unix_path "$sl_good_bash")" ]; then
+        say FAIL "statusLine runs through $sl_interp_missing but no such interpreter exists, and no working bash was found to replace it with — install Git for Windows, or fix statusLine.command in settings.json by hand"
+      elif ! backup_settings; then
+        say FAIL "could not back up settings.json before repointing the dead '$sl_interp_missing' interpreter — refusing to overwrite without one"
+      else
+        sl_new_cmd=${sl//$sl_interp_missing/$sl_good_bash}
+        if [ "$sl_new_cmd" = "$sl" ]; then
+          say FAIL "could not locate '$sl_interp_missing' in the statusLine command to repoint it — fix statusLine.command in settings.json by hand"
+        elif jq --arg c "$sl_new_cmd" '.statusLine.command = $c' \
+            "$SETTINGS" > "$TMPD/settings.sl3" && cat "$TMPD/settings.sl3" > "$SETTINGS"; then
+          say fixed "repointed the statusLine interpreter from the missing $sl_interp_missing to $sl_good_bash (settings.json backup: .bak.*)"
+        else
+          say FAIL "could not repoint the dead '$sl_interp_missing' statusLine interpreter in settings.json"
+        fi
+      fi
+    elif [ "$sl_present" -eq 1 ] && [ -z "$sl_respelled_raw" ] \
        && [ "$sl_canonical_missing" -eq 0 ] && [ -z "$sl_custom_missing" ]; then
       say ok "statusLine wired ($sl)"
     elif [ "$sl_seen" -eq 0 ]; then

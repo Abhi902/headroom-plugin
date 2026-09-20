@@ -7,6 +7,18 @@ SCRIPT="$ROOT/scripts/statusline.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export HEADROOM_STATE_DIR="$TMP/state"
+# The Windows fixtures below fake the OS (DOCTOR_OS=windows) while their fake
+# engine stays a POSIX `#!` script, because the host actually running this
+# suite has to be able to execute it. On a genuine Windows host is_windows() is
+# really true, so doctor's PE guard rightly refuses those fixtures — which is
+# why the windows CI job used to drown in failures that no product bug caused.
+# Declaring the simulation here makes the suite behave identically on both
+# hosts; the one fixture that tests the PE refusal unsets it explicitly.
+export DOCTOR_FAKE_PE=1
+# The Windows bash-preference fixtures put a FAKE `bash` first on PATH so the
+# doctor's own `command -v bash` finds it. That must not also hijack the bash
+# used to RUN the doctor, so resolve a real one now, before any such games.
+BASHBIN=$(command -v bash)
 
 PASS=0; FAIL=0
 
@@ -2886,6 +2898,13 @@ check "w6: no engine → CLI check skips" "headroom CLI on PATH (no engine yet" 
 W7="$W/w7"; mkdir -p "$W7/cd" "$W7/bashdir"
 printf '#!/bin/sh\nexit 0\n' > "$W7/bashdir/bash.exe"; chmod +x "$W7/bashdir/bash.exe"
 S7="$W7/s.json"; printf '{}\n' > "$S7"
+# check 7 now validates the INTERPRETER token too, not just the script token.
+# The stub cygpath is deliberately lossy (it keeps only the basename and
+# re-roots onto CYGPATH_UNIX_DIR), so the "C:\fake\bash.exe" this fixture ends
+# up wiring translates back to $W7/cd/bash.exe — put a real file there so a
+# HEALTHY wiring stays healthy under the stub's round trip. On a real host
+# cygpath is lossless and the round trip lands on the actual bash.
+mkdir -p "$W7/cd"; printf '#!/bin/sh\nexit 0\n' > "$W7/cd/bash.exe"; chmod +x "$W7/cd/bash.exe"
 # NOTE: CLAUDE_CODE_GIT_BASH_PATH is the REAL bash.exe fixture created above
 # ($W7/bashdir/bash.exe), not a fabricated 'C:\...' literal: check 0 does a
 # direct `-f` test with no cygpath translation (real Git Bash's MSYS runtime
@@ -3469,7 +3488,7 @@ W13N="$W/w13nonpe"; mkdir -p "$W13N/cd" "$W13N/venv/bin" "$W13N/shim"
 printf '#!/bin/sh\nexit 0\n'  > "$W13N/venv/bin/python";   chmod +x "$W13N/venv/bin/python"
 printf '#!/bin/sh\necho hr\n' > "$W13N/venv/bin/headroom"; chmod +x "$W13N/venv/bin/headroom"
 S13N="$W13N/s.json"; doc_settings_wired "$W13N/cd" > "$S13N"
-out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13N/shim:$STUB:/usr/bin:/bin" \
+out=$(env -u HCAT_PYTHON -u DOCTOR_FAKE_PE DOCTOR_OS=windows PATH="$W13N/shim:$STUB:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$S13N" DOCTOR_CLAUDE_DIR="$W13N/cd" DOCTOR_VENV_DIR="$W13N/venv" \
       DOCTOR_SHIM_DIR="$W13N/shim" HEADROOM_STATE_DIR="$W13N/state" bash "$DOCTOR" --fix 2>&1); rc=$?
 check        "w13: a non-PE headroom is refused on the Windows copy branch" \
@@ -3587,6 +3606,14 @@ check "w13: a healthy CLI still passes through the bounded probe" \
 # whole string became the persisted command — so a user who already had a status
 # line lost both theirs and the badge. The chain now lives in a script file.
 W13C="$W/w13chain"; mkdir -p "$W13C/cd"
+# same lossy-stub accommodation as w7: the chain wiring's interpreter token
+# round-trips through the stub cygpath to $W13C/cd/bash.exe, and check 7 now
+# verifies that interpreter exists before calling the wiring healthy.
+# both spellings: the stub keeps only the basename, and which one appears
+# depends on what this host's `command -v bash` returned (/bin/bash → "bash").
+for _b in bash bash.exe; do
+  printf '#!/bin/sh\nexit 0\n' > "$W13C/cd/$_b"; chmod +x "$W13C/cd/$_b"
+done
 S13C="$W13C/s.json"
 jq -n '{statusLine:{type:"command",command:"printf LEFT-SIDE"}}' > "$S13C"
 w13_chain() {
@@ -3754,6 +3781,135 @@ out=$(printf '{"session_id":"w13com"}' | env -u HCAT_PYTHON DOCTOR_OS=windows HO
 check    "w13: the probe nudges about a project-dir headroom.com too" \
          "$W13X/proj/headroom.com sits in this project" "$out"
 check_eq "w13: the probe still prints exactly one line" "1" "$(printf '%s\n' "$out" | grep -c .)"
+
+# ============================================================================
+# w14. Defects found by the independent Windows tester on PR #10 (issue #9).
+#      Each fixture below FAILED before the fix that follows it.
+# ============================================================================
+W14="$W/w14"; mkdir -p "$W14"
+
+# --- w14a (defect 1): the sl_hr_cmd() fallback must prefer <gitroot>/bin/bash.exe.
+# Git for Windows ships TWO bashes: usr/bin/bash.exe (the MSYS-internal one,
+# whose PATH has no coreutils when spawned from a native Windows process) and
+# bin/bash.exe (the wrapper meant for external invocation, which sets MSYS
+# PATH up first). `command -v bash` inside Git Bash finds usr/bin/bash.exe.
+# Claude Code spawns the status line from a native process, so wiring
+# usr/bin/bash.exe gives a badge whose dirname/cat/wc/tr are all missing.
+# CI cannot catch this: windows-latest has Git\usr\bin on PATH, masking it.
+W14G="$W14/gitroot"; mkdir -p "$W14G/bin" "$W14G/usr/bin"
+printf '#!/bin/sh\nexit 0\n' > "$W14G/usr/bin/bash"; chmod +x "$W14G/usr/bin/bash"
+printf '#!/bin/sh\nexit 0\n' > "$W14G/bin/bash";     chmod +x "$W14G/bin/bash"
+S14A="$W14/sa.json"; printf '{}\n' > "$S14A"
+# no DOCTOR_CYGPATH and no cygpath on PATH → win_path is a passthrough, so the
+# written command carries the raw POSIX path and the assertion can see which
+# bash was chosen. CLAUDE_CODE_GIT_BASH_PATH is unset → the fallback runs.
+env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
+  PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
+  DOCTOR_SETTINGS="$S14A" DOCTOR_CLAUDE_DIR="$W14/cd" DOCTOR_VENV_DIR="$NOVENV" \
+  DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
+check    "w14a: fallback prefers <gitroot>/bin/bash.exe over usr/bin" \
+         "$W14G/bin/bash" "$(jq -r '.statusLine.command' "$S14A")"
+check_absent "w14a: the coreutils-less usr/bin/bash.exe is not wired" \
+         "$W14G/usr/bin/bash" "$(jq -r '.statusLine.command' "$S14A")"
+
+# the sibling-bin promotion must only fire when that bash really exists —
+# a lone usr/bin/bash.exe with no bin/ sibling still has to be usable
+W14H="$W14/gitroot-nobin"; mkdir -p "$W14H/usr/bin"
+printf '#!/bin/sh\nexit 0\n' > "$W14H/usr/bin/bash"; chmod +x "$W14H/usr/bin/bash"
+S14B="$W14/sb.json"; printf '{}\n' > "$S14B"
+env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
+  PATH="$W14H/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
+  DOCTOR_SETTINGS="$S14B" DOCTOR_CLAUDE_DIR="$W14/cdb" DOCTOR_VENV_DIR="$NOVENV" \
+  DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
+check    "w14a: no bin/ sibling → usr/bin/bash.exe still wired" \
+         "$W14H/usr/bin/bash" "$(jq -r '.statusLine.command' "$S14B")"
+
+# --- w14b (defect 2): check 7 must validate the INTERPRETER, not just the script.
+# The token loop only ever considered tokens ending in headroom-statusline.sh,
+# so a stale/wrong bash path was both undetected and unfixable: the doctor said
+# "ok      - statusLine wired" over a command that cannot execute.
+W14C="$W14/cdc"; mkdir -p "$W14C"
+printf '#!/bin/sh\nexit 0\n' > "$W14C/headroom-statusline.sh"; chmod +x "$W14C/headroom-statusline.sh"
+S14C="$W14/sc.json"
+printf '{"statusLine":{"type":"command","command":"\\"%s\\" \\"%s\\""}}\n' \
+  "$W14/nope/does-not-exist/bash.exe" "$W14C/headroom-statusline.sh" > "$S14C"
+out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
+      PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S14C" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" 2>&1)
+check_absent "w14b: a dead interpreter is not reported as wired" "ok      - statusLine wired" "$out"
+check        "w14b: the dead interpreter is named in the finding" \
+             "$W14/nope/does-not-exist/bash.exe" "$out"
+# and --fix must actually repair it, not just report it
+env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
+  PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
+  DOCTOR_SETTINGS="$S14C" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
+  DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
+check_absent "w14b: --fix removes the dead interpreter" \
+             "$W14/nope/does-not-exist/bash.exe" "$(jq -r '.statusLine.command' "$S14C")"
+check        "w14b: --fix rewires to a real bash" \
+             "$W14G/bin/bash" "$(jq -r '.statusLine.command' "$S14C")"
+# a HEALTHY windows wiring must still pass untouched (no false alarm)
+S14D="$W14/sd.json"
+printf '{"statusLine":{"type":"command","command":"\\"%s\\" \\"%s\\""}}\n' \
+  "$W14G/bin/bash" "$W14C/headroom-statusline.sh" > "$S14D"
+out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
+      PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S14D" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" 2>&1)
+check "w14b: a live interpreter still reads as wired" "ok      - statusLine wired" "$out"
+# POSIX is unaffected: `bash "<script>"` has no absolute interpreter token
+S14E="$W14/se.json"
+printf '{"statusLine":{"type":"command","command":"bash \\"%s\\""}}\n' \
+  "$W14C/headroom-statusline.sh" > "$S14E"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S14E" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" 2>&1)
+check "w14b: posix bare-bash wiring still reads as wired" "ok      - statusLine wired" "$out"
+
+# --- w14c (defect 3): --fix bootstrap must not hang on torch.
+# On Windows `headroom-ai[all]` pulls the `ml` extra -> torch>=2.12.1 (~2.5 GB)
+# because the sys_platform != "darwin" marker applies. CI already hedges with
+# `|| pip install headroom-ai`; doctor.sh had no fallback, so a slow link got a
+# long silent hang and then "engine bootstrap failed".
+W14V="$W14/boot"; mkdir -p "$W14V/stub"
+# a python stub whose `-m venv` builds a venv whose pip REFUSES [all] but
+# accepts the bare package — exactly the torch-unavailable shape
+cat > "$W14V/stub/python3" <<STUBEOF
+#!/bin/sh
+if [ "\$1" = "-m" ] && [ "\$2" = "venv" ]; then
+  mkdir -p "\$3/bin"
+  cat > "\$3/bin/pip" <<'PIPEOF'
+#!/bin/sh
+# [all] is what pulls torch — refuse it, accept the bare package
+case " \$* " in *"headroom-ai[all]"*) exit 1 ;; esac
+case " \$* " in *"headroom-ai"*) touch "\$(dirname "\$0")/.installed"; exit 0 ;; esac
+exit 1
+PIPEOF
+  chmod +x "\$3/bin/pip"
+  cat > "\$3/bin/python" <<'PYEOF'
+#!/bin/sh
+# `import headroom.compress` only succeeds once pip actually installed
+[ -f "\$(dirname "\$0")/.installed" ] || exit 1
+exit 0
+PYEOF
+  chmod +x "\$3/bin/python"
+  exit 0
+fi
+exit 0
+STUBEOF
+chmod +x "$W14V/stub/python3"
+S14F="$W14/sf.json"; printf '{}\n' > "$S14F"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$W14V/stub:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S14F" DOCTOR_CLAUDE_DIR="$W14/cdf" \
+      DOCTOR_VENV_DIR="$W14V/venv" DOCTOR_SHIM_DIR="$W14/shim" \
+      bash "$DOCTOR" --fix 2>&1)
+check        "w14c: bootstrap falls back to bare headroom-ai when [all] fails" \
+             "engine bootstrapped" "$out"
+check_absent "w14c: the fallback bootstrap is not reported as a failure" \
+             "engine bootstrap failed" "$out"
+check_eq     "w14c: the venv really was built by the fallback" "0" \
+             "$([ -f "$W14V/venv/bin/.installed" ]; echo $?)"
 
 # --- shellcheck (when available) — warning severity: info-level findings
 # (e.g. SC2016 on intentionally-literal single quotes) don't fail the suite
