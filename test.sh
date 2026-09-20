@@ -20,6 +20,22 @@ export DOCTOR_FAKE_PE=1
 # used to RUN the doctor, so resolve a real one now, before any such games.
 BASHBIN=$(command -v bash)
 
+# `ln -s` is NOT dependable under MSYS: Git for Windows creates a .lnk or a
+# plain text link file (depending on the winsymlinks setting) instead of a real
+# symlink, so a "linked" binary ends up EXISTING — doctor's `jq found` check
+# passed — while being unrunnable. Every jq call in every doctor fixture then
+# failed silently and every JSON check reported invalid: 60 doctor runs on the
+# windows job produced ZERO successful JSON parses, which is most of that job's
+# failures. Fall back to a copy whenever the link does not come out runnable.
+link_tool() {  # link_tool <real binary> <dest> — symlink if that works, else copy
+  rm -f "$2" 2>/dev/null
+  ln -sf "$1" "$2" 2>/dev/null || true
+  if ! "$2" --version >/dev/null 2>&1; then
+    rm -f "$2" 2>/dev/null
+    cp "$1" "$2" && chmod +x "$2"
+  fi
+}
+
 PASS=0; FAIL=0
 
 check() {  # check <name> <expected-substring> <actual>
@@ -567,7 +583,11 @@ export HEADROOM_STATE_DIR="$TMP/state-port"
 # args, and NO osascript anywhere on it.
 LINBIN="$TMP/linbin"; mkdir -p "$LINBIN"
 for t in jq tr wc date mkdir rmdir cat dirname basename grep sed tail head; do
-  ln -s "$(command -v "$t")" "$LINBIN/$t"
+  # same MSYS symlink caveat as link_tool, but these coreutils do not all
+  # answer --version the same way, so probe with a plain existence+exec test
+  rm -f "$LINBIN/$t" 2>/dev/null
+  ln -s "$(command -v "$t")" "$LINBIN/$t" 2>/dev/null || true
+  [ -x "$LINBIN/$t" ] || { rm -f "$LINBIN/$t" 2>/dev/null; cp "$(command -v "$t")" "$LINBIN/$t" && chmod +x "$LINBIN/$t"; }
 done
 cat > "$LINBIN/stat" <<'EOF'
 #!/bin/sh
@@ -674,7 +694,7 @@ doc_settings_legacy() {  # doc_settings_legacy <claude-dir> — the real pre-plu
 # stub toolchain for --fix tests: fake python3 whose `-m venv` materializes a fake
 # venv (fake pip records its args; NEVER runs real pip), plus the real jq on PATH.
 STUB="$DOCD/stub"; mkdir -p "$STUB"
-ln -sf "$(command -v jq)" "$STUB/jq"
+link_tool "$(command -v jq)" "$STUB/jq"
 cat > "$STUB/python3" <<'STUBEOF'
 #!/bin/sh
 d=$(dirname "$0")
@@ -1310,7 +1330,7 @@ fi
 
 # F6: Debian venv dead-end — half-created venv removed, actionable message
 DEB="$REVD/deb"; mkdir -p "$DEB"
-ln -sf "$(command -v jq)" "$DEB/jq"
+link_tool "$(command -v jq)" "$DEB/jq"
 cat > "$DEB/python3" <<'EOF'
 #!/bin/sh
 if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
@@ -2807,7 +2827,7 @@ check "w4: doctor engine via Scripts/python.exe" "engine python: $W4/venv/Script
 
 # a toolchain with `python` but NO `python3` (typical Windows) — stub creates a Scripts/ venv
 W4B="$W/w4boot"; mkdir -p "$W4B/stub" "$W4B/cd"
-ln -sf "$(command -v jq)" "$W4B/stub/jq"
+link_tool "$(command -v jq)" "$W4B/stub/jq"
 cat > "$W4B/stub/python" <<'W4EOF'
 #!/bin/sh
 if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
@@ -2829,7 +2849,7 @@ out=$(env -u HCAT_PYTHON PATH="$W4B/stub:/usr/bin:/bin" DOCTOR_OS=windows DOCTOR
 check "w4: bootstrap succeeds with python (no python3)" "engine bootstrapped: python -m venv" "$out"
 check "w4: bootstrap used Scripts/pip.exe" "install headroom-ai[all]" "$(cat "$W4B/venv/pip.calls" 2>/dev/null)"
 # no interpreter at all → honest FAIL naming what was tried
-W4N="$W/w4none"; mkdir -p "$W4N/stub" "$W4N/cd"; ln -sf "$(command -v jq)" "$W4N/stub/jq"
+W4N="$W/w4none"; mkdir -p "$W4N/stub" "$W4N/cd"; link_tool "$(command -v jq)" "$W4N/stub/jq"
 # shadow /usr/bin/python3 so the FAIL branch (not a real bootstrap) is exercised
 printf '#!/bin/sh\nexit 1\n' > "$W4N/stub/python3"; chmod +x "$W4N/stub/python3"
 printf '#!/bin/sh\nexit 1\n' > "$W4N/stub/python"; chmod +x "$W4N/stub/python"
@@ -3687,7 +3707,7 @@ check "w13: the hint uses the native spelling of that dir" 'add C:\fake\customsh
 # launcher that ONLY accepts `-3 -m venv DIR`, with python/python3 failing, so
 # the assertion can come from nowhere else.
 W13B="$W/w13pyboot"; mkdir -p "$W13B/stub" "$W13B/cd" "$W13B/shim"
-ln -sf "$(command -v jq)" "$W13B/stub/jq"
+link_tool "$(command -v jq)" "$W13B/stub/jq"
 cat > "$W13B/stub/py" <<'W13PY'
 #!/bin/sh
 # the real Windows py launcher: a version selector, then the python arguments
@@ -3724,7 +3744,7 @@ fi
 # control: with py gone, the same toolchain honestly fails (so the check above
 # is really attributing the bootstrap to the py launcher)
 W13B2="$W/w13pyboot-nopy"; mkdir -p "$W13B2/stub" "$W13B2/cd"
-ln -sf "$(command -v jq)" "$W13B2/stub/jq"
+link_tool "$(command -v jq)" "$W13B2/stub/jq"
 printf '#!/bin/sh\nexit 1\n' > "$W13B2/stub/python";  chmod +x "$W13B2/stub/python"
 printf '#!/bin/sh\nexit 1\n' > "$W13B2/stub/python3"; chmod +x "$W13B2/stub/python3"
 S13B2="$W13B2/s.json"; doc_settings_wired "$W13B2/cd" > "$S13B2"
