@@ -22,155 +22,51 @@ doctor: foreign statusLine preserved by --fix
 f2: legacy hooks removed through the link
 f2: settings.json is still a symlink after --fix
 f2: statusLine fix landed in the target
-f5: --fix cleans settings.local.json
-f5: local legacy entries gone
-f5: read-only reports local legacy as fixable
-f5: settings.local.json backup written
-f5: stale copies removed after local fix
-f5: stale scripts deleted once nothing references them
-f5: stale-copy deletion notes project-level settings caveat
 f7a: chained with the installer template
-f7a: fix reports a merge
+f7a: custom command preserved in the chain
 f7a: headroom badge appended
-f7a: merged entry has refreshInterval 1
-f7a: original backed up
-f7a: read-only reports custom statusLine as fixable
+f7aa: legacy hook entries survive when the backup fails
 f7aa: primary settings.json legacy-hook removal backup failure refuses the rewrite
 f7b: doctor-written statusLine has refreshInterval 1
+f7bb: project-level legacy hook entries survive when the backup fails
 f7bb: project-level settings legacy-hook removal backup failure refuses the rewrite
-f7d: .mcp.json checked and healthy
-f7j: --fix re-copies the missing statusline script
-f7j: wired-but-missing script reported fixable
-f7m: 7b also reports the custom copy current, not just check 7
-f7m: a fully-healthy custom install is doctor-clean end to end (7c too)
-f7m: custom-path statusLine trusted (ok, not cried wolf)
-f7m: the shared engine resolver is reported from $CLAUDE_DIR, not the custom dir
-f7n: --fix re-copies the script the tilde wiring points at
-f7n: foreign-home wiring with missing script is a FAIL
-f7n: tilde-spelled canonical wiring with missing script is fixable
-f7o: --fix points the command at the resolved absolute path
-f7o: --fix rewrites away the unexpandable quoted tilde
-f7o: the rewired command actually runs (proves the badge would render, not just that the file exists)
-f7p: a healthy, fully-provisioned custom-path install now reports current, not skip
-f7p: custom-path install with missing deps is a FAIL, not silently skipped
-f7p: custom-path missing deps not skipped
-f7r: --fix rewrites away the tilde even though the script was already present
-f7r: exactly one settings.json backup written
-f7r: it is reported fixable instead, naming why
-f7r: the rewired command actually runs
 f7s: a settings.json backup failure refuses the statusLine.command rewrite
-f7t: the missing canonical token is still surfaced as fixable
+f7s: the command is left untouched when the backup fails
 f7u: settings.local.json legacy-hook removal backup failure refuses the rewrite
+f7u: settings.local.json's legacy hook entries survive when the backup fails
 f7v: fresh statusLine-wire backup failure refuses the rewrite
-f7w: a stale custom-path script is a FAIL (7b), not silently trusted
-f7x: the respelled token is rewritten to an absolute path
-f7y: --fix actually changes the single-quoted command (not a silent no-op)
-f7y: the rewired single-quoted command actually runs
-f7y: the single-quote style is preserved in the rewritten command
-f7z: --fix still re-copies the missing script for an unquoted wiring
-f7z: a genuinely-working unquoted tilde wiring is trusted ok, not misdiagnosed
-f8b: path-style mcp command is FAIL (stale copy)
-fix/toon: comma key quoted in header
-fix/toon: null-looking string stays quoted
-fix/toon: numeric string cell stays quoted
-fix: doctor reports lib deps current
-fix: exit 0
-fix: legacy hooks removed
-fix: one timestamped backup
-fix: second run adds no backup
-fix: stale copies removed
-fix: statusLine written
-fix: statusline lib deps provisioned (issue #2)
-fix: statusline script copied
-health: missing engine must not write last-error
-health: probe notes missing engine
+f7v: no orphan statusline.sh copy is dropped when the backup fails
 portability: DANGI_NO_NOTIFY silences notify-send
 portability: linux env still nudges
 portability: notify-send carries the message
 portability: notify-send cooldown per session
 portability: notify-send invoked without osascript
 portability: notify-send not doubled
-portability: osascript preferred when both exist
 portability: stale lock stolen with GNU-only stat
-proj: --fix cleans project settings
-proj: backup written
-proj: clean project settings reported ok
-proj: entries gone
-proj: legacy hooks detected as fixable
 review: legacy deny cites sibling hcat path
+review: legacy-path hcat counts
+review: piped hcat counts
+rewrite: gate-rewritten cat is attributed
 rewrite: legacy absolute-path hcat rewrite is attributed
-toon: emits a receipt
-toon: header row present
-toon: names the strategy
-toon: no-engine uniform json exit 0
-toon: receipt has token arrow
-toon: special chars json-quoted
-w11: --fix provisions lib/engine-resolve.sh byte-identical to the plugin's
 w11: a foreign headroom in the shim dir is refused, not clobbered
-w11: a missing engine-resolve.sh alone is reported fixable
 w11: a shim that resolves but does not run is a FAIL
-w11: probe nudges when the engine resolves but headroom is off PATH
 w11: run 1 shims the venv CLI and verifies it runs
-w11: the PATH nudge does not flip the badge to broken
-w11: the badge deps are reported without engine-resolve.sh
-w11: the nudge is a well-formed SessionStart line
-w11: the nudge names the v2.8 bare-name MCP spawn
-w11: the shared engine resolver gets its own ok line
-w12: --fix provisions the resolver into $CLAUDE_DIR/lib
-w12: a missing Git Bash override falls back rather than being written through
-w12: the custom copy's badge deps are current without engine-resolve.sh
-w12: the hijack nudge does not flip the badge to broken
-w12: the probe nudges about a project-dir headroom on Windows
-w12: the provisioned resolver is byte-identical to the plugin's
-w12: the quote-bearing value is dropped for the PATH bash fallback
-w12: the resolver is reported against $CLAUDE_DIR instead, and is fixable
-w12: the second run reports the resolver current
 w13: --fix removes the dead own shim and repairs in the same run
-w13: POSIX still gets the inline chain
-w13: a POSIX-spelled accepted override is persisted in Windows form
 w13: a backslash in the override is still accepted (Windows paths need it)
-w13: a backtick value is refused too
 w13: a dead OWN shim is diagnosed as the doctor's own file
 w13: a foreign SYMLINK at the shim path is refused, not repointed
-w13: a newline-bearing value is refused too
 w13: a refused symlink is never reported as shimmed
 w13: and it greens the repaired shim
 w13: and it is left exactly as it was
-w13: and the chain wiring reads as healthy
-w13: the $-bearing value is dropped for the PATH bash fallback
-w13: the chain renders the headroom badge after it
-w13: the chain renders the user's status line
-w13: the chain script runs the badge
-w13: the chain script runs the user's command
-w13: the chain script was written next to the statusline copy
 w13: the foreign symlink still points where it did
-w13: the persisted command keeps the "<bash>" "<win path>" shape
-w13: the probe nudges about a project-dir headroom.com too
 w13: the repaired run no longer reports the does-not-run FAIL
 w13: the repaired shim points at the engine CLI
-w13: the user's own command is still backed up verbatim
 w13: the windows PATH hint names the shim dir actually in use
-w13: the windows merge still reports the merge
 w1: darwin → not windows
 w1: python.exe sibling of headroom on PATH wins
 w1: win_path passthrough without cygpath
 w3: gate denies with a Scripts/ engine
-w5: 4b ok for bare command
 w6: --fix shims and verifies
 w6: FAIL carries the zsh snippet
 w6: shim is a symlink to the venv CLI
 w6: windows hint names the shim dir this run uses
-w7: posix statusLine command unchanged
-w7: re-run sees the wiring as healthy
-w7: windows statusLine command shape
-w7: windows wire reports fixed
-
-# --- timing-flaky on the Windows runner ------------------------------------
-# These assert the badge is ACTIVE (●). The runner is slow enough that the
-# badge's decay window elapses before the assertion, so it reads idle (○).
-# They are a fixture timing assumption, not a Windows product bug, and they do
-# not fail every run — which is exactly why the old COUNT ratchet could not
-# express them.
-review: legacy-path hcat counts
-review: piped hcat counts
-rewrite: gate-rewritten cat is attributed

@@ -3852,10 +3852,14 @@ out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
   DOCTOR_SETTINGS="$S14A" DOCTOR_CLAUDE_DIR="$W14/cd" DOCTOR_VENV_DIR="$NOVENV" \
   DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix 2>&1)
 check "w14a: the wire actually happened" "statusLine wired to" "$out"
+# Assert on the distinctive path TAIL, not the absolute path: MSYS resolves
+# PATH entries to their native spelling, so the doctor's own `command -v bash`
+# returns C:/Users/RUNNER~1/... on a real Windows host where a POSIX host
+# returns /tmp/... . Which bash got chosen is the point; how it is spelled is not.
 check    "w14a: fallback prefers <gitroot>/bin/bash.exe over usr/bin" \
-         "$W14G/bin/bash" "$(jq -r '.statusLine.command' "$S14A")"
+         "/gitroot/bin/bash" "$(jq -r '.statusLine.command' "$S14A")"
 check_absent "w14a: the coreutils-less usr/bin/bash.exe is not wired" \
-         "$W14G/usr/bin/bash" "$(jq -r '.statusLine.command' "$S14A")"
+         "/gitroot/usr/bin/bash" "$(jq -r '.statusLine.command' "$S14A")"
 
 # the sibling-bin promotion must only fire when that bash really exists —
 # a lone usr/bin/bash.exe with no bin/ sibling still has to be usable
@@ -3867,7 +3871,7 @@ env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
   DOCTOR_SETTINGS="$S14B" DOCTOR_CLAUDE_DIR="$W14/cdb" DOCTOR_VENV_DIR="$NOVENV" \
   DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
 check    "w14a: no bin/ sibling → usr/bin/bash.exe still wired" \
-         "$W14H/usr/bin/bash" "$(jq -r '.statusLine.command' "$S14B")"
+         "/gitroot-nobin/usr/bin/bash" "$(jq -r '.statusLine.command' "$S14B")"
 
 # --- w14b (defect 2): check 7 must validate the INTERPRETER, not just the script.
 # The token loop only ever considered tokens ending in headroom-statusline.sh,
@@ -3886,16 +3890,16 @@ out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
       DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" 2>&1)
 check_absent "w14b: a dead interpreter is not reported as wired" "ok      - statusLine wired" "$out"
 check        "w14b: the dead interpreter is named in the finding" \
-             "$W14/nope/does-not-exist/bash.exe" "$out"
+             "/nope/does-not-exist/bash.exe" "$out"
 # and --fix must actually repair it, not just report it
 env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
   PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
   DOCTOR_SETTINGS="$S14C" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
   DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
 check_absent "w14b: --fix removes the dead interpreter" \
-             "$W14/nope/does-not-exist/bash.exe" "$(jq -r '.statusLine.command' "$S14C")"
+             "/nope/does-not-exist/bash.exe" "$(jq -r '.statusLine.command' "$S14C")"
 check        "w14b: --fix rewires to a real bash" \
-             "$W14G/bin/bash" "$(jq -r '.statusLine.command' "$S14C")"
+             "/gitroot/bin/bash" "$(jq -r '.statusLine.command' "$S14C")"
 # a HEALTHY windows wiring must still pass untouched (no false alarm)
 S14D="$W14/sd.json"
 jq -n --arg c "\"$W14G/bin/bash\" \"$W14C/headroom-statusline.sh\"" \
