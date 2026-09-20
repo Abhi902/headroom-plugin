@@ -3813,10 +3813,11 @@ S14A="$W14/sa.json"; printf '{}\n' > "$S14A"
 # no DOCTOR_CYGPATH and no cygpath on PATH → win_path is a passthrough, so the
 # written command carries the raw POSIX path and the assertion can see which
 # bash was chosen. CLAUDE_CODE_GIT_BASH_PATH is unset → the fallback runs.
-env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
+out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
   PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
   DOCTOR_SETTINGS="$S14A" DOCTOR_CLAUDE_DIR="$W14/cd" DOCTOR_VENV_DIR="$NOVENV" \
-  DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
+  DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix 2>&1)
+check "w14a: the wire actually happened" "statusLine wired to" "$out"
 check    "w14a: fallback prefers <gitroot>/bin/bash.exe over usr/bin" \
          "$W14G/bin/bash" "$(jq -r '.statusLine.command' "$S14A")"
 check_absent "w14a: the coreutils-less usr/bin/bash.exe is not wired" \
@@ -3841,8 +3842,10 @@ check    "w14a: no bin/ sibling → usr/bin/bash.exe still wired" \
 W14C="$W14/cdc"; mkdir -p "$W14C"
 printf '#!/bin/sh\nexit 0\n' > "$W14C/headroom-statusline.sh"; chmod +x "$W14C/headroom-statusline.sh"
 S14C="$W14/sc.json"
-printf '{"statusLine":{"type":"command","command":"\\"%s\\" \\"%s\\""}}\n' \
-  "$W14/nope/does-not-exist/bash.exe" "$W14C/headroom-statusline.sh" > "$S14C"
+# jq -n, not printf: a `\"` inside a printf FORMAT string is not portable
+# across bash builds and produced unparseable JSON under Git for Windows' bash.
+jq -n --arg c "\"$W14/nope/does-not-exist/bash.exe\" \"$W14C/headroom-statusline.sh\"" \
+  '{statusLine:{type:"command",command:$c}}' > "$S14C"
 out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
       PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$S14C" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
@@ -3861,8 +3864,8 @@ check        "w14b: --fix rewires to a real bash" \
              "$W14G/bin/bash" "$(jq -r '.statusLine.command' "$S14C")"
 # a HEALTHY windows wiring must still pass untouched (no false alarm)
 S14D="$W14/sd.json"
-printf '{"statusLine":{"type":"command","command":"\\"%s\\" \\"%s\\""}}\n' \
-  "$W14G/bin/bash" "$W14C/headroom-statusline.sh" > "$S14D"
+jq -n --arg c "\"$W14G/bin/bash\" \"$W14C/headroom-statusline.sh\"" \
+  '{statusLine:{type:"command",command:$c}}' > "$S14D"
 out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
       PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$S14D" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
@@ -3870,8 +3873,8 @@ out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
 check "w14b: a live interpreter still reads as wired" "ok      - statusLine wired" "$out"
 # POSIX is unaffected: `bash "<script>"` has no absolute interpreter token
 S14E="$W14/se.json"
-printf '{"statusLine":{"type":"command","command":"bash \\"%s\\""}}\n' \
-  "$W14C/headroom-statusline.sh" > "$S14E"
+jq -n --arg c "bash \"$W14C/headroom-statusline.sh\"" \
+  '{statusLine:{type:"command",command:$c}}' > "$S14E"
 out=$(env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$S14E" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
       DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" 2>&1)

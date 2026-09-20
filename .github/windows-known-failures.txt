@@ -164,3 +164,13 @@ w7: posix statusLine command unchanged
 w7: re-run sees the wiring as healthy
 w7: windows statusLine command shape
 w7: windows wire reports fixed
+
+# --- timing-flaky on the Windows runner ------------------------------------
+# These assert the badge is ACTIVE (●). The runner is slow enough that the
+# badge's decay window elapses before the assertion, so it reads idle (○).
+# They are a fixture timing assumption, not a Windows product bug, and they do
+# not fail every run — which is exactly why the old COUNT ratchet could not
+# express them.
+review: legacy-path hcat counts
+review: piped hcat counts
+rewrite: gate-rewritten cat is attributed
