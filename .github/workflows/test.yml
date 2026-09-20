@@ -40,6 +40,18 @@ jobs:
           else
             echo "uv install skipped (non-fatal)"
           fi
+      - name: stub-jq diagnostic (never fails; evidence only)
+        run: |
+          set +e
+          real=$(command -v jq); echo "jq: $real"; jq --version
+          d=/tmp/diagstub; rm -rf "$d"; mkdir -p "$d"; printf '{}' > "$d/s.json"
+          probe() { echo "  $1 runnable: $("$d/jq" --version 2>&1)"; \
+                    echo "  $1 parses:   $(PATH=\"$d:/usr/bin:/bin\" "$d/jq" -n '[inputs] | length' "$d/s.json" 2>&1)"; }
+          rm -f "$d/jq"; ln -sf "$real" "$d/jq";            echo "symlink:"; probe symlink
+          rm -f "$d/jq"; cp "$real" "$d/jq";                echo "copy:";    probe copy
+          rm -f "$d/jq"; printf '#!/bin/sh\nexec "%s" "$@"\n' "$real" > "$d/jq"; chmod +x "$d/jq"
+          echo "wrapper:"; probe wrapper
+          exit 0
       - name: windows-check (required gate)
         run: VENV_DIR="$(cygpath -u "$VENV_DIR")" bash scripts/ci/windows-check.sh
       - name: MCP spawn probe (shell-less, by name) + negative control

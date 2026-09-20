@@ -27,12 +27,20 @@ BASHBIN=$(command -v bash)
 # failed silently and every JSON check reported invalid: 60 doctor runs on the
 # windows job produced ZERO successful JSON parses, which is most of that job's
 # failures. Fall back to a copy whenever the link does not come out runnable.
-link_tool() {  # link_tool <real binary> <dest> — symlink if that works, else copy
+link_tool() {  # link_tool <real binary> <dest> — make <dest> run <real binary>
+  # `ln -s` is NOT dependable under MSYS: Git for Windows writes a .lnk or a
+  # plain text link file instead of a real symlink, so the result EXISTS (and
+  # doctor's `jq found` check passes) while refusing to execute. A COPY is no
+  # better: /usr/bin/jq.exe is an MSYS binary that loads msys-2.0.dll from its
+  # OWN directory, so a copy parked in a stub dir cannot start either. Both
+  # failure modes are silent — every jq call returns nonzero, so every JSON
+  # check in every doctor fixture reported invalid. Fall back to an exec
+  # wrapper, which leaves the real binary where its DLLs are.
   rm -f "$2" 2>/dev/null
   ln -sf "$1" "$2" 2>/dev/null || true
   if ! "$2" --version >/dev/null 2>&1; then
     rm -f "$2" 2>/dev/null
-    cp "$1" "$2" && chmod +x "$2"
+    printf '#!/bin/sh\nexec "%s" "$@"\n' "$1" > "$2" && chmod +x "$2"
   fi
 }
 
@@ -585,9 +593,7 @@ LINBIN="$TMP/linbin"; mkdir -p "$LINBIN"
 for t in jq tr wc date mkdir rmdir cat dirname basename grep sed tail head; do
   # same MSYS symlink caveat as link_tool, but these coreutils do not all
   # answer --version the same way, so probe with a plain existence+exec test
-  rm -f "$LINBIN/$t" 2>/dev/null
-  ln -s "$(command -v "$t")" "$LINBIN/$t" 2>/dev/null || true
-  [ -x "$LINBIN/$t" ] || { rm -f "$LINBIN/$t" 2>/dev/null; cp "$(command -v "$t")" "$LINBIN/$t" && chmod +x "$LINBIN/$t"; }
+  link_tool "$(command -v "$t")" "$LINBIN/$t"
 done
 cat > "$LINBIN/stat" <<'EOF'
 #!/bin/sh
