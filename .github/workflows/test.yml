@@ -23,7 +23,6 @@ jobs:
       # under Git Bash yet; this is the number of them allowed to fail before
       # the step goes red. LOWER it as fixtures are ported — never raise it
       # without saying why in the PR that raises it.
-      WIN_FAIL_BASELINE: "121"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -90,12 +89,9 @@ jobs:
           $out = $json | & $bash $script
           Write-Host "badge: $out"
           if (-not $out) { throw "status line printed nothing" }
-      - name: full suite (ratcheted against WIN_FAIL_BASELINE)
+      - name: full suite (gated against the known-failure list)
         run: |
           ./test.sh > suite.log 2>&1 || true
-          echo "--- failing fixtures ---"
-          grep -E '^FAIL' suite.log || echo "(none)"
-          echo "--- summary ---"
           summary=$(grep -E '^[0-9]+ passed, [0-9]+ failed$' suite.log | tail -1)
           if [ -z "$summary" ]; then
             echo "::error::the suite printed no summary line — it died before finishing"
@@ -103,12 +99,32 @@ jobs:
             exit 1
           fi
           echo "$summary"
-          fails=${summary#*, }; fails=${fails% failed}
-          if [ "$fails" -gt "$WIN_FAIL_BASELINE" ]; then
-            echo "::error::$fails fixtures failed, above the $WIN_FAIL_BASELINE baseline — fix them, or justify raising the baseline"
+          known=.github/windows-known-failures.txt
+          # the suite's own FAIL lines are "FAIL - <name>"; doctor's nested
+          # output inside a captured fixture is "FAIL    - ..." (say() pads to
+          # 7), so anchoring on the single space keeps the two apart.
+          grep -E '^FAIL - ' suite.log | sed 's/^FAIL - //' | sort -u > observed.txt
+          grep -vE '^[[:space:]]*(#|$)' "$known" | sort -u > known.txt
+          new_fails=$(comm -23 observed.txt known.txt)
+          now_passing=$(comm -13 observed.txt known.txt)
+          if [ -n "$now_passing" ]; then
+            echo "::notice::these fixtures are listed as known-failing but PASSED — delete them from $known:"
+            printf '%s\n' "$now_passing"
+          fi
+          if [ -n "$new_fails" ]; then
+            echo "::error::these fixtures failed on Windows and are NOT in $known — fix them, or add them with a reason:"
+            printf '%s\n' "$new_fails"
+            echo "--- full context for the new failures ---"
+            printf '%s\n' "$new_fails" | while IFS= read -r n; do
+              [ -n "$n" ] || continue
+              grep -F -A4 "FAIL - $n" suite.log || true
+            done
             exit 1
           fi
-          echo "$fails failed, at or below the $WIN_FAIL_BASELINE baseline"
-          if [ "$fails" -lt "$WIN_FAIL_BASELINE" ]; then
-            echo "::notice::only $fails failed — lower WIN_FAIL_BASELINE to $fails to keep the ratchet tight"
-          fi
+          echo "no unlisted Windows failures ($(wc -l < observed.txt) known, $(wc -l < known.txt) listed)"
+      - name: upload the windows suite log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-suite-log
+          path: suite.log

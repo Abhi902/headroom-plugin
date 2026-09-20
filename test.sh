@@ -3787,6 +3787,16 @@ check_eq "w13: the probe still prints exactly one line" "1" "$(printf '%s\n' "$o
 #      Each fixture below FAILED before the fix that follows it.
 # ============================================================================
 W14="$W/w14"; mkdir -p "$W14"
+# These fixtures assert on WHICH bash the doctor picked, not on how the path is
+# spelled. On a POSIX host there is no cygpath and win_path/unix_path are
+# passthroughs; on a genuine Windows host they are real and would rewrite every
+# path into its C:\... spelling, so the same assertion could not hold on both.
+# Pin the translation to identity to take spelling out of the question.
+cat > "$W14/cygpath" <<'W14CYG'
+#!/bin/sh
+shift; printf '%s\n' "$1"
+W14CYG
+chmod +x "$W14/cygpath"
 
 # --- w14a (defect 1): the sl_hr_cmd() fallback must prefer <gitroot>/bin/bash.exe.
 # Git for Windows ships TWO bashes: usr/bin/bash.exe (the MSYS-internal one,
@@ -3806,7 +3816,7 @@ S14A="$W14/sa.json"; printf '{}\n' > "$S14A"
 env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
   PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
   DOCTOR_SETTINGS="$S14A" DOCTOR_CLAUDE_DIR="$W14/cd" DOCTOR_VENV_DIR="$NOVENV" \
-  DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
+  DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
 check    "w14a: fallback prefers <gitroot>/bin/bash.exe over usr/bin" \
          "$W14G/bin/bash" "$(jq -r '.statusLine.command' "$S14A")"
 check_absent "w14a: the coreutils-less usr/bin/bash.exe is not wired" \
@@ -3820,7 +3830,7 @@ S14B="$W14/sb.json"; printf '{}\n' > "$S14B"
 env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
   PATH="$W14H/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
   DOCTOR_SETTINGS="$S14B" DOCTOR_CLAUDE_DIR="$W14/cdb" DOCTOR_VENV_DIR="$NOVENV" \
-  DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
+  DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
 check    "w14a: no bin/ sibling → usr/bin/bash.exe still wired" \
          "$W14H/usr/bin/bash" "$(jq -r '.statusLine.command' "$S14B")"
 
@@ -3836,7 +3846,7 @@ printf '{"statusLine":{"type":"command","command":"\\"%s\\" \\"%s\\""}}\n' \
 out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
       PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$S14C" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
-      DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" 2>&1)
+      DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" 2>&1)
 check_absent "w14b: a dead interpreter is not reported as wired" "ok      - statusLine wired" "$out"
 check        "w14b: the dead interpreter is named in the finding" \
              "$W14/nope/does-not-exist/bash.exe" "$out"
@@ -3844,7 +3854,7 @@ check        "w14b: the dead interpreter is named in the finding" \
 env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
   PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
   DOCTOR_SETTINGS="$S14C" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
-  DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
+  DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
 check_absent "w14b: --fix removes the dead interpreter" \
              "$W14/nope/does-not-exist/bash.exe" "$(jq -r '.statusLine.command' "$S14C")"
 check        "w14b: --fix rewires to a real bash" \
@@ -3856,7 +3866,7 @@ printf '{"statusLine":{"type":"command","command":"\\"%s\\" \\"%s\\""}}\n' \
 out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
       PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$S14D" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
-      DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" 2>&1)
+      DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" 2>&1)
 check "w14b: a live interpreter still reads as wired" "ok      - statusLine wired" "$out"
 # POSIX is unaffected: `bash "<script>"` has no absolute interpreter token
 S14E="$W14/se.json"
@@ -3864,7 +3874,7 @@ printf '{"statusLine":{"type":"command","command":"bash \\"%s\\""}}\n' \
   "$W14C/headroom-statusline.sh" > "$S14E"
 out=$(env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$S14E" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
-      DOCTOR_SHIM_DIR="$W14/shim" "$BASHBIN" "$DOCTOR" 2>&1)
+      DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" 2>&1)
 check "w14b: posix bare-bash wiring still reads as wired" "ok      - statusLine wired" "$out"
 
 # --- w14c (defect 3): --fix bootstrap must not hang on torch.
