@@ -3807,8 +3807,16 @@ chmod +x "$W14/cygpath"
 # usr/bin/bash.exe gives a badge whose dirname/cat/wc/tr are all missing.
 # CI cannot catch this: windows-latest has Git\usr\bin on PATH, masking it.
 W14G="$W14/gitroot"; mkdir -p "$W14G/bin" "$W14G/usr/bin"
-printf '#!/bin/sh\nexit 0\n' > "$W14G/usr/bin/bash"; chmod +x "$W14G/usr/bin/bash"
-printf '#!/bin/sh\nexit 0\n' > "$W14G/bin/bash";     chmod +x "$W14G/bin/bash"
+# These stand in for Git for Windows' two bashes. They must be REAL working
+# bashes, not inert stubs: the fixture puts their directory first on PATH so
+# the doctor's own `command -v bash` finds them, and anything else on that PATH
+# that shebangs to `#!/usr/bin/env bash` (the stub jq does) would otherwise be
+# hijacked by an inert stub — which silently turned every JSON check in the
+# doctor into a failure. What is under test is WHICH path gets picked, not that
+# the binary is fake.
+fake_bash() { printf '#!/bin/sh\nexec %s "$@"\n' "$BASHBIN" > "$1"; chmod +x "$1"; }
+fake_bash "$W14G/usr/bin/bash"
+fake_bash "$W14G/bin/bash"
 S14A="$W14/sa.json"; printf '{}\n' > "$S14A"
 # no DOCTOR_CYGPATH and no cygpath on PATH → win_path is a passthrough, so the
 # written command carries the raw POSIX path and the assertion can see which
@@ -3826,7 +3834,7 @@ check_absent "w14a: the coreutils-less usr/bin/bash.exe is not wired" \
 # the sibling-bin promotion must only fire when that bash really exists —
 # a lone usr/bin/bash.exe with no bin/ sibling still has to be usable
 W14H="$W14/gitroot-nobin"; mkdir -p "$W14H/usr/bin"
-printf '#!/bin/sh\nexit 0\n' > "$W14H/usr/bin/bash"; chmod +x "$W14H/usr/bin/bash"
+fake_bash "$W14H/usr/bin/bash"
 S14B="$W14/sb.json"; printf '{}\n' > "$S14B"
 env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
   PATH="$W14H/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
