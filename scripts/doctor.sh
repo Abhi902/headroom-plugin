@@ -484,28 +484,35 @@ path_hint() {  # the one line the user must run/do to put SHIM_DIR on PATH
 cli_healed=0; cli_retry=1
 while [ "$cli_retry" -eq 1 ]; do
   cli_retry=0
-# NOTE — there was a native-PATH probe here (cmd.exe /c where, MSYS dirs pruned)
-# and it has been REMOVED, deliberately, not lost in a refactor.
-#
-# It returned a FALSE NEGATIVE on real Windows. In the e45dfb0 CI run it reported
-# "a NATIVE process could not find `headroom`" about $SHIM_DIR — a directory that
-# the SAME run proved holds a real PE headroom.exe, and which was FIRST on the
-# doctor's PATH. Shipped, that means every correctly installed Windows user gets
-# a standing "add this to your user Path" instruction for a directory that
-# already works. An advisory that never clears is one people learn to ignore,
-# including the times it is right, so this is worse than the honestly-caveated
-# message it replaced.
-#
-# The mechanism is NOT yet known, and the two live candidates are
-# indistinguishable by symptom: (a) MSYS_NO_PATHCONV=1 also suppressing MSYS's
-# conversion of the PATH env var, so cmd receives a colon-separated POSIX PATH;
-# (b) the PATH prune leaving System32 unresolvable, so `where` itself never runs
-# and cmd's nonzero exit reads as "not found". The windows job now prints a
-# diagnostic that separates them.
-#
-# Doing this properly means reading the PERSISTED user Path (HKCU\Environment),
-# which is the only thing that actually answers "will Claude Code's MCP spawn
-# resolve this name". Until then the check says what it can honestly verify.
+native_sees_headroom() {  # can a NATIVE process resolve the bare name? CONFIDENCE ONLY.
+  # Read this before changing it: a NEGATIVE result from this function is NOT
+  # authoritative and must never assert a problem. It is used only to STRENGTHEN
+  # the wording when it succeeds.
+  #
+  # Why: the earlier version gated check 2b and emitted a `fixable` when it said
+  # no — and in the e45dfb0 CI run it said no about $SHIM_DIR, a directory the
+  # SAME run proved holds a real PE headroom.exe and which was FIRST on the
+  # doctor's PATH. Shipped, that hands every correctly installed Windows user a
+  # standing "add this to your Path" for a directory that already works, and an
+  # advisory that never clears is one people learn to ignore — including when it
+  # is right.
+  #
+  # The mechanism is STILL UNKNOWN, with two candidates indistinguishable by
+  # symptom: MSYS_NO_PATHCONV=1 possibly suppressing PATH env-var conversion too,
+  # or the prune leaving System32 unresolvable so `where` itself never runs. The
+  # windows job prints a diagnostic that separates them. Until that is answered,
+  # this shape is the one that cannot hurt: a broken probe costs the stronger
+  # sentence and nothing else, and its silence is itself the signal that the
+  # mechanism is still broken. The authoritative version reads the PERSISTED
+  # user Path (HKCU\Environment); that is the real fix.
+  is_windows || return 1          # POSIX: nothing to add, the Bash PATH IS the spawn PATH
+  local w p
+  w=$(command -v cmd.exe 2>/dev/null) || w=""
+  [ -n "$w" ] && [ -x "$w" ] || return 1
+  p=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vE '^/(usr|bin|mingw32|mingw64|opt)(/|$)' | paste -sd: -)
+  PATH="$p" run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
+    env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$w" /c "where headroom" >/dev/null 2>&1
+}
 if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
   # Name resolution alone is not "verified": the shim branch below has always
   # re-checked by EXECUTION, and this branch must hold the same bar — a
@@ -521,7 +528,11 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
     # conversion guards it needs may themselves perturb that translation. So say
     # what each namespace answered and let the user judge; `fixable` keeps the
     # exit status clean (only FAIL moves it) while still surfacing the mismatch.
-    say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
+    if native_sees_headroom; then
+      say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified NATIVELY: a shell-less process resolves it)"
+    else
+      say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
+    fi
   elif [ "$FIX" -eq 1 ] && [ "$cli_healed" -eq 0 ] && is_own_shim "$cli_now" \
        && rm -f "$cli_now" 2>/dev/null; then
     # The dead file is the doctor's OWN shim from an earlier run. Reporting it

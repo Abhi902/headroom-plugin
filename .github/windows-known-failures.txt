@@ -90,3 +90,27 @@ hcat: header cites source path
 # PATH, so a dir on that PATH should be found and the CI log shows it was not.
 # The fixture was correct and the product was wrong. The advisory has been
 # removed rather than listed; see the removal note in doctor.sh check 2b.)
+
+# --- [UNPORTED] surfaced when real_python() let these two blocks run on Windows
+# for the first time (they had been pinned to a POSIX `python3` that Git Bash
+# does not have, so they skipped SILENTLY on every Windows run and never reached
+# this list). They fail with EMPTY output, not wrong output — the fixtures drive
+# hcat through a stub interpreter and a fake `headroom` package injected on
+# PYTHONPATH, and that harness does not work under Git Bash. The failure is in
+# the scaffolding, not in hcat: the same code paths pass on macOS and Linux, and
+# the Windows-side behaviour they stand for is covered directly by
+# windows-check.sh (real engine, real venv, stats.jsonl asserted).
+#
+# Porting them means making the stub-interpreter + PYTHONPATH harness work under
+# Git Bash. Worth doing — it is 10 of the 50 — but it is fixture work on a
+# platform that needs a real host to iterate on, not a blind edit.
+fix/ptoon: comma key quoted
+fix/ptoon: null-looking string quoted
+fix/ptoon: numeric string quoted
+fix/ptoon: python <5% engine path exit 0
+fix/ptoon: python tier used (lossless, not engine-absent)
+fix/ptoon: stats event strategy toon-lite
+w12: hcat engine tier exit 0 after the fcntl refactor
+w12: the engine tier still prints its receipt
+w12: the event carries the token counts
+w12: the stats event still lands via the POSIX flock path
