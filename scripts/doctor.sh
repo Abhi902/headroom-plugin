@@ -491,10 +491,21 @@ native_sees_headroom() {  # can a NATIVE Windows process resolve the bare name?
   # told users "the bundled MCP will spawn it" and then left them with
   # "Connection closed" forever. Ask the way the client will.
   is_windows || return 0          # POSIX: the Bash PATH *is* the spawn PATH
-  local w
+  local w p
   w=$(command -v cmd.exe 2>/dev/null) || w=""
   [ -n "$w" ] && [ -x "$w" ] || return 0   # cannot ask → do not invent a failure
-  run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" "$w" /c "where headroom" >/dev/null 2>&1
+  # A native CHILD of Git Bash inherits GIT BASH's PATH -- MSYS translates it on
+  # the way out -- so `where` would cheerfully find a headroom carried only by
+  # /usr/bin or /mingw64/bin, the very dirs this check exists to rule out. Prune
+  # them first or the answer is just the POSIX one wearing a native hat. (The
+  # status-line CI step prunes the same way, for the same reason.)
+  p=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vE '^/(usr|bin|mingw32|mingw64|opt)(/|$)' | paste -sd: -)
+  # MSYS_NO_PATHCONV / MSYS2_ARG_CONV_EXCL: without them Git Bash rewrites any
+  # argument starting with a single slash into a Windows path, so a bare `/c`
+  # reaches cmd.exe as `C:\` and the switch is lost entirely -- the probe would
+  # answer a question nobody asked. Same `env VAR=... cmd` idiom as shim_runs.
+  PATH="$p" run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
+    env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$w" /c "where headroom" >/dev/null 2>&1
 }
 if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ] && native_sees_headroom; then
   # Name resolution alone is not "verified": the shim branch below has always
@@ -532,7 +543,13 @@ elif cli_res=$(resolve_headroom_cli); then
       say FAIL "could not shim $cli_res into $SHIM_DIR"
     else
       hash -r 2>/dev/null
-      if ! command -v headroom >/dev/null 2>&1; then
+      # ...and ask the NATIVE question here too. Gating only the branch above
+      # left a hole the size of the whole fix: when native_sees_headroom
+      # correctly said no, control fell through to here, `command -v` found the
+      # MSYS-only copy again (PATH never changed), the "not on PATH" FAIL was
+      # skipped, and doctor printed `fixed - ... (resolves on PATH)` and exited
+      # 0 -- the same false green, one branch further down.
+      if ! command -v headroom >/dev/null 2>&1 || ! native_sees_headroom; then
         say FAIL "headroom shimmed to $shim but $SHIM_DIR is not on PATH — $(path_hint)"
       elif ! shim_runs "$shim"; then
         # Remove the dead file we just wrote. Leaving it behind is worse than

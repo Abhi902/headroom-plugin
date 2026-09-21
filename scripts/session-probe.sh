@@ -103,7 +103,10 @@ done
 # Nothing else announces it: the badge's "idle" is indistinguishable from "you
 # haven't compressed anything yet", and /doctor only runs when the user already
 # suspects something. A hook's PATH is the closest proxy available for the MCP
-# spawn environment, so this check is more trustworthy than doctor's own.
+# spawn environment, but it is a NUDGE-level proxy, not an authority: it is the
+# POSIX answer, and a native process sees a different PATH. doctor.sh check 2b
+# re-asks natively (cmd.exe /c where, MSYS dirs pruned) and is the one to
+# believe when the two disagree.
 engine_off_path() {
   command -v headroom >/dev/null 2>&1 && return 0
   add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /doctor --fix to shim it"

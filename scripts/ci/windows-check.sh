@@ -106,7 +106,12 @@ fi
 # `grep -q " fixed "` could never match anything and the old shim grep also matched
 # 2b's FAIL text (review C2).
 SB="$TMPD/home"; mkdir -p "$SB/.claude" "$SB/.local/bin"
-SB_PATH="$SB/.local/bin:$(dirname "$(command -v jq)"):/usr/bin:/bin:/mingw64/bin"
+# System32 is here so check 2b's NATIVE probe (cmd.exe /c where) can actually
+# run: without it `command -v cmd.exe` misses, the probe takes its "cannot ask"
+# early return, and the whole native-visibility fix has zero coverage on every
+# host -- exactly how the wrapper-bash bug hid. headroom is not in System32, so
+# the sandbox's isolation is unchanged.
+SB_PATH="$SB/.local/bin:$(dirname "$(command -v jq)"):/usr/bin:/bin:/mingw64/bin:/c/Windows/System32"
 doctor_sb() {  # one sandboxed `doctor.sh --fix` run; prints its output, returns its rc
   env -u HCAT_PYTHON HOME="$SB" PATH="$SB_PATH" DOCTOR_SETTINGS="$SB/.claude/settings.json" \
       DOCTOR_CLAUDE_DIR="$SB/.claude" DOCTOR_VENV_DIR="$VENV_DIR" DOCTOR_SHIM_DIR="$SB/.local/bin" \
