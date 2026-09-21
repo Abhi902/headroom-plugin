@@ -19,10 +19,11 @@ jobs:
     defaults: { run: { shell: bash } }
     env:
       VENV_DIR: ${{ github.workspace }}/.headroom-venv
-      # Observed on the last green run: 677 passed + 49 failed = 726 executed.
-      # Set just under it so ordinary fixture churn does not red the gate while a
-      # real coverage collapse still does.
-      MIN_FIXTURES: "720"
+      # 774 executed on the first run where the engine probe actually worked
+      # (721 passed + 53 failed); it was 726 while the probe was POSIX-only, so a
+      # regression of that fix lands at ~726 and must be caught. 760 sits above
+      # that and leaves room for ordinary churn. RAISE as coverage grows.
+      MIN_FIXTURES: "760"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking
@@ -258,11 +259,22 @@ jobs:
           # skipping. A nonzero skip count here IS the #5 regression -- the probe
           # failing to see a Windows venv -- and unlike a fixture count it cannot
           # drift as fixtures are added or retired.
-          skipped=$(echo "$summary" | sed -nE 's/.*, ([0-9]+) skipped.*/\1/p')
-          if [ -n "$skipped" ] && [ "$skipped" -gt 0 ]; then
-            echo "::error::$skipped fixture group(s) SKIPPED on a host with a real engine installed — the engine probe is not seeing this venv:"
-            grep -E '^skip - ' suite.log | sort -u || true
+          # Key on the ENGINE-gated skips specifically, not on any skip at all.
+          # The first cut errored on a nonzero total and was wrong: this runner
+          # legitimately skips 4 groups for environment reasons (no de_DE locale,
+          # no `python3` on the Git Bash PATH, no shellcheck) that have nothing to
+          # do with the engine probe. What must never happen is a fixture
+          # skipping because the probe cannot see the venv this job just built.
+          eng_skips=$( { grep -cE '^skip - .*headroom venv not found' suite.log || true; } | tail -1 )
+          if [ "${eng_skips:-0}" -gt 0 ]; then
+            echo "::error::$eng_skips engine-gated fixture group(s) skipped on a host with a real engine installed — the probe is not seeing this venv:"
+            grep -E '^skip - .*headroom venv not found' suite.log | sort -u || true
             exit 1
+          fi
+          # the rest are visibility, not failure
+          if grep -qE '^skip - ' suite.log; then
+            echo "::notice::environment skips on this runner (not engine-related):"
+            grep -E '^skip - ' suite.log | sort -u
           fi
           new_fails=$(comm -23 observed.txt known.txt)
           now_passing=$(comm -13 observed.txt known.txt)
