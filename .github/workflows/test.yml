@@ -59,6 +59,13 @@ jobs:
       - name: windows-check (required gate)
         run: VENV_DIR="$(cygpath -u "$VENV_DIR")" bash scripts/ci/windows-check.sh
       - name: MCP spawn probe (shell-less, by name) + negative control
+        # Run even when an earlier step failed. Every NATIVE-namespace assertion in
+        # this job sits after windows-check, which is POSIX; with no `if:`, one
+        # failed POSIX assertion silently took 100% of the native coverage with
+        # it -- the stats.jsonl filename bug skipped all four of these, and the
+        # job just read "windows red, one assertion failed". The job still goes
+        # red; what changes is that the native evidence actually reports.
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $env:PATH = "$env:VENV_DIR\Scripts;" + $env:PATH
@@ -83,6 +90,13 @@ jobs:
           Write-Host "negative control ok (exit $LASTEXITCODE)"
           exit 0
       - name: MCP spawn probe through the DOCTOR's own shim
+        # Run even when an earlier step failed. Every NATIVE-namespace assertion in
+        # this job sits after windows-check, which is POSIX; with no `if:`, one
+        # failed POSIX assertion silently took 100% of the native coverage with
+        # it -- the stats.jsonl filename bug skipped all four of these, and the
+        # job just read "windows red, one assertion failed". The job still goes
+        # red; what changes is that the native evidence actually reports.
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           # The probe above prepends the venv Scripts dir, so it exercises pip's
@@ -102,8 +116,21 @@ jobs:
           node scripts/ci/spawn-probe.mjs headroom mcp serve
           if ($LASTEXITCODE -ne 0) { throw "the doctor's own shim failed to spawn/handshake ($LASTEXITCODE)" }
       - name: status line runs from PowerShell with the command doctor wrote
+        # Run even when an earlier step failed. Every NATIVE-namespace assertion in
+        # this job sits after windows-check, which is POSIX; with no `if:`, one
+        # failed POSIX assertion silently took 100% of the native coverage with
+        # it -- the stats.jsonl filename bug skipped all four of these, and the
+        # job just read "windows red, one assertion failed". The job still goes
+        # red; what changes is that the native evidence actually reports.
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
+          # Now that this step runs even after a windows-check failure, say
+          # plainly when the handoff file never got written, instead of dying in
+          # Get-Content and reading like a second unrelated break.
+          if (-not (Test-Path -LiteralPath ./statusline.cmd)) {
+            throw "statusline.cmd was never written — windows-check did not reach its statusLine assertions; fix that failure first"
+          }
           $cmd = Get-Content ./statusline.cmd
           Write-Host "command: $cmd"
           $m = [regex]::Matches($cmd, '"([^"]+)"')
@@ -146,6 +173,13 @@ jobs:
           }
           $env:PATH = $orig
       - name: full suite (gated against the known-failure list)
+        # Run even when an earlier step failed. Every NATIVE-namespace assertion in
+        # this job sits after windows-check, which is POSIX; with no `if:`, one
+        # failed POSIX assertion silently took 100% of the native coverage with
+        # it -- the stats.jsonl filename bug skipped all four of these, and the
+        # job just read "windows red, one assertion failed". The job still goes
+        # red; what changes is that the native evidence actually reports.
+        if: ${{ !cancelled() }}
         run: |
           # Point the suite's engine probe at the venv this job built. Without it
           # the probe finds nothing on Windows and every real-engine fixture
