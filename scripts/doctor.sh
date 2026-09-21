@@ -249,6 +249,19 @@ fi
 shim_target() {  # the shim file this platform writes (a copy named headroom.exe on Windows)
   if is_windows; then printf '%s' "$SHIM_DIR/headroom.exe"; else printf '%s' "$SHIM_DIR/headroom"; fi
 }
+is_own_shim() {  # is_own_shim <path> — is this the file THIS run would have written?
+  # Compare with the .exe suffix normalized OFF both sides. shim_target() is
+  # "$SHIM_DIR/headroom.exe" on Windows, but `command -v headroom` inside Git
+  # Bash yields the suffix-less spelling (engine-resolve.sh appends .exe AFTER
+  # its lookup, for exactly this reason). A raw string compare therefore never
+  # matched on Windows, so the dead-own-shim self-repair and its "this is your
+  # own shim" hint were both unreachable there — the misdiagnosis loop that
+  # cli_healed/cli_retry exist to kill, still live on the one platform that
+  # writes the shim as a copy.
+  local a b
+  a=${1%.exe}; b=$(shim_target); b=${b%.exe}
+  [ "$a" = "$b" ]
+}
 shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the shim path
   # rc 2 = a FOREIGN file already occupies the target. $SHIM_DIR (~/.local/bin by
   # default) is not doctor-owned territory: pipx, `uv tool install` and `pip
@@ -471,7 +484,19 @@ path_hint() {  # the one line the user must run/do to put SHIM_DIR on PATH
 cli_healed=0; cli_retry=1
 while [ "$cli_retry" -eq 1 ]; do
   cli_retry=0
-if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
+native_sees_headroom() {  # can a NATIVE Windows process resolve the bare name?
+  # `command -v` answers for GIT BASH's PATH, which carries MSYS-only dirs
+  # (/usr/bin -> C:\Program Files\Git\usr\bin, /mingw64/bin) that are NOT on the
+  # Windows PATH the MCP client spawns with. Greening on the Bash answer alone
+  # told users "the bundled MCP will spawn it" and then left them with
+  # "Connection closed" forever. Ask the way the client will.
+  is_windows || return 0          # POSIX: the Bash PATH *is* the spawn PATH
+  local w
+  w=$(command -v cmd.exe 2>/dev/null) || w=""
+  [ -n "$w" ] && [ -x "$w" ] || return 0   # cannot ask → do not invent a failure
+  run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" "$w" /c "where headroom" >/dev/null 2>&1
+}
+if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ] && native_sees_headroom; then
   # Name resolution alone is not "verified": the shim branch below has always
   # re-checked by EXECUTION, and this branch must hold the same bar — a
   # `headroom` on PATH that resolves and then dies (a relocated uv trampoline,
@@ -480,7 +505,7 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
   # dead shim.
   if shim_runs "$cli_now"; then
     say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
-  elif [ "$FIX" -eq 1 ] && [ "$cli_healed" -eq 0 ] && [ "$cli_now" = "$(shim_target)" ] \
+  elif [ "$FIX" -eq 1 ] && [ "$cli_healed" -eq 0 ] && is_own_shim "$cli_now" \
        && rm -f "$cli_now" 2>/dev/null; then
     # The dead file is the doctor's OWN shim from an earlier run. Reporting it
     # as "reinstall the engine" misdiagnoses an engine that check 2 just found
@@ -492,7 +517,7 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
     continue
   else
     cli_own=""
-    [ "$cli_now" = "$(shim_target)" ] \
+    is_own_shim "$cli_now" \
       && cli_own=" — this file is the doctor's own shim from an earlier run: delete it and re-run /doctor --fix to rewrite it"
     say FAIL "headroom on PATH at $cli_now does not run (\`$cli_now --help\` failed) — the bundled MCP spawns \`headroom\` by name and will fail to connect; reinstall the engine: $(reinstall_hint)$cli_own"
   fi

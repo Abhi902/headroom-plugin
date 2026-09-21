@@ -36,15 +36,31 @@ link_tool() {  # link_tool <real binary> <dest> — make <dest> run <real binary
   # failure modes are silent — every jq call returns nonzero, so every JSON
   # check in every doctor fixture reported invalid. Fall back to an exec
   # wrapper, which leaves the real binary where its DLLs are.
+  # An absent source is the quiet killer: `link_tool "$(command -v foo)" ...`
+  # with foo missing from the host writes `exec "" "$@"`, which EXISTS and fails
+  # every call -- the same invalid-everything outcome the wrapper exists to
+  # prevent, across all 8 call sites at once. Refuse loudly instead.
+  if [ -z "${1:-}" ] || [ ! -x "$1" ]; then
+    echo "FAIL - link_tool: no runnable source for $(basename "${2:-?}") (got '${1:-}')"
+    FAIL=$((FAIL+1)); return 1
+  fi
   rm -f "$2" 2>/dev/null
   ln -sf "$1" "$2" 2>/dev/null || true
   if ! "$2" --version >/dev/null 2>&1; then
     rm -f "$2" 2>/dev/null
     printf '#!/bin/sh\nexec "%s" "$@"\n' "$1" > "$2" && chmod +x "$2"
   fi
+  # ...and verify what we just staged actually RUNS. 126/127 are the only codes
+  # that mean "cannot execute"/"not found"; a tool with no --version answers 1
+  # or 2, so this cannot false-alarm on the coreutils that lack the flag.
+  "$2" --version >/dev/null 2>&1
+  case $? in
+    126|127) echo "FAIL - link_tool: staged $2 does not run (exit $?)"; FAIL=$((FAIL+1)); return 1 ;;
+  esac
+  return 0
 }
 
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 
 check() {  # check <name> <expected-substring> <actual>
   if printf '%s' "$3" | grep -qF -- "$2"; then
@@ -68,6 +84,13 @@ check_absent() {  # check_absent <name> <forbidden-substring> <actual>
   fi
 }
 
+skip_note() {  # skip_note <reason> — a COUNTED skip
+  # An uncounted `skip_note "..."` is invisible to the Windows gate, which
+  # builds its whole view of reality from FAIL lines: a fixture that stops
+  # running emits neither "ok -" nor "FAIL -", so it reads as fixed (if it was
+  # on the known-failure list) or vanishes silently (if it was not).
+  skip_note "$1"; SKIP=$((SKIP+1))
+}
 check_eq() {  # check_eq <name> <expected> <actual> — exact match (exit codes, counts)
   if [ "$2" = "$3" ]; then
     echo "ok - $1"; PASS=$((PASS+1))
@@ -375,9 +398,28 @@ check "mascot: asleep when clear" "😴 dangi" "$out"
 # --- 22-25. hcat (compress-at-the-source shim)
 HCAT="$ROOT/bin/hcat"
 HEADROOM_PY=""
-for cand in "${HCAT_PYTHON:-}" "$(command -v headroom 2>/dev/null | xargs -I{} dirname {} 2>/dev/null)/python" "$HOME/.headroom-venv/bin/python"; do
-  [ -n "$cand" ] && [ -x "$cand" ] && HEADROOM_PY="$cand" && break
-done
+# Ask the PRODUCT's resolver first. This probe used to know only three POSIX
+# candidates -- $HCAT_PYTHON, the `python` sibling of `headroom` on PATH, and
+# $HOME/.headroom-venv/bin/python -- with no python.exe and no Scripts/ layout.
+# On Windows that meant all 7 HEADROOM_PY-gated blocks below fell into their
+# "headroom venv not found" skip branch ON THE ONE HOST THAT HAS A REAL ENGINE
+# INSTALLED, while the gate still reported "no unlisted Windows failures": the
+# Windows job installed an engine and then never exercised it through the suite.
+# Sourced in a SUBSHELL on purpose -- the lib defines is_windows/win_path/etc.
+# and must not land in this script's namespace next to the test helpers.
+# HEADROOM_TEST_VENV lets CI point the probe at the venv it just built without
+# setting DOCTOR_VENV_DIR, which individual fixtures own and override per run.
+if [ -f "$ROOT/scripts/lib/engine-resolve.sh" ]; then
+  HEADROOM_PY=$(DOCTOR_VENV_DIR="${HEADROOM_TEST_VENV:-${DOCTOR_VENV_DIR:-$HOME/.headroom-venv}}" \
+    bash -c ". '$ROOT/scripts/lib/engine-resolve.sh'; resolve_engine_python" 2>/dev/null) || HEADROOM_PY=""
+  [ -n "$HEADROOM_PY" ] && [ -x "$HEADROOM_PY" ] || HEADROOM_PY=""
+fi
+# legacy fallback: a partial/flat checkout with no lib beside it
+if [ -z "$HEADROOM_PY" ]; then
+  for cand in "${HCAT_PYTHON:-}" "$(command -v headroom 2>/dev/null | xargs -I{} dirname {} 2>/dev/null)/python" "$HOME/.headroom-venv/bin/python"; do
+    [ -n "$cand" ] && [ -x "$cand" ] && HEADROOM_PY="$cand" && break
+  done
+fi
 
 # 22. arg validation runs before python resolution — testable everywhere
 out=$(bash "$HCAT" 2>&1); rc=$?
@@ -417,7 +459,7 @@ PYEOF
   out=$(HEADROOM_WORKSPACE_DIR="$TMP/hc_ws" bash "$HCAT" "$TMP/hc_prose.txt")
   check "hcat: passthrough keeps raw" "short prose line" "$out"
 else
-  echo "skip - hcat compression tests (headroom venv not found)"
+  skip_note "hcat compression tests (headroom venv not found)"
 fi
 
 # --- 26-28. hcat-gate (PreToolUse Read gate)
@@ -479,7 +521,7 @@ if [ -n "$HEADROOM_PY" ]; then
   out=$(bash_gate_input "cat \"$TMP/hc_big.json\"" gate-b3 | bash "$GATE")
   check "gate/bash: quoted path still rewritten" '"updatedInput"' "$out"
 else
-  echo "skip - gate deny tests (headroom venv not found)"
+  skip_note "gate deny tests (headroom venv not found)"
 fi
 
 # --- 30. badge counts hcat receipts from the transcript
@@ -580,7 +622,7 @@ if [ -n "$HEADROOM_PY" ]; then
   check_absent "gate deny: no .claude/hcat" ".claude/hcat" "$out"
   check_absent "gate deny: no ~/.claude" "~/.claude" "$out"
 else
-  echo "skip - plugin-native gate deny tests (headroom venv not found)"
+  skip_note "plugin-native gate deny tests (headroom venv not found)"
 fi
 
 # --- 32. portability (v2.5 WS3): linux notify-send fallback, hcat SIGPIPE, GNU-stat env
@@ -669,7 +711,7 @@ PYEOF
   check_absent "portability: no traceback when piped to head" "Traceback" "$err"
   check "portability: receipt header survives the pipe" "── hcat:" "$(cat "$TMP/hc_pipe.out")"
 else
-  echo "skip - hcat SIGPIPE test (headroom venv not found)"
+  skip_note "hcat SIGPIPE test (headroom venv not found)"
 fi
 
 # --- 33. doctor + engine bootstrap + bundled MCP definition (v2.5 WS2)
@@ -761,7 +803,7 @@ if [ -n "$HEADROOM_PY" ]; then
   check_absent "doctor: healthy has no fixable" "fixable" "$out"
   check_eq "doctor: healthy exit 0" "0" "$rc"
 else
-  echo "skip - doctor healthy-run tests (headroom venv not found)"
+  skip_note "doctor healthy-run tests (headroom venv not found)"
 fi
 
 # 32b. engine missing → fixable (not FAIL), smoke skipped, exit stays 0
@@ -1184,7 +1226,7 @@ if locale -a 2>/dev/null | grep -qix 'de_DE.UTF-8'; then
   check "review: de_DE totals keep period decimal" "0.002500" "$tot"
   check_absent "review: de_DE totals carry no comma" "," "$tot"
 else
-  echo "skip - de_DE.UTF-8 locale tests (locale not installed)"
+  skip_note "de_DE.UTF-8 locale tests (locale not installed)"
 fi
 
 # --- 35. review fixes: doctor + resolution (v2.5 F2)
@@ -1559,7 +1601,7 @@ if [ -n "$HEADROOM_PY" ]; then
     echo "FAIL - f7l: last-error preserved (badge stays broken until a clean run)"; FAIL=$((FAIL+1))
   fi
 else
-  echo "skip - f7l block-9 keep test (headroom venv not found)"
+  skip_note "f7l block-9 keep test (headroom venv not found)"
 fi
 
 # F7m: a headroom-statusline.sh wired at a NON-canonical (hand-edited) path is the
@@ -1779,7 +1821,7 @@ if [ "$(id -u)" -ne 0 ]; then
            'bash "~/.claude/headroom-statusline.sh"' \
            "$(jq -r '.statusLine.command' "$F7S/settingsdir/settings.json")"
 else
-  echo "skip - f7s: settings.json backup-failure guard (running as root, permission bits bypassed)"
+  skip_note "f7s: settings.json backup-failure guard (running as root, permission bits bypassed)"
 fi
 
 # F7t: a present token from one candidate must not mask a co-occurring
@@ -1818,7 +1860,7 @@ if [ "$(id -u)" -ne 0 ]; then
   check "f7u: settings.local.json's legacy hook entries survive when the backup fails" \
         "dangi-hook.sh" "$(cat "$F7U/settingsdir/settings.local.json")"
 else
-  echo "skip - f7u: settings.local.json backup-failure guard (running as root, permission bits bypassed)"
+  skip_note "f7u: settings.local.json backup-failure guard (running as root, permission bits bypassed)"
 fi
 
 # F7v: wiring statusLine for the first time (no prior statusLine key at all)
@@ -1841,7 +1883,7 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "FAIL - f7v: no orphan statusline.sh copy is dropped when the backup fails"; FAIL=$((FAIL+1))
   fi
 else
-  echo "skip - f7v: fresh-wire backup-failure guard (running as root, permission bits bypassed)"
+  skip_note "f7v: fresh-wire backup-failure guard (running as root, permission bits bypassed)"
 fi
 
 # F7w: a custom-path install whose SCRIPT itself (not just its lib deps) is
@@ -1953,7 +1995,7 @@ if [ "$(id -u)" -ne 0 ]; then
   check "f7aa: legacy hook entries survive when the backup fails" \
         "dangi-hook.sh" "$(cat "$F7AA/settingsdir/settings.json")"
 else
-  echo "skip - f7aa: primary settings.json backup-failure guard (running as root, permission bits bypassed)"
+  skip_note "f7aa: primary settings.json backup-failure guard (running as root, permission bits bypassed)"
 fi
 
 # F7bb: the project-level settings scan's own backup (a THIRD, independent
@@ -1974,7 +2016,7 @@ if [ "$(id -u)" -ne 0 ]; then
   check "f7bb: project-level legacy hook entries survive when the backup fails" \
         "dangi-hook.sh" "$(cat "$F7BB/proj/.claude/settings.json")"
 else
-  echo "skip - f7bb: project-level settings backup-failure guard (running as root, permission bits bypassed)"
+  skip_note "f7bb: project-level settings backup-failure guard (running as root, permission bits bypassed)"
 fi
 
 # F8: execution semantics — Claude Code spawns an MCP stdio command DIRECTLY
@@ -2197,7 +2239,7 @@ if [ -n "$HEADROOM_PY" ]; then
     echo "ok - health: doctor clean run removes last-error"; PASS=$((PASS+1))
   fi
 else
-  echo "skip - health engine-clear tests (headroom venv not found)"
+  skip_note "health engine-clear tests (headroom venv not found)"
 fi
 printf '%s engine stale3\n' "$(date +%s)" > "$HEADROOM_STATE_DIR/last-error"
 out=$(HCAT_PYTHON=/nonexistent/python DOCTOR_SETTINGS="$S2" DOCTOR_CLAUDE_DIR="$CD2" \
@@ -2681,7 +2723,7 @@ PYSHIM
   check 'fix/ptoon: null-looking string quoted' '"null"' "$out"
   check "fix/ptoon: stats event strategy toon-lite" '"strategy":"toon-lite"' "$(cat "$TMP"/hshim-ws/*.jsonl 2>/dev/null)"
 else
-  echo "skip - python-tier TOON-lite test (no python3)"
+  skip_note "python-tier TOON-lite test (no python3)"
 fi
 
 # lib-missing degrade: hooks source a flat sibling; with NO lib present they
@@ -3392,7 +3434,7 @@ W12SHIM
   check    "w12: the event carries the token counts" '"input_tokens":1000' \
            "$(cat "$W/w12-ws/stats.jsonl" 2>/dev/null)"
 else
-  echo "skip - w12: hcat stats-event test (no python3)"
+  skip_note "w12: hcat stats-event test (no python3)"
 fi
 
 
@@ -3560,6 +3602,21 @@ if [ -f "$W13R/shim/headroom" ]; then
 else
   echo "FAIL - w13: a read-only run never deletes it"; FAIL=$((FAIL+1))
 fi
+# ...and the same diagnosis must survive the WINDOWS spelling. shim_target() is
+# headroom.exe there, while `command -v headroom` inside Git Bash returns the
+# suffix-less name, so the old raw string compare never matched and this branch
+# was dead on the one platform that writes the shim as a copy.
+W13RW="$W/w13deadown-win"; mkdir -p "$W13RW/cd" "$W13RW/venv/Scripts" "$W13RW/shim"
+printf 'MZ() { :; }\nexit 0\n' > "$W13RW/venv/Scripts/python.exe";   chmod +x "$W13RW/venv/Scripts/python.exe"
+printf 'MZ() { :; }\nexit 0\n' > "$W13RW/venv/Scripts/headroom.exe"; chmod +x "$W13RW/venv/Scripts/headroom.exe"
+printf '#!/bin/sh\nexit 1\n'   > "$W13RW/shim/headroom";             chmod +x "$W13RW/shim/headroom"
+S13RW="$W13RW/s.json"; doc_settings_wired "$W13RW/cd" > "$S13RW"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13RW/shim:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$S13RW" DOCTOR_CLAUDE_DIR="$W13RW/cd" DOCTOR_VENV_DIR="$W13RW/venv" \
+      DOCTOR_SHIM_DIR="$W13RW/shim" HEADROOM_STATE_DIR="$W13RW/state" bash "$DOCTOR" 2>&1)
+check "w13: a dead own shim is recognised through the .exe spelling too" \
+      "this file is the doctor's own shim from an earlier run" "$out"
+
 out=$(w13_dead --fix)
 check        "w13: --fix removes the dead own shim and repairs in the same run" \
              "headroom shimmed to $W13R/shim/headroom (resolves on PATH)" "$out"
@@ -3835,6 +3892,14 @@ check_eq "w13: .com leads the shared name list" "headroom.com" "$(er headroom_na
 check_eq "w13: the shared list carries all five spellings" "5" "$(er headroom_name_variants | grep -c .)"
 check    "w13: doctor uses the shared list"        "headroom_name_variants" "$(cat "$DOCTOR")"
 check    "w13: session-probe uses the shared list" "headroom_name_variants" "$(cat "$PROBE")"
+# ...and MENTIONING the shared function is not the same as agreeing with it:
+# session-probe keeps an inline literal fallback for a partial/legacy copy with
+# no lib beside it, which is a second copy of the list the shared function's own
+# comment claims "cannot drift apart again". Compare them for real.
+probe_list=$(grep -o "printf '%s\\\\n' headroom\.com[^)]*" "$PROBE" | sed "s/printf '%s\\\\n' //" | tr -s ' ')
+shared_list=$(er headroom_name_variants | tr '\n' ' ' | sed 's/ *$//')
+check_eq "w13: session-probe's inline list matches the shared one exactly" \
+         "$shared_list" "$probe_list"
 W13X="$W/w13com"; mkdir -p "$W13X/cd" "$W13X/proj" "$W13X/home"
 printf 'MZ() { :; }\nexit 0\n' > "$W13X/proj/headroom.com"    # no +x: Windows needs none
 S13X="$W13X/s.json"; doc_settings_wired "$W13X/cd" > "$S13X"
@@ -3979,6 +4044,36 @@ out=$(env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" \
       DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" 2>&1)
 check "w14b: posix bare-bash wiring still reads as wired" "ok      - statusLine wired" "$out"
 
+# --- w17. A flat install missing ONLY engine-resolve.sh still works: each entry
+# point carries a narrower inline resolver for exactly that layout. So it must
+# NUDGE, not flip the sticky yellow "headroom broken" badge that note_error
+# writes -- doctor.sh calls the same condition merely `fixable`.
+W17="$W/w17-degrade"; mkdir -p "$W17/flat" "$W17/state" "$W17/eng"
+cp "$PROBE" "$W17/flat/session-probe.sh"
+cp "$ROOT/scripts/lib/headroom-state.sh" "$W17/flat/headroom-state.sh"
+cp "$ROOT/scripts/lib/attribution.jq"    "$W17/flat/attribution.jq"
+cp "$ROOT/bin/hcat"                      "$W17/flat/hcat"
+# ...and deliberately NOT engine-resolve.sh
+printf '#!/bin/sh\nexit 0\n' > "$W17/eng/python"; chmod +x "$W17/eng/python"
+out=$(env HCAT_PYTHON="$W17/eng/python" HEADROOM_STATE_DIR="$W17/state" \
+      PATH="$STUB:/usr/bin:/bin" bash "$W17/flat/session-probe.sh" 2>&1)
+check "w17: the missing lib is still reported" "engine-resolve.sh is missing" "$out"
+if [ -s "$W17/state/last-error" ]; then
+  echo "FAIL - w17: a degraded-but-working install must not flip the broken badge"
+  echo "    last-error: $(cat "$W17/state/last-error")"; FAIL=$((FAIL+1))
+else
+  echo "ok - w17: a degraded-but-working install does not flip the broken badge"; PASS=$((PASS+1))
+fi
+# control: with NO engine resolvable at all, the badge SHOULD go broken
+rm -rf "$W17/state2"; mkdir -p "$W17/state2"
+out=$(env -u HCAT_PYTHON HEADROOM_STATE_DIR="$W17/state2" HOME="$W17/nohome" \
+      PATH="$STUB:/usr/bin:/bin" bash "$W17/flat/session-probe.sh" 2>&1)
+if [ -s "$W17/state2/last-error" ]; then
+  echo "ok - w17: control — with no engine at all the badge does go broken"; PASS=$((PASS+1))
+else
+  echo "FAIL - w17: control — with no engine at all the badge does go broken"; FAIL=$((FAIL+1))
+fi
+
 # --- w16. The /bin -> /usr/bin ALIAS trap (the bug the windows job exposed).
 # Every other w14 fixture stubs cygpath as a passthrough, so /bin/bash and
 # /usr/bin/bash look like different files and the POSIX promotion appears to
@@ -4085,9 +4180,9 @@ if command -v shellcheck >/dev/null 2>&1; then
     echo "FAIL - shellcheck"; FAIL=$((FAIL+1))
   fi
 else
-  echo "skip - shellcheck not installed"
+  skip_note "shellcheck not installed"
 fi
 
 echo
-echo "$PASS passed, $FAIL failed"
+echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
 [ "$FAIL" -eq 0 ]

@@ -21,9 +21,12 @@ try {
     env: { ...process.env, HEADROOM_UPDATE_CHECK: "off", HF_HUB_OFFLINE: "1" },
   });
 } catch (e) {
-  done(3, `spawn error: ${e.code || e.message}`);
+  done(e.code === "ENOENT" ? 5 : 3, `spawn error: ${e.code || e.message}`);
 }
-child.on("error", (e) => done(3, `spawn error: ${e.code || e.message}`));
+// 5 = ENOENT (target not found) vs 3 = Windows refused an existing target.
+// Collapsing them let "the file is missing" masquerade as "Windows cannot
+// spawn a .sh shell-lessly", which is the only thing the negative control proves.
+child.on("error", (e) => done(e.code === "ENOENT" ? 5 : 3, `spawn error: ${e.code || e.message}`));
 child.on("exit", (code) => done(2, `server exited early (code ${code})`));
 let buf = "";
 child.stdout.on("data", (d) => {

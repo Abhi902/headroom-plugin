@@ -77,6 +77,19 @@ fi
 # manual installer, and re-provisioned by /doctor --fix).
 for _lib in attribution.jq headroom-state.sh engine-resolve.sh; do
   if [ ! -f "$here/lib/$_lib" ] && [ ! -f "$here/$_lib" ]; then
+    # engine-resolve.sh is the one entry here that DEGRADES instead of breaking:
+    # this hook, hcat-gate.sh and bin/hcat each carry a narrower inline
+    # resolve_engine_python for precisely the partial/legacy layout that lands
+    # here, so an install missing only this lib still finds its engine and still
+    # compresses. note_error is the STICKY yellow "headroom broken — run
+    # /doctor" badge, which this file reserves for real outages — doctor.sh
+    # classifies the very same condition as merely `fixable`. So badge it only
+    # when the inline fallback ALSO comes up empty, and otherwise just nudge,
+    # exactly as the never-installed-engine case below does.
+    if [ "$_lib" = "engine-resolve.sh" ] && resolve_engine_python >/dev/null 2>&1; then
+      add_problem "$_lib is missing — the inline fallback is resolving the engine for now; reinstall the plugin, or (legacy install) re-run the manual installer to copy scripts/lib/*"
+      continue
+    fi
     note_error install "$_lib missing — badge/ledger/health degraded"
     add_problem "$_lib is missing — reinstall the plugin, or (legacy install) re-run the manual installer to copy scripts/lib/*"
   fi

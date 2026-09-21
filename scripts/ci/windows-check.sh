@@ -55,7 +55,8 @@ import json, sys
 rows = [{"id": i, "name": "naïve ✓ 日本 %d" % i, "note": "ünïcode"} for i in range(300)]
 open(sys.argv[1], "w", encoding="utf-8").write(json.dumps(rows, ensure_ascii=False, indent=2))
 PY
-out=$(env -u HCAT_PYTHON DOCTOR_VENV_DIR="$VENV_DIR" PATH="/usr/bin:/bin" bash "$ROOT/bin/hcat" "$TMPD/uni.json" 2>"$TMPD/hcat.err"); rc=$?
+HCAT_WS="$TMPD/ws"; rm -rf "$HCAT_WS"
+out=$(env -u HCAT_PYTHON DOCTOR_VENV_DIR="$VENV_DIR" HEADROOM_WORKSPACE_DIR="$HCAT_WS" PATH="/usr/bin:/bin" bash "$ROOT/bin/hcat" "$TMPD/uni.json" 2>"$TMPD/hcat.err"); rc=$?
 # "rc=0 + receipt" alone can never fail: hcat prints the SAME `── hcat:` receipt
 # with rc 0 from three tiers, including the pure-jq tier it falls back to when no
 # engine resolves at all. Require the engine tier explicitly — then prove the
@@ -64,6 +65,19 @@ if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "── hcat:" \
    && ! printf '%s' "$out" | grep -q "engine absent"; then
   ok "hcat compresses non-ASCII JSON on Windows with the REAL engine (rc=0, receipt, no engine-absent tier)"
 else fail "hcat on non-ASCII JSON" "rc=$rc" "$(printf '%s' "$out" | head -1)" "$(head -3 "$TMPD/hcat.err")"; fi
+# ...and the SAVINGS EVENT must actually land. bin/hcat's `import fcntl` used to
+# sit inside _append_event's one broad try/except, so on Windows every run
+# silently recorded nothing -- the whole reason the lock-free branch exists.
+# _append_event STILL swallows every exception, so nothing but this assertion
+# can tell a regression from a working run: rc and the receipt are identical
+# either way, and the POSIX stats fixtures are gated behind a HEADROOM_PY that
+# used to be unresolvable under Git Bash.
+if grep -q '"strategy":"hcat"' "$HCAT_WS/stats.jsonl" 2>/dev/null; then
+  ok "hcat recorded its savings event on Windows (no fcntl, stats.jsonl written)"
+else
+  fail "hcat wrote no stats event on Windows — the no-fcntl branch regressed silently" \
+       "looked in: $HCAT_WS/stats.jsonl" "$(ls -l "$HCAT_WS" 2>&1 | head -3)"
+fi
 # negative control: same file, resolver deliberately broken (no HCAT_PYTHON, venv
 # pointed at nothing, engine nowhere on PATH) must land in the jq tier and SAY so.
 neg=$(env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent \

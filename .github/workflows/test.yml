@@ -19,6 +19,10 @@ jobs:
     defaults: { run: { shell: bash } }
     env:
       VENV_DIR: ${{ github.workspace }}/.headroom-venv
+      # Observed on the last green run: 677 passed + 49 failed = 726 executed.
+      # Set just under it so ordinary fixture churn does not red the gate while a
+      # real coverage collapse still does.
+      MIN_FIXTURES: "720"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking
@@ -66,7 +70,16 @@ jobs:
           $shTarget = "$PWD\scripts\session-probe.sh"
           if (-not (Test-Path -LiteralPath $shTarget)) { throw "negative control target is missing: $shTarget" }
           node scripts/ci/spawn-probe.mjs $shTarget
-          if ($LASTEXITCODE -eq 0) { throw "negative control: a .sh spawned without a shell should NOT work" }
+          # -ne 0 was too loose: the probe also exits 1 (usage) and 2 (server
+          # exited early), so a .sh that Windows actually STARTED and ran to
+          # completion would have satisfied the control that exists to prove
+          # Windows cannot start it. Only a spawn failure counts -- 3 (refused an
+          # existing target) or 5 (ENOENT), never 1 or 2.
+          if ($LASTEXITCODE -eq 5) {
+            Write-Host "::notice::negative control: target exists but Windows reported ENOENT (exit 5)"
+          } elseif ($LASTEXITCODE -ne 3) {
+            throw "negative control: expected a spawn failure (3, or 5 for ENOENT), got $LASTEXITCODE"
+          }
           Write-Host "negative control ok (exit $LASTEXITCODE)"
           exit 0
       - name: MCP spawn probe through the DOCTOR's own shim
@@ -110,6 +123,13 @@ jobs:
           $out = $json | & $bash $script
           Write-Host "badge: $out"
           if (-not $out) { throw "status line printed nothing with Git\usr\bin pruned from PATH" }
+          # Emptiness is not health. statusline.sh renders its FAILURE state as a
+          # non-empty line on stdout with exit 0 -- "▲ headroom broken (...) · run
+          # /doctor" -- so the exact state the plugin calls broken satisfied a
+          # bare -not $out. Assert the shape: with an empty transcript_path the
+          # expected render is the idle badge.
+          if ("$out" -match 'headroom broken') { throw "status line rendered the BROKEN badge: $out" }
+          if ("$out" -notmatch 'headroom')     { throw "status line printed no headroom badge: $out" }
           # Differential: the MSYS-INTERNAL bash should NOT manage this. If it does,
           # the prune proved nothing on this runner -- say so loudly, but do NOT red
           # a required gate over a runner-image detail.
@@ -127,12 +147,15 @@ jobs:
           $env:PATH = $orig
       - name: full suite (gated against the known-failure list)
         run: |
-          ./test.sh > suite.log 2>&1 || true
+          # Point the suite's engine probe at the venv this job built. Without it
+          # the probe finds nothing on Windows and every real-engine fixture
+          # SKIPS -- on the one host that actually has an engine installed.
+          HEADROOM_TEST_VENV="$(cygpath -u "$VENV_DIR")" ./test.sh > suite.log 2>&1 || true
           # `shell: bash` runs as `bash --noprofile --norc -e -o pipefail`, and grep
           # exits 1 on NO MATCH. Unguarded, the assignment below aborts the step
           # before the friendly diagnostic underneath it can ever run -- so the
           # "suite died early" branch was unreachable exactly when it was needed.
-          summary=$( { grep -E '^[0-9]+ passed, [0-9]+ failed$' suite.log || true; } | tail -1 )
+          summary=$( { grep -E '^[0-9]+ passed, [0-9]+ failed' suite.log || true; } | tail -1 )
           if [ -z "$summary" ]; then
             echo "::error::the suite printed no summary line — it died before finishing"
             tail -40 suite.log
@@ -151,11 +174,31 @@ jobs:
           # unit would also swallow a sed or sort failure.
           { grep -E '^FAIL - ' suite.log || true; } | sed 's/^FAIL - //' | sort -u > observed.txt
           { grep -vE '^[[:space:]]*(#|$)' "$known" || true; } | sort -u > known.txt
+          # COVERAGE FLOOR. Everything below reasons from FAIL lines alone, so a
+          # fixture that stops RUNNING -- renamed, deleted, or dropped into one of
+          # the suite's skip branches -- emits neither "ok -" nor "FAIL -" and is
+          # therefore indistinguishable from one that passed. That is not
+          # hypothetical: until the engine probe was fixed, every real-engine
+          # fixture skipped on the one host with a real engine installed while
+          # this gate still reported "no unlisted Windows failures". Assert that
+          # the suite actually ran. RAISE this as coverage grows; only lower it
+          # with a reason in the PR that lowers it.
+          ran=$(( $(echo "$summary" | sed -E 's/ passed.*//') + $(echo "$summary" | sed -E 's/.*, ([0-9]+) failed.*/\1/') ))
+          echo "fixtures executed: $ran (floor: $MIN_FIXTURES)"
+          if [ "$ran" -lt "$MIN_FIXTURES" ]; then
+            echo "::error::only $ran fixtures ran on Windows, floor is $MIN_FIXTURES — coverage collapsed silently; check the skip branches in suite.log"
+            grep -E '^skip - ' suite.log | sort -u || true
+            exit 1
+          fi
           new_fails=$(comm -23 observed.txt known.txt)
           now_passing=$(comm -13 observed.txt known.txt)
           if [ -n "$now_passing" ]; then
-            echo "::notice::these fixtures are listed as known-failing but PASSED — delete them from $known:"
+            # An ERROR, not a notice: a listed fixture that "passes" is equally
+            # the signature of one that stopped running, and a notice nobody
+            # actions lets the list rot into fiction.
+            echo "::error::these fixtures are listed as known-failing but did NOT fail — delete them from $known (or, if they stopped RUNNING, fix that):"
             printf '%s\n' "$now_passing"
+            exit 1
           fi
           if [ -n "$new_fails" ]; then
             echo "::error::these fixtures failed on Windows and are NOT in $known — fix them, or add them with a reason:"
