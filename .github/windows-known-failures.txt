@@ -74,13 +74,9 @@ w6: windows hint names the shim dir this run uses
 #   [UNPORTED]    the fixture assumes POSIX; the PRODUCT may well be fine.
 #   [PRODUCT]     a real Windows-side wart, worth fixing on its own merits.
 #
-# [PRODUCT] Windows has no SIGPIPE, so bin/hcat's `signal.SIGPIPE` guard is a
-# no-op there and Python raises BrokenPipeError instead of dying quietly the way
-# cat does. `hcat big.json | head -1` therefore prints a traceback on stderr.
-# Cosmetic, not fatal — output is still correct — but it IS a real defect on
-# Windows and wants a top-level BrokenPipeError handler. Not fixed blind here.
-portability: no BrokenPipeError when piped to head
-portability: no traceback when piped to head
+# (The [PRODUCT] SIGPIPE pair that lived here is FIXED, not listed: bin/hcat now
+# carries a top-level BrokenPipeError handler, and HCAT_NO_SIGPIPE=1 lets ubuntu
+# and macOS reproduce the Windows path so it stays guarded from a POSIX host.)
 #
 # [UNPORTED] hcat's receipt cites the path python resolved, which on Windows is
 # the NATIVE spelling (C:\Users\RUNNER~1\...) while the fixture expects the

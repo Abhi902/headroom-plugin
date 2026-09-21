@@ -111,7 +111,7 @@ if [ -z "$PY" ] || [ ! -x "$PY" ]; then
 fi
 
 PYTHONIOENCODING=utf-8 PYTHONUTF8=1 HF_HUB_OFFLINE=1 HEADROOM_UPDATE_CHECK=off exec "$PY" - "$FILE" <<'PYEOF'
-import json, os, signal, sys, time
+import atexit, json, os, signal, sys, time
 
 # POSIX advisory locking for the shared stats file. Windows has no fcntl, and
 # this import used to sit inside _append_event's one broad try/except — so on
@@ -151,8 +151,43 @@ def _clear_error():
 
 # `hcat big.json | head -1` must die silently when the reader closes the pipe,
 # like cat does — otherwise python's stdout teardown spews BrokenPipeError on
-# stderr. Guarded: some platforms (e.g. Windows) have no SIGPIPE.
-if hasattr(signal, "SIGPIPE"):
+# stderr. POSIX gets that from SIG_DFL below: the process dies by signal and
+# nothing unwinds. Windows has NO SIGPIPE at all, so that guard is a no-op there
+# and the interpreter raises instead — a traceback on every `hcat ... | head`,
+# which the old comment predicted and left standing. Handle both.
+def _exit_quietly_on_broken_pipe():
+    # canonical CPython pattern: point stdout at devnull so interpreter shutdown
+    # cannot re-raise while flushing, then exit 0 the way cat does
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except Exception:
+        pass
+    os._exit(0)
+
+_prev_excepthook = sys.excepthook
+
+def _hcat_excepthook(exc_type, exc, tb):
+    if issubclass(exc_type, BrokenPipeError):
+        _exit_quietly_on_broken_pipe()
+    _prev_excepthook(exc_type, exc, tb)
+
+sys.excepthook = _hcat_excepthook
+
+@atexit.register
+def _hcat_hush_shutdown():
+    # the other half: when the pipe closes with buffered output still pending,
+    # the raise happens during shutdown rather than in a print()
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _exit_quietly_on_broken_pipe()
+    except Exception:
+        pass
+
+# HCAT_NO_SIGPIPE=1 skips the POSIX registration so the WINDOWS path can be
+# reproduced, and regression-tested, on a POSIX host — the only difference
+# between the two platforms here is this one call. Same spirit as DOCTOR_OS.
+if hasattr(signal, "SIGPIPE") and not os.environ.get("HCAT_NO_SIGPIPE"):
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 path = os.path.abspath(sys.argv[1])

@@ -240,7 +240,13 @@ jobs:
           if (Test-Path -LiteralPath $internal) {
             $neg = ($json | & $internal $script 2>$null)
             if ($neg -and "$neg" -eq "$out") {
-              Write-Host "::notice::negative control inconclusive - $internal produced the same badge with a pruned PATH, so this runner does not discriminate the two bashes"
+              # NOTE for whoever reads that notice later: it is NOT the evidence
+              # for the wrapper-bash promotion. windows-latest does not reproduce
+              # the coreutils-less condition, so this differential cannot justify
+              # the fix to a sceptic. The real evidence is the independent
+              # Windows tester's report plus windows-check's WIRING assertion,
+              # which is what actually stops a regression.
+              Write-Host "::notice::negative control inconclusive - $internal produced the same badge with a pruned PATH, so this runner does not discriminate the two bashes (this is NOT the evidence for the promotion; see the comment above)"
             } else {
               Write-Host "negative control ok - the MSYS-internal bash does not reproduce the badge"
             }
@@ -324,13 +330,21 @@ jobs:
           fi
           new_fails=$(comm -23 observed.txt known.txt)
           now_passing=$(comm -13 observed.txt known.txt)
+          # Accumulate BOTH directions and exit ONCE. Exiting on the first made
+          # the gate report at most one class per run: a reconciliation that
+          # delisted three passing fixtures could not see the four unlisted
+          # FAILURES underneath them, and only downloading the suite.log artifact
+          # closed the gap. One signal masking another, again -- and this gate is
+          # what future maintainers debug through, so half a truth teaches them
+          # to distrust it.
+          rc=0
           if [ -n "$now_passing" ]; then
             # An ERROR, not a notice: a listed fixture that "passes" is equally
             # the signature of one that stopped running, and a notice nobody
             # actions lets the list rot into fiction.
             echo "::error::these fixtures are listed as known-failing but did NOT fail — delete them from $known (or, if they stopped RUNNING, fix that):"
             printf '%s\n' "$now_passing"
-            exit 1
+            rc=1
           fi
           if [ -n "$new_fails" ]; then
             echo "::error::these fixtures failed on Windows and are NOT in $known — fix them, or add them with a reason:"
@@ -340,8 +354,9 @@ jobs:
               [ -n "$n" ] || continue
               grep -F -A4 "FAIL - $n" suite.log || true
             done
-            exit 1
+            rc=1
           fi
+          [ "$rc" -eq 0 ] || exit 1
           echo "no unlisted Windows failures ($(wc -l < observed.txt) known, $(wc -l < known.txt) listed)"
       - name: upload the windows suite log
         if: always()

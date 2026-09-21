@@ -734,6 +734,17 @@ PYEOF
   check_absent "portability: no BrokenPipeError when piped to head" "BrokenPipeError" "$err"
   check_absent "portability: no traceback when piped to head" "Traceback" "$err"
   check "portability: receipt header survives the pipe" "── hcat:" "$(cat "$TMP/hc_pipe.out")"
+  # ...and the WINDOWS path, on a POSIX host. The three checks above pass
+  # trivially here: SIG_DFL means the process dies by signal and nothing can
+  # unwind. Windows has no SIGPIPE at all, so python raises BrokenPipeError
+  # instead and printed a traceback on every `hcat ... | head` -- caught only
+  # when the engine-probe fix finally let this block run on Windows.
+  # HCAT_NO_SIGPIPE=1 skips the one call that differs, so ubuntu and macOS
+  # reproduce it exactly and guard it from here on.
+  err=$( { HCAT_NO_SIGPIPE=1 HEADROOM_WORKSPACE_DIR="$TMP/hc_ws" bash "$HCAT" "$TMP/hc_pipe.json" | head -1 > "$TMP/hc_pipe2.out"; } 2>&1 )
+  check_absent "portability: no BrokenPipeError on the no-SIGPIPE (Windows) path" "BrokenPipeError" "$err"
+  check_absent "portability: no traceback on the no-SIGPIPE (Windows) path" "Traceback" "$err"
+  check "portability: the receipt still survives the pipe without SIGPIPE" "── hcat:" "$(cat "$TMP/hc_pipe2.out")"
 else
   skip_note "hcat SIGPIPE test (headroom venv not found)"
 fi
