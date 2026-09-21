@@ -103,6 +103,36 @@ printf '%s\n' "$out" | grep -qE '^fixed +- headroom shimmed to' && ok "doctor: s
 [ -f "$SB/.local/bin/headroom.exe" ] && ok "doctor: shim is headroom.exe" || fail "doctor: shim file headroom.exe missing" "$(ls -l "$SB/.local/bin")"
 cmd=$(jq -r '.statusLine.command' "$SB/.claude/settings.json")
 case $cmd in \"*bash.exe\"\ \"*headroom-statusline.sh\") ok "doctor: statusLine command uses Windows paths ($cmd)" ;; *) fail "statusLine command shape" "got: $cmd" ;; esac
+
+# 5b. ...and it must be Git's EXTERNAL wrapper bash, not the MSYS-INTERNAL one.
+# <gitroot>/usr/bin/bash.exe carries no MSYS coreutils when it is spawned from a
+# native Windows process -- which is exactly how Claude Code spawns the status
+# line -- so dirname/cat/wc/tr vanish and the badge degrades to a permanent idle.
+# The shape check above cannot see the difference (both spellings end
+# `bash.exe`), and the PowerShell smoke step cannot either, because
+# windows-latest carries Git\usr\bin on the MACHINE PATH and that masks it at
+# runtime. So assert the WIRING here, where masking cannot reach. Mirrors
+# doctor.sh's sl_prefer_wrapper_bash: only demand the promotion when the wrapper
+# really exists on disk (a Git install without the bin/ sibling legitimately
+# keeps usr/bin, and the w14a fixtures cover that branch).
+sl_b=$(command -v bash)
+case $sl_b in
+  */usr/bin/bash|*/usr/bin/bash.exe)
+    sl_root=${sl_b%/*}; sl_root=${sl_root%/*}; sl_root=${sl_root%/*}
+    sl_wrapper="$sl_root/bin/${sl_b##*/}"
+    if [ -f "$sl_wrapper" ]; then
+      case $cmd in
+        *[\\/]usr[\\/]bin[\\/]bash*)
+          fail "doctor wired the MSYS-internal bash although $sl_wrapper exists" \
+               "got: $cmd" \
+               "that bash loses MSYS coreutils when Claude Code spawns it natively" ;;
+        *) ok "doctor: statusLine uses Git's external wrapper bash, not usr/bin ($cmd)" ;;
+      esac
+    else
+      skip "wrapper-bash promotion (no $sl_wrapper on this runner)"
+    fi ;;
+  *) skip "wrapper-bash promotion (command -v bash is $sl_b, not usr/bin)" ;;
+esac
 out2=$(doctor_sb); rc2=$?
 [ "$rc2" -eq 0 ] && ok "doctor --fix run 2 exits 0" || fail "doctor --fix run 2 exited $rc2"
 printf '%s\n' "$out2" | grep -qE '^FAIL' && fail "doctor --fix run 2 printed a FAIL line" "$out2" || ok "doctor --fix run 2 has no FAIL lines"

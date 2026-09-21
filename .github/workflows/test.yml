@@ -19,10 +19,10 @@ jobs:
     defaults: { run: { shell: bash } }
     env:
       VENV_DIR: ${{ github.workspace }}/.headroom-venv
-      # RATCHET, not a target. The POSIX suite has fixtures that cannot pass
-      # under Git Bash yet; this is the number of them allowed to fail before
-      # the step goes red. LOWER it as fixtures are ported — never raise it
-      # without saying why in the PR that raises it.
+      # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
+      # step below gates on .github/windows-known-failures.txt by NAME, so a
+      # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking
+      # that file is the goal; never add to it to make CI green.
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -98,9 +98,33 @@ jobs:
           $script = $m[1].Groups[1].Value
           if (-not $bash -or -not $script) { throw "could not parse statusLine command: $cmd" }
           $json = '{"transcript_path":"","model":{"id":"claude-opus-4-8"},"session_id":"ci"}'
+          # Claude Code spawns the status line from a NATIVE Windows process, so the
+          # child inherits no MSYS coreutils unless the wired bash sets them up
+          # itself. windows-latest carries Git\usr\bin on the MACHINE PATH, which
+          # masks a wrongly-wired bash and made this step pass either way. Prune it
+          # so the step tests what it claims to test.
+          $orig = $env:PATH
+          $pruned = ($orig -split ';' | Where-Object { $_ -notmatch '[\\/]Git[\\/]usr[\\/]bin[\\/]?$' }) -join ';'
+          Write-Host ("pruned {0} PATH entry(ies) matching Git\usr\bin" -f (($orig -split ';').Count - ($pruned -split ';').Count))
+          $env:PATH = $pruned
           $out = $json | & $bash $script
           Write-Host "badge: $out"
-          if (-not $out) { throw "status line printed nothing" }
+          if (-not $out) { throw "status line printed nothing with Git\usr\bin pruned from PATH" }
+          # Differential: the MSYS-INTERNAL bash should NOT manage this. If it does,
+          # the prune proved nothing on this runner -- say so loudly, but do NOT red
+          # a required gate over a runner-image detail.
+          $internal = Join-Path (Split-Path (Split-Path $bash)) 'usr\bin\bash.exe'
+          if (Test-Path -LiteralPath $internal) {
+            $neg = ($json | & $internal $script 2>$null)
+            if ($neg -and "$neg" -eq "$out") {
+              Write-Host "::notice::negative control inconclusive - $internal produced the same badge with a pruned PATH, so this runner does not discriminate the two bashes"
+            } else {
+              Write-Host "negative control ok - the MSYS-internal bash does not reproduce the badge"
+            }
+          } else {
+            Write-Host "::notice::no usr\bin\bash.exe beside $bash - differential skipped"
+          }
+          $env:PATH = $orig
       - name: full suite (gated against the known-failure list)
         run: |
           ./test.sh > suite.log 2>&1 || true
