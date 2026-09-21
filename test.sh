@@ -3087,9 +3087,10 @@ check_eq "w10: marketplace.json 2.8.0" "2.8.0" "$(jq -r '.plugins[0].version // 
 # v2.7.x install whose engine lives in the doctor's own venv still RESOLVES, but
 # the v2.8 .mcp.json spawns the bare name, so its MCP stops connecting with no
 # in-product signal (the badge's "idle" is indistinguishable from "nothing
-# compressed yet"). The SessionStart probe must nudge — via add_problem, NOT
-# note_error: this is a setup gap, not a breakage, so it must not flip the badge
-# to "broken" (same reasoning as the never-installed case).
+# compressed yet"). On POSIX the hook's PATH IS the MCP spawn PATH, so this is a
+# live outage and the probe must BOTH nudge and flip the badge to broken. On
+# Windows the same answer is only the POSIX view of a native question, so it
+# stays a nudge there -- see the w11-C2 twin below.
 W11="$W/w11"; mkdir -p "$W11/venv/bin" "$W11/home"
 printf '#!/bin/sh\nexit 0\n'  > "$W11/venv/bin/python";   chmod +x "$W11/venv/bin/python"
 printf '#!/bin/sh\necho hr\n' > "$W11/venv/bin/headroom"; chmod +x "$W11/venv/bin/headroom"
@@ -3102,15 +3103,37 @@ check_eq     "w11: probe exits 0 on the PATH nudge" "0" "$rc"
 check_eq     "w11: probe still prints exactly one line" "1" "$(printf '%s\n' "$out" | grep -c .)"
 check_eq     "w11: the nudge is a well-formed SessionStart line" "SessionStart" \
              "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.hookEventName' 2>/dev/null)"
-if [ -f "$W11/state/last-error" ]; then
-  echo "FAIL - w11: the PATH nudge does not flip the badge to broken"; FAIL=$((FAIL+1))
+if [ -s "$W11/state/last-error" ]; then
+  echo "ok - w11: on POSIX an off-PATH engine DOES flip the badge to broken"; PASS=$((PASS+1))
 else
-  echo "ok - w11: the PATH nudge does not flip the badge to broken"; PASS=$((PASS+1))
+  echo "FAIL - w11: on POSIX an off-PATH engine must flip the badge to broken"; FAIL=$((FAIL+1))
 fi
-# the same install with the engine's bin dir on PATH → silent
+check "w11: the broken badge names the bare-name MCP spawn" "cannot spawn it by name" \
+      "$(cat "$W11/state/last-error" 2>/dev/null)"
+# the same install with the engine's bin dir on PATH → silent. FRESH state dir:
+# the run above now legitimately records a broken badge, and that badge is STICKY
+# until /doctor clears it, so reusing the dir would (correctly) surface the recorded
+# failure and tell us nothing about this case.
 out=$(printf '{"session_id":"w11b"}' | env -u HCAT_PYTHON HOME="$W11/home" DOCTOR_VENV_DIR="$W11/venv" \
-      PATH="$W11/venv/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W11/state" bash "$PROBE")
+      PATH="$W11/venv/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W11/state-clean" bash "$PROBE")
 check_absent "w11: no nudge once headroom resolves on PATH" "not on PATH" "$out"
+
+# w11-C2. The Windows twin: identical condition, but there the hook's PATH is
+# only the POSIX view of a question a NATIVE process answers differently. A
+# sticky "broken" on a non-authoritative answer is a permanent false alarm (the
+# reason the native-PATH advisory was removed), so Windows nudges and stops.
+W11W="$W/w11-win"; mkdir -p "$W11W/venv/bin" "$W11W/home" "$W11W/state"
+printf '#!/bin/sh\nexit 0\n'  > "$W11W/venv/bin/python";   chmod +x "$W11W/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W11W/venv/bin/headroom"; chmod +x "$W11W/venv/bin/headroom"
+out=$(printf '{"session_id":"w11w"}' | env -u HCAT_PYTHON DOCTOR_OS=windows HOME="$W11W/home" \
+      DOCTOR_VENV_DIR="$W11W/venv" PATH="$STUB:/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W11W/state" bash "$PROBE")
+check "w11-C2: windows still nudges when headroom is off PATH" "not on PATH" "$out"
+if [ -s "$W11W/state/last-error" ]; then
+  echo "FAIL - w11-C2: windows must NOT flip the badge on the POSIX view alone"; FAIL=$((FAIL+1))
+else
+  echo "ok - w11-C2: windows must NOT flip the badge on the POSIX view alone"; PASS=$((PASS+1))
+fi
 
 # w11-I1. spec §1: the doctor's lib-provisioning must ship engine-resolve.sh too.
 # A legacy FLAT install repaired with `/doctor --fix` (rather than by re-running
@@ -4105,8 +4128,13 @@ cp "$ROOT/scripts/lib/attribution.jq"    "$W17/flat/attribution.jq"
 cp "$ROOT/bin/hcat"                      "$W17/flat/hcat"
 # ...and deliberately NOT engine-resolve.sh
 printf '#!/bin/sh\nexit 0\n' > "$W17/eng/python"; chmod +x "$W17/eng/python"
+# ...and a `headroom` ON PATH. Without it this fixture also satisfies the
+# off-PATH outage, which legitimately DOES flip the badge (w11-C1) -- so the
+# fixture would be asserting the missing lib is harmless while a second,
+# unrelated condition wrote the error. Isolate the variable under test.
+printf '#!/bin/sh\necho hr\n' > "$W17/eng/headroom"; chmod +x "$W17/eng/headroom"
 out=$(env HCAT_PYTHON="$W17/eng/python" HEADROOM_STATE_DIR="$W17/state" \
-      PATH="$STUB:/usr/bin:/bin" bash "$W17/flat/session-probe.sh" 2>&1)
+      PATH="$W17/eng:$STUB:/usr/bin:/bin" bash "$W17/flat/session-probe.sh" 2>&1)
 check "w17: the missing lib is still reported" "engine-resolve.sh is missing" "$out"
 if [ -s "$W17/state/last-error" ]; then
   echo "FAIL - w17: a degraded-but-working install must not flip the broken badge"

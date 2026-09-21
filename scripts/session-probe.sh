@@ -103,13 +103,22 @@ done
 # Nothing else announces it: the badge's "idle" is indistinguishable from "you
 # haven't compressed anything yet", and /doctor only runs when the user already
 # suspects something. A hook's PATH is the closest proxy available for the MCP
-# spawn environment, but it is a NUDGE-level proxy, not an authority: it is the
-# POSIX answer, and a native process sees a different PATH. doctor.sh check 2b
-# re-asks natively (cmd.exe /c where, MSYS dirs pruned) and is the one to
-# believe when the two disagree.
+# spawn environment. On POSIX it is not merely a proxy: the hook's PATH IS the
+# PATH the MCP is spawned with, so a miss here is authoritative. On Windows it is
+# a NUDGE-level proxy only -- a native process sees a different PATH, and
+# doctor.sh check 2b re-asks natively (cmd.exe /c where, MSYS dirs pruned) and is
+# the one to believe when the two disagree.
 engine_off_path() {
   command -v headroom >/dev/null 2>&1 && return 0
   add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /doctor --fix to shim it"
+  # The engine WORKS and the MCP still cannot start: that is a live feature
+  # outage, not a setup gap, and the badge has to say so. Leaving it at a nudge
+  # is what makes a v2.7.x -> v2.8 update go silent -- a dead MCP renders as an
+  # idle badge, which is indistinguishable from "nothing compressed yet".
+  # Windows keeps the nudge: flipping a sticky badge on a non-authoritative
+  # answer there would be a permanent false "broken", the exact failure mode the
+  # native-PATH advisory was removed for.
+  is_windows || note_error engine "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /doctor --fix"
 }
 # ...and the other half of "spawned by name": on Windows a bare command name is
 # resolved from the spawning process's current directory BEFORE PATH, so a
