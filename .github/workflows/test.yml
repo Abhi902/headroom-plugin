@@ -103,6 +103,27 @@ jobs:
           rm -f "$d/jq"; printf '#!/bin/sh\nexec "%s" "$@"\n' "$real" > "$d/jq"; chmod +x "$d/jq"
           echo "wrapper:"; probe wrapper
           exit 0
+      - name: native PATH diagnostic (never fails; evidence only)
+        # Settles WHY a `cmd.exe /c where headroom` probe returned a false
+        # negative in the e45dfb0 run, for a dir that provably held a real PE and
+        # was first on PATH. Two candidates, identical symptom:
+        #   (a) MSYS_NO_PATHCONV=1 also suppresses PATH env-var conversion, so
+        #       cmd receives a colon-separated POSIX PATH; then %PATH% below
+        #       comes back colon-separated.
+        #   (b) the prune leaves System32 unresolvable, so `where` itself never
+        #       runs; then %PATH% looks correct and `where` still fails.
+        # Whoever reinstates that probe needs this answer first. Do not guess.
+        run: |
+          set +e
+          d=$(mktemp -d); : > "$d/headroom.exe"
+          echo "--- baseline: no guards, ambient PATH ---"
+          cmd.exe /c "echo %PATH% & where headroom" 2>&1 | head -4
+          echo "--- with MSYS_NO_PATHCONV=1 + MSYS2_ARG_CONV_EXCL ---"
+          env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /c "echo %PATH% & where headroom" 2>&1 | head -4
+          echo "--- with the MSYS-dir prune applied ---"
+          p=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vE '^/(usr|bin|mingw32|mingw64|opt)(/|$)' | paste -sd: -)
+          PATH="$p" env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /c "echo %PATH% & where headroom" 2>&1 | head -4
+          exit 0
       - name: windows-check (required gate)
         run: VENV_DIR="$(cygpath -u "$VENV_DIR")" bash scripts/ci/windows-check.sh
       - name: MCP spawn probe (shell-less, by name) + negative control

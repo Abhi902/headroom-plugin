@@ -84,10 +84,9 @@ w6: windows hint names the shim dir this run uses
 # is the POSIX-only part. Fix is to accept either spelling on Windows.
 hcat: header cites source path
 #
-# [UNPORTED] doctor check 2b's advisory line (added when the native-PATH probe
-# was made non-gating) reports that a NATIVE process cannot resolve `headroom`.
-# In this fixture the CLI sits in a temp dir that is on Git Bash's PATH and on no
-# native Path — a condition a sandbox CANNOT fix, since putting a temp dir on the
-# real Windows Path needs registry changes. A genuinely healthy Windows install
-# would not trip it. Revisit if 2b ever reads the persisted Path directly.
-doctor: healthy has no fixable
+# (`doctor: healthy has no fixable` was listed here as [UNPORTED]. A second,
+# independent read called it [PRODUCT] instead — and was right. The probe never
+# reads the persisted Path; it asks a native child that inherits Git Bash's
+# PATH, so a dir on that PATH should be found and the CI log shows it was not.
+# The fixture was correct and the product was wrong. The advisory has been
+# removed rather than listed; see the removal note in doctor.sh check 2b.)

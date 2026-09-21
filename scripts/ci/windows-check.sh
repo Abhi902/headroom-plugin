@@ -160,6 +160,13 @@ out2=$(doctor_sb); rc2=$?
 [ "$rc2" -eq 0 ] && ok "doctor --fix run 2 exits 0" || fail "doctor --fix run 2 exited $rc2"
 printf '%s\n' "$out2" | grep -qE '^FAIL' && fail "doctor --fix run 2 printed a FAIL line" "$out2" || ok "doctor --fix run 2 has no FAIL lines"
 printf '%s\n' "$out2" | grep -qE '^fixed ' && fail "doctor: second --fix not idempotent" "$out2" || ok "doctor: second --fix is a no-op"
+# ...and a settled install must be CLEAN, not merely FAIL-free. This gate greps
+# only ^FAIL, so a permanently-firing `fixable` — an advisory the user can never
+# clear because it is simply wrong — sailed through it green. That is exactly how
+# the native-probe false negative survived a passing required gate.
+printf '%s\n' "$out2" | grep -qE '^fixable ' \
+  && fail "doctor: a settled --fix still reports fixable — an advisory the user cannot clear" "$out2" \
+  || ok "doctor: a settled --fix reports nothing fixable"
 printf '%s\n' "$out2" | grep -qE '^ok +- headroom CLI on PATH' && ok "doctor: run 2 resolves the shimmed headroom on PATH" || fail "doctor: run 2 did not report headroom CLI on PATH" "$out2"
 printf '%s\n' "$cmd" > "$ROOT/statusline.cmd"   # consumed by the PowerShell step
 # Hand the sandbox shim dir off the same way, in its NATIVE spelling: the

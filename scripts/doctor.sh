@@ -484,29 +484,28 @@ path_hint() {  # the one line the user must run/do to put SHIM_DIR on PATH
 cli_healed=0; cli_retry=1
 while [ "$cli_retry" -eq 1 ]; do
   cli_retry=0
-native_sees_headroom() {  # can a NATIVE Windows process resolve the bare name?
-  # `command -v` answers for GIT BASH's PATH, which carries MSYS-only dirs
-  # (/usr/bin -> C:\Program Files\Git\usr\bin, /mingw64/bin) that are NOT on the
-  # Windows PATH the MCP client spawns with. Greening on the Bash answer alone
-  # told users "the bundled MCP will spawn it" and then left them with
-  # "Connection closed" forever. Ask the way the client will.
-  is_windows || return 0          # POSIX: the Bash PATH *is* the spawn PATH
-  local w p
-  w=$(command -v cmd.exe 2>/dev/null) || w=""
-  [ -n "$w" ] && [ -x "$w" ] || return 0   # cannot ask → do not invent a failure
-  # A native CHILD of Git Bash inherits GIT BASH's PATH -- MSYS translates it on
-  # the way out -- so `where` would cheerfully find a headroom carried only by
-  # /usr/bin or /mingw64/bin, the very dirs this check exists to rule out. Prune
-  # them first or the answer is just the POSIX one wearing a native hat. (The
-  # status-line CI step prunes the same way, for the same reason.)
-  p=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vE '^/(usr|bin|mingw32|mingw64|opt)(/|$)' | paste -sd: -)
-  # MSYS_NO_PATHCONV / MSYS2_ARG_CONV_EXCL: without them Git Bash rewrites any
-  # argument starting with a single slash into a Windows path, so a bare `/c`
-  # reaches cmd.exe as `C:\` and the switch is lost entirely -- the probe would
-  # answer a question nobody asked. Same `env VAR=... cmd` idiom as shim_runs.
-  PATH="$p" run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
-    env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$w" /c "where headroom" >/dev/null 2>&1
-}
+# NOTE — there was a native-PATH probe here (cmd.exe /c where, MSYS dirs pruned)
+# and it has been REMOVED, deliberately, not lost in a refactor.
+#
+# It returned a FALSE NEGATIVE on real Windows. In the e45dfb0 CI run it reported
+# "a NATIVE process could not find `headroom`" about $SHIM_DIR — a directory that
+# the SAME run proved holds a real PE headroom.exe, and which was FIRST on the
+# doctor's PATH. Shipped, that means every correctly installed Windows user gets
+# a standing "add this to your user Path" instruction for a directory that
+# already works. An advisory that never clears is one people learn to ignore,
+# including the times it is right, so this is worse than the honestly-caveated
+# message it replaced.
+#
+# The mechanism is NOT yet known, and the two live candidates are
+# indistinguishable by symptom: (a) MSYS_NO_PATHCONV=1 also suppressing MSYS's
+# conversion of the PATH env var, so cmd receives a colon-separated POSIX PATH;
+# (b) the PATH prune leaving System32 unresolvable, so `where` itself never runs
+# and cmd's nonzero exit reads as "not found". The windows job now prints a
+# diagnostic that separates them.
+#
+# Doing this properly means reading the PERSISTED user Path (HKCU\Environment),
+# which is the only thing that actually answers "will Claude Code's MCP spawn
+# resolve this name". Until then the check says what it can honestly verify.
 if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
   # Name resolution alone is not "verified": the shim branch below has always
   # re-checked by EXECUTION, and this branch must hold the same bar — a
@@ -522,12 +521,7 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
     # conversion guards it needs may themselves perturb that translation. So say
     # what each namespace answered and let the user judge; `fixable` keeps the
     # exit status clean (only FAIL moves it) while still surfacing the mismatch.
-    if native_sees_headroom; then
-      say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (resolved in this Bash environment AND natively via cmd.exe \`where\`)"
-    else
-      say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
-      say fixable "...but a NATIVE process could not resolve \`headroom\` (cmd.exe \`where\` found nothing with the MSYS-only dirs pruned). Claude Code spawns the MCP natively, so if it reports \"Connection closed\", this is why — $(path_hint)"
-    fi
+    say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
   elif [ "$FIX" -eq 1 ] && [ "$cli_healed" -eq 0 ] && is_own_shim "$cli_now" \
        && rm -f "$cli_now" 2>/dev/null; then
     # The dead file is the doctor's OWN shim from an earlier run. Reporting it
@@ -555,12 +549,12 @@ elif cli_res=$(resolve_headroom_cli); then
       say FAIL "could not shim $cli_res into $SHIM_DIR"
     else
       hash -r 2>/dev/null
-      # ...and ask the NATIVE question here too. Gating only the branch above
-      # left a hole the size of the whole fix: when native_sees_headroom
-      # correctly said no, control fell through to here, `command -v` found the
-      # MSYS-only copy again (PATH never changed), the "not on PATH" FAIL was
-      # skipped, and doctor printed `fixed - ... (resolves on PATH)` and exited
-      # 0 -- the same false green, one branch further down.
+      # NOTE: this asks the POSIX question, like the branch above. When a native
+      # probe is reinstated (see the removal note at check 2b), it has to gate
+      # BOTH sites or it gates neither in practice: a native "no" here falls
+      # through to `command -v`, which finds the same MSYS-only copy because
+      # PATH never changed, skips the "not on PATH" FAIL, and reports
+      # `fixed - ... (resolves on PATH)` with exit 0.
       if ! command -v headroom >/dev/null 2>&1; then
         say FAIL "headroom shimmed to $shim but $SHIM_DIR is not on PATH — $(path_hint)"
       elif ! shim_runs "$shim"; then
@@ -576,9 +570,6 @@ elif cli_res=$(resolve_headroom_cli); then
         say FAIL "headroom shimmed to $shim but it does not run (\`$shim --help\` failed)$shim_gone — reinstall the engine: $(reinstall_hint)"
       else
         say fixed "headroom shimmed to $shim (resolves on PATH)"
-        # same advisory split as the branch above: never turn a shim that works
-        # into a hard failure on the strength of a probe we cannot fully trust
-        native_sees_headroom || say fixable "the shim resolves in this Bash environment but a NATIVE process could not find \`headroom\` — Claude Code spawns the MCP natively, so $(path_hint)"
       fi
     fi
   else
