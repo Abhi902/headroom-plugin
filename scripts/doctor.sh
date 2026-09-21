@@ -497,21 +497,38 @@ native_sees_headroom() {  # can a NATIVE process resolve the bare name? CONFIDEN
   # advisory that never clears is one people learn to ignore — including when it
   # is right.
   #
-  # The mechanism is STILL UNKNOWN, with two candidates indistinguishable by
-  # symptom: MSYS_NO_PATHCONV=1 possibly suppressing PATH env-var conversion too,
-  # or the prune leaving System32 unresolvable so `where` itself never runs. The
-  # windows job prints a diagnostic that separates them. Until that is answered,
-  # this shape is the one that cannot hurt: a broken probe costs the stronger
-  # sentence and nothing else, and its silence is itself the signal that the
-  # mechanism is still broken. The authoritative version reads the PERSISTED
-  # user Path (HKCU\Environment); that is the real fix.
+  # MECHANISM, now answered by the windows job's diagnostic — and it was neither
+  # of the two things we suspected. The CI run printed:
+  #
+  #     --- with MSYS_NO_PATHCONV=1 + MSYS2_ARG_CONV_EXCL ---
+  #     C:\Program Files\Git\mingw64\bin;C:\Program Files\Git\usr\bin;...
+  #     --- with the MSYS-dir prune applied ---
+  #     env: command not found
+  #
+  # So PATH conversion was fine all along (correct semicolon-separated Windows
+  # form, guards on). What broke it was `env` ITSELF: the prune strips /usr/bin
+  # and /bin, which is where the env BINARY lives, so the command died before
+  # cmd.exe was ever reached and the nonzero exit read as "headroom not found".
+  # The F1 guard and the F3 prune collided — each correct alone, fatal together.
+  #
+  # Fixed by exporting in a subshell instead of shelling out to `env`, so the
+  # probe needs no binary from a directory it just pruned.
+  #
+  # It still stays CONFIDENCE-ONLY. The prune is an approximation of the right
+  # question; the authoritative version reads the PERSISTED user Path
+  # (HKCU\Environment), which is the only thing that truly answers "will Claude
+  # Code's MCP spawn resolve this name".
   is_windows || return 1          # POSIX: nothing to add, the Bash PATH IS the spawn PATH
   local w p
   w=$(command -v cmd.exe 2>/dev/null) || w=""
   [ -n "$w" ] && [ -x "$w" ] || return 1
   p=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vE '^/(usr|bin|mingw32|mingw64|opt)(/|$)' | paste -sd: -)
-  PATH="$p" run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
-    env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$w" /c "where headroom" >/dev/null 2>&1
+  # subshell export, NOT `env` — see the mechanism note above: /usr/bin is what
+  # the prune removes, and that is where the env binary lives.
+  (
+    export PATH="$p" MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+    run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" "$w" /c "where headroom"
+  ) >/dev/null 2>&1
 }
 if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
   # Name resolution alone is not "verified": the shim branch below has always

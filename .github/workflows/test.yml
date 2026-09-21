@@ -112,7 +112,12 @@ jobs:
         #       comes back colon-separated.
         #   (b) the prune leaves System32 unresolvable, so `where` itself never
         #       runs; then %PATH% looks correct and `where` still fails.
-        # Whoever reinstates that probe needs this answer first. Do not guess.
+        # ANSWERED (2026-09-22): neither. %PATH% arrives in correct Windows form
+        # with the guards on, and the prune run printed `env: command not found`
+        # — the prune strips /usr/bin, which is where the `env` BINARY lives, so
+        # the probe died before cmd.exe was reached. Kept as a live regression
+        # check: if this ever prints a colon-separated %PATH%, the other
+        # hypothesis has come true after all.
         run: |
           set +e
           d=$(mktemp -d); : > "$d/headroom.exe"
