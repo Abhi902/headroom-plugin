@@ -3758,6 +3758,49 @@ out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$W13B2/stub:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$S13B2" DOCTOR_CLAUDE_DIR="$W13B2/cd" DOCTOR_VENV_DIR="$W13B2/venv" \
       DOCTOR_SHIM_DIR="$W13B2/shim" HEADROOM_STATE_DIR="$W13B2/state" bash "$DOCTOR" --fix 2>&1)
 check "w13: control — without py the bootstrap FAILs honestly" "engine bootstrap failed" "$out"
+check "w13: the by-hand hint names the Windows Scripts/ bindir" \
+      "$W13B2/venv/Scripts/pip install" "$out"
+check_absent "w13: ...and not the POSIX bin/ one, on Windows" "/venv/bin/pip install" "$out"
+
+# --- w15. Windows-on-ARM: headroom-ai ships compiled abi3 wheels and publishes
+# NO win_arm64 one, so an ARM64 interpreter matches nothing, falls back to the
+# sdist and fails both installs. Repeating the command by hand cannot fix that,
+# so the FAIL has to name the cause and the real remedy (the x64 Python runs
+# emulated there and matches win_amd64). Detection asks the interpreter for its
+# wheel tag — uname would say x86_64, since Git for Windows is an x86_64 build.
+w15_case() {  # w15_case <name> <platform tag> — a venv that builds but whose pip refuses
+  local d="$W/w15-$1"; mkdir -p "$d/stub" "$d/cd"
+  link_tool "$(command -v jq)" "$d/stub/jq"
+  cat > "$d/stub/python3" <<STUB15
+#!/bin/sh
+if [ "\$1" = "-c" ]; then echo $2; exit 0; fi
+if [ "\$1" = "-m" ] && [ "\$2" = "venv" ]; then
+  mkdir -p "\$3/Scripts"
+  printf '#!/bin/sh\\nexit 1\\n' > "\$3/Scripts/pip.exe"
+  printf '#!/bin/sh\\nexit 1\\n' > "\$3/Scripts/python.exe"
+  chmod +x "\$3/Scripts/pip.exe" "\$3/Scripts/python.exe"
+  exit 0
+fi
+exit 1
+STUB15
+  chmod +x "$d/stub/python3"
+  printf '#!/bin/sh\nexit 1\n' > "$d/stub/python"; chmod +x "$d/stub/python"
+  printf '#!/bin/sh\nexit 1\n' > "$d/stub/py";     chmod +x "$d/stub/py"
+  doc_settings_wired "$d/cd" > "$d/s.json"
+  env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$d/stub:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$d/s.json" DOCTOR_CLAUDE_DIR="$d/cd" DOCTOR_VENV_DIR="$d/venv" \
+      DOCTOR_SHIM_DIR="$d/shim" HEADROOM_STATE_DIR="$d/state" bash "$DOCTOR" --fix 2>&1
+}
+out=$(w15_case arm win-arm64)
+check "w15: an ARM64 interpreter still reaches the bootstrap FAIL" "engine bootstrap failed" "$out"
+check "w15: the FAIL names the missing win_arm64 wheel" "no win_arm64 wheel" "$out"
+check "w15: ...and prescribes the x64 Python that has one" "install the x64 build of Python" "$out"
+check "w15: the tag it actually read is quoted back" 'is "win-arm64"' "$out"
+# control: same fixture, x64 tag — the hint must NOT appear, or the check above
+# is only proving that the string exists in the script.
+out=$(w15_case amd win-amd64)
+check "w15: control — the x64 interpreter still FAILs honestly" "engine bootstrap failed" "$out"
+check_absent "w15: control — no ARM advice for an x64 interpreter" "no win_arm64 wheel" "$out"
 
 # w13-#13. The FLAT (non-lib/) engine-resolve.sh tier of check 7c-2 — the legacy
 # manual-install layout — had no fixture at all.

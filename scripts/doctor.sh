@@ -216,7 +216,27 @@ elif [ "$FIX" -eq 1 ]; then
     hint=""
     command -v apt-get >/dev/null 2>&1 \
       && hint=" (on Debian/Ubuntu, python3 -m venv needs the python3-venv package: sudo apt install python3-venv)"
-    say FAIL "engine bootstrap failed (tried python3, python, py -3) — by hand: python3 -m venv $VENV_DIR && $VENV_DIR/bin/pip install \"headroom-ai[all]\"$hint"
+    # headroom-ai ships COMPILED abi3 wheels and publishes none for win_arm64, so
+    # on Windows-on-ARM with an ARM64 interpreter pip matches nothing, falls back
+    # to the source dist and wants a full build toolchain — BOTH installs above
+    # then fail for a reason that repeating the command by hand cannot change.
+    # Ask the interpreter for its wheel tag instead of guessing: `uname` is no use
+    # here, because Git for Windows is an x86_64 build and reports x86_64 even on
+    # an ARM64 host. The remedy is real — the x64 Python runs emulated there and
+    # matches the win_amd64 wheel.
+    if [ -n "$boot_used" ]; then
+      # shellcheck disable=SC2086
+      boot_plat=$($boot_used -c 'import sysconfig;print(sysconfig.get_platform())' 2>/dev/null)
+      case $boot_plat in
+        *arm64*|*aarch64*)
+          is_windows && hint=" — this interpreter is \"$boot_plat\" and headroom-ai publishes no win_arm64 wheel, so pip fell back to the source dist: install the x64 build of Python (it runs emulated on Windows-on-ARM and matches the win_amd64 wheel), then re-run" ;;
+      esac
+    fi
+    # the by-hand path has to name the bindir THIS platform builds: a Windows venv
+    # has Scripts/, and sending a Windows user to $VENV_DIR/bin/pip — on the very
+    # platform this check exists for — is a dead end.
+    boot_hint_bin=bin; is_windows && boot_hint_bin=Scripts
+    say FAIL "engine bootstrap failed (tried python3, python, py -3) — by hand: python3 -m venv $VENV_DIR && $VENV_DIR/$boot_hint_bin/pip install \"headroom-ai[all]\"$hint"
   fi
 elif [ "$HCAT_PY_BROKEN" -eq 1 ]; then
   say fixable "engine python not found — HCAT_PYTHON is set but broken ($HCAT_PYTHON); unset it or point it at a working python (--fix refuses to bootstrap while it is set)"
