@@ -157,6 +157,35 @@ jobs:
           # expected render is the idle badge.
           if ("$out" -match 'headroom broken') { throw "status line rendered the BROKEN badge: $out" }
           if ("$out" -notmatch 'headroom')     { throw "status line printed no headroom badge: $out" }
+
+          # --- the ACTIVE render, with a NATIVE transcript path.
+          # Passing "transcript_path":"" made statusline.sh's `[ -n "$tp" ] && [ -f
+          # "$tp" ]` guard false, so the whole transcript block was skipped and
+          # three MSYS-tools-on-a-native-path crossings never ran in CI at all:
+          # `[ -f ]`, `stat -c%s`/`stat -f%z`, and `jq` reading that path. Those
+          # are precisely the operations everything here assumes MSYS translates
+          # for free -- a belief whose only fixtures run on a POSIX host. The
+          # assertions above cannot notice, because all three idle renders carry
+          # the literal "headroom idle", which matches 'headroom' and not
+          # 'headroom broken'.
+          # The path MUST go over natively: that is what Claude Code passes on
+          # Windows, and it is the entire premise being checked. ConvertTo-Json
+          # escapes the backslashes, so no hand-rolled quoting can get it wrong.
+          $tp  = Join-Path $PWD 'ci-transcript.jsonl'
+          $now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z')
+          Set-Content -LiteralPath $tp -Encoding utf8 -Value @(
+            '{"timestamp":"' + $now + '","message":{"content":[{"type":"tool_use","id":"f9","name":"mcp__headroom__headroom_compress"}]}}'
+            '{"message":{"content":[{"type":"tool_result","tool_use_id":"f9","content":[{"type":"text","text":"{\"tokens_saved\": 5000}"}]}]}}'
+          )
+          $json2 = @{ transcript_path = $tp; model = @{ id = 'claude-opus-4-8' }; session_id = 'ci-f9' } | ConvertTo-Json -Compress
+          Write-Host "native transcript: $tp"
+          $out2 = $json2 | & $bash $script
+          Write-Host "active badge: $out2"
+          if (-not $out2) { throw "status line printed nothing for the seeded transcript" }
+          if ("$out2" -match 'headroom broken') { throw "seeded transcript rendered the BROKEN badge: $out2" }
+          if ("$out2" -match 'headroom idle') {
+            throw "seeded transcript still rendered IDLE — the MSYS tools could not read the NATIVE transcript path, so the translation this branch assumes does not hold: $out2"
+          }
           # Differential: the MSYS-INTERNAL bash should NOT manage this. If it does,
           # the prune proved nothing on this runner -- say so loudly, but do NOT red
           # a required gate over a runner-image detail.
