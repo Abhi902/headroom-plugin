@@ -3961,6 +3961,54 @@ out=$(env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$FENG:$STUB:/usr/bin:/bin" \
       DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" 2>&1)
 check "w14b: posix bare-bash wiring still reads as wired" "ok      - statusLine wired" "$out"
 
+# --- w16. The /bin -> /usr/bin ALIAS trap (the bug the windows job exposed).
+# Every other w14 fixture stubs cygpath as a passthrough, so /bin/bash and
+# /usr/bin/bash look like different files and the POSIX promotion appears to
+# work. A REAL Git Bash aliases /bin onto /usr/bin: the promoted /bin/bash
+# passes `-f`, and cygpath -w maps it straight back to ...\usr\bin\bash.exe, so
+# the coreutils-less bash gets wired anyway and sl_prefer_wrapper_bash silently
+# no-ops. This stub models the alias, and puts the wrapper only under the DRIVE
+# mount (/c/...) -- which is where it really lives, and which is not aliased.
+W16="$W/w16-alias"; mkdir -p "$W16/cd" "$W16/gitbash/usr/bin" "$W16/gitbash/bin" \
+                             "$W16/drives/c/GitRoot/bin" "$W16/drives/c/GitRoot/usr/bin"
+fake_bash "$W16/gitbash/usr/bin/bash"
+fake_bash "$W16/gitbash/bin/bash"          # the /bin alias: resolvable, same file
+: > "$W16/drives/c/GitRoot/usr/bin/bash.exe"; chmod +x "$W16/drives/c/GitRoot/usr/bin/bash.exe"
+: > "$W16/drives/c/GitRoot/bin/bash.exe";     chmod +x "$W16/drives/c/GitRoot/bin/bash.exe"
+cat > "$W16/cygpath" <<'W16CYG'
+#!/bin/sh
+# -w: BOTH POSIX spellings collapse onto the MSYS-internal native path. That
+# collapse IS the alias, and it is what made the old promotion a no-op.
+mode=$1; shift
+case "$mode" in
+  -w) case "$1" in
+        */bin/bash|*/bin/bash.exe) printf '%s\n' 'C:\GitRoot\usr\bin\bash.exe' ;;
+        *) printf '%s\n' "$1" ;;
+      esac ;;
+  *) printf '%s\n' "$1" ;;
+esac
+W16CYG
+chmod +x "$W16/cygpath"
+w16_run() {  # fresh settings each run, so the doctor has to actually re-wire
+  printf '{}\n' > "$W16/s.json"
+  env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
+      PATH="$W16/gitbash/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$W16/s.json" DOCTOR_CLAUDE_DIR="$W16/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W16/shim" DOCTOR_CYGPATH="$W16/cygpath" \
+      DOCTOR_DRIVE_ROOT="$W16/drives" HEADROOM_STATE_DIR="$W16/state" \
+      "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
+  jq -r '.statusLine.command' "$W16/s.json" 2>/dev/null
+}
+cmd16=$(w16_run)
+check "w16: the alias does not defeat the promotion" 'GitRoot\bin\bash.exe' "$cmd16"
+check_absent "w16: the coreutils-less usr/bin bash is not wired" 'usr\bin\bash.exe' "$cmd16"
+# control: with no wrapper on disk under the drive mount, inventing a path would
+# be worse than keeping usr/bin -- so it must stay put.
+rm -f "$W16/drives/c/GitRoot/bin/bash.exe"
+cmd16b=$(w16_run)
+check "w16: control — no wrapper on disk keeps usr/bin rather than inventing one" \
+      'usr\bin\bash.exe' "$cmd16b"
+
 # --- w14c (defect 3): --fix bootstrap must not hang on torch.
 # On Windows `headroom-ai[all]` pulls the `ml` extra -> torch>=2.12.1 (~2.5 GB)
 # because the sys_platform != "darwin" marker applies. CI already hedges with

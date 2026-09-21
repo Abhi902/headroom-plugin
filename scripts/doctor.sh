@@ -44,6 +44,7 @@
 #                      same contract as bin/hcat)
 #   DOCTOR_OS          windows|unix — force platform branches (default: detect)
 #   DOCTOR_SHIM_DIR    where --fix shims `headroom` (default ~/.local/bin)
+#   DOCTOR_DRIVE_ROOT  prefix for the Windows drive mount (default "" => /c/...)
 #   DOCTOR_CYGPATH     cygpath stub for tests (default: cygpath when present)
 #   DOCTOR_SHIM_RUNS_TIMEOUT  seconds a `headroom --help` probe may take (default 5)
 #
@@ -366,8 +367,23 @@ reinstall_hint() {  # how to repair an engine whose `headroom` CLI is missing or
 # `command -v bash` inside Git Bash resolves to the usr/bin one, so whenever
 # that bin/ sibling really exists on disk we must promote to it.
 # CI cannot catch this: windows-latest has Git\usr\bin on PATH, which masks it.
+_sl_same_native() {  # same file once both are spelled natively? (catches the /bin -> /usr/bin alias)
+  [ "$(win_path "$1")" = "$(win_path "$2")" ]
+}
+_sl_drive_posix() {  # C:\a\b -> /c/a/b via the DRIVE mount, bypassing the mount table
+  local w=$1 drive rest
+  case $w in
+    [A-Za-z]:[\\/]*) drive=${w%%:*}; rest=${w#?:} ;;
+    *) printf '%s\n' "$w"; return ;;
+  esac
+  drive=$(printf '%s' "$drive" | tr 'A-Z' 'a-z')
+  rest=$(printf '%s' "$rest" | tr '\\' '/')
+  # DOCTOR_DRIVE_ROOT re-bases the drive mount so a POSIX host can stage one
+  # (a real Git Bash has /c, /d, ... at the filesystem root; a test cannot).
+  printf '%s/%s%s\n' "${DOCTOR_DRIVE_ROOT:-}" "$drive" "$rest"
+}
 sl_prefer_wrapper_bash() {  # <bash path, native or POSIX spelling> → possibly promoted
-  local p=$1 sep base root cand
+  local p=$1 sep base root cand cw
   case $p in
     *[\\/]usr[\\/]bin[\\/]bash|*[\\/]usr[\\/]bin[\\/]bash.exe) ;;
     *) printf '%s\n' "$p"; return ;;
@@ -378,7 +394,24 @@ sl_prefer_wrapper_bash() {  # <bash path, native or POSIX spelling> → possibly
   cand="${root}${sep}bin${sep}${base}"
   # `-f` has to be applied to a path THIS shell can stat: inside Git Bash that
   # is the POSIX spelling, and unix_path is a no-op on one that already is.
-  [ -f "$(unix_path "$cand")" ] && p=$cand
+  if [ -f "$(unix_path "$cand")" ] && ! _sl_same_native "$cand" "$p"; then
+    p=$cand
+  else
+    # ...but inside a REAL Git Bash the POSIX branch above is a trap: /bin is an
+    # alias for /usr/bin there, so /usr/bin/bash -> /bin/bash passes `-f` and
+    # cygpath -w maps it straight back to ...\usr\bin\bash.exe. The promotion
+    # then silently no-ops and we wire the coreutils-less bash after all -- which
+    # is exactly what this function exists to prevent, and what CI could not see
+    # while windows-latest carried Git\usr\bin on PATH. So retry in the NATIVE
+    # namespace and reach the candidate through the DRIVE mount (/c/...), which
+    # is not aliased, instead of through / (the Git root).
+    cw=$(win_path "$p")
+    case $cw in
+      *\\usr\\bin\\*)
+        cand="${cw%\\usr\\bin\\*}\\bin\\${cw##*\\}"
+        [ -f "$(_sl_drive_posix "$cand")" ] && p=$cand ;;
+    esac
+  fi
   printf '%s\n' "$p"
 }
 sl_bash_path() {  # → the bash a Windows statusLine.command should run through
