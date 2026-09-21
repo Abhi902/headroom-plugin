@@ -476,7 +476,22 @@ PYEOF
   else
     echo "FAIL - hcat: output < half of raw (raw=$raw_bytes out=$out_bytes)"; FAIL=$((FAIL+1))
   fi
-  check "hcat: stats event written" '"strategy":"hcat"' "$(cat "$TMP"/hc_ws/*.jsonl 2>/dev/null)"
+  # Assert that an event was RECORDED, not which tier won. hcat deliberately
+  # picks toon-lite when the engine would not beat it by 5%, so the winning
+  # strategy is data- AND install-dependent: with a bare headroom-ai (no [all])
+  # this same file lands on "hcat" on ubuntu and on "toon-lite" on macOS. Both
+  # are correct product behaviour, and naming one of them here turned a tier
+  # preference into a spurious platform failure the moment CI started installing
+  # a real engine on POSIX. The tier-specific assertion lives in w12, which
+  # drives hcat through a stub interpreter and so is deterministic.
+  ev=$(cat "$TMP"/hc_ws/*.jsonl 2>/dev/null)
+  check "hcat: stats event written" '"type":"compress"' "$ev"
+  case $ev in
+    *'"strategy":"hcat"'*|*'"strategy":"toon-lite"'*)
+      echo "ok - hcat: stats event names a known strategy"; PASS=$((PASS+1)) ;;
+    *)
+      echo "FAIL - hcat: stats event names a known strategy"; echo "    got: $ev"; FAIL=$((FAIL+1)) ;;
+  esac
 
   # 25. incompressible content → raw passthrough, no schema noise
   printf 'short prose line\n' > "$TMP/hc_prose.txt"
