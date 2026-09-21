@@ -85,11 +85,11 @@ check_absent() {  # check_absent <name> <forbidden-substring> <actual>
 }
 
 skip_note() {  # skip_note <reason> — a COUNTED skip
-  # An uncounted `skip_note "..."` is invisible to the Windows gate, which
+  # An uncounted bare `echo` of a skip is invisible to the Windows gate, which
   # builds its whole view of reality from FAIL lines: a fixture that stops
   # running emits neither "ok -" nor "FAIL -", so it reads as fixed (if it was
   # on the known-failure list) or vanishes silently (if it was not).
-  skip_note "$1"; SKIP=$((SKIP+1))
+  printf 'skip - %s\n' "$1"; SKIP=$((SKIP+1))
 }
 check_eq() {  # check_eq <name> <expected> <actual> — exact match (exit codes, counts)
   if [ "$2" = "$3" ]; then

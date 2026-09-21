@@ -190,6 +190,17 @@ jobs:
             grep -E '^skip - ' suite.log | sort -u || true
             exit 1
           fi
+          # A DIRECT coverage signal, worth more than the coarse floor above: this
+          # job installs a real engine, so no engine-gated fixture has any business
+          # skipping. A nonzero skip count here IS the #5 regression -- the probe
+          # failing to see a Windows venv -- and unlike a fixture count it cannot
+          # drift as fixtures are added or retired.
+          skipped=$(echo "$summary" | sed -nE 's/.*, ([0-9]+) skipped.*/\1/p')
+          if [ -n "$skipped" ] && [ "$skipped" -gt 0 ]; then
+            echo "::error::$skipped fixture group(s) SKIPPED on a host with a real engine installed — the engine probe is not seeing this venv:"
+            grep -E '^skip - ' suite.log | sort -u || true
+            exit 1
+          fi
           new_fails=$(comm -23 observed.txt known.txt)
           now_passing=$(comm -13 observed.txt known.txt)
           if [ -n "$now_passing" ]; then

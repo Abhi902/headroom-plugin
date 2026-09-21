@@ -72,11 +72,15 @@ else fail "hcat on non-ASCII JSON" "rc=$rc" "$(printf '%s' "$out" | head -1)" "$
 # can tell a regression from a working run: rc and the receipt are identical
 # either way, and the POSIX stats fixtures are gated behind a HEADROOM_PY that
 # used to be unresolvable under Git Bash.
-if grep -q '"strategy":"hcat"' "$HCAT_WS/stats.jsonl" 2>/dev/null; then
-  ok "hcat recorded its savings event on Windows (no fcntl, stats.jsonl written)"
+# glob, not a fixed name: the REAL engine writes session_stats.jsonl (headroom's
+# own _paths.session_stats_path()). The w12 POSIX fixture asserts "stats.jsonl"
+# only because it drives hcat through a STUB python that fabricates that file --
+# modelling this assertion on it produced a false FAIL against a working engine.
+if grep -qs '"strategy":"hcat"' "$HCAT_WS"/*.jsonl; then
+  ok "hcat recorded its savings event on Windows (no fcntl, stats written)"
 else
   fail "hcat wrote no stats event on Windows — the no-fcntl branch regressed silently" \
-       "looked in: $HCAT_WS/stats.jsonl" "$(ls -l "$HCAT_WS" 2>&1 | head -3)"
+       "looked for *.jsonl in: $HCAT_WS" "$(ls -l "$HCAT_WS" 2>&1 | head -5)"
 fi
 # negative control: same file, resolver deliberately broken (no HCAT_PYTHON, venv
 # pointed at nothing, engine nowhere on PATH) must land in the jq tier and SAY so.
