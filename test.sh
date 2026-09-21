@@ -84,6 +84,30 @@ check_absent() {  # check_absent <name> <forbidden-substring> <actual>
   fi
 }
 
+real_python() {  # a real SYSTEM interpreter — not a suite stub, not the engine venv
+  # The two callers build a FAKE headroom package and inject it on PYTHONPATH, so
+  # they need an interpreter that runs but does NOT already import headroom.
+  # That is what the old `PATH=/usr/bin:/bin:/usr/local/bin command -v python3`
+  # was really protecting, and it bought that protection with a pinned PATH that
+  # no Windows interpreter can ever satisfy: Git Bash on windows-latest has
+  # `python` but no `python3`, so both blocks fell to the literal
+  # /usr/bin/python3, failed `[ -x ]`, and skipped SILENTLY on every Windows run.
+  # One of them is w12 -- the POSIX regression guard for the no-fcntl stats
+  # write -- so that behaviour's coverage was absent on Windows by this route and
+  # wrong by the other (windows-check looked for the stub's filename). Assert the
+  # two properties directly instead of approximating them with a path pin, and
+  # take doctor.sh's interpreter order while we are here.
+  local c q
+  for c in python3 python; do
+    q=$(command -v "$c" 2>/dev/null) || continue
+    [ -n "$q" ] && [ -x "$q" ] || continue
+    case $q in "${TMP:-/nonexistent}"/*|"${W:-/nonexistent}"/*) continue ;; esac  # a fixture stub
+    "$q" -c 'import sys' >/dev/null 2>&1 || continue          # Windows Store alias only nags
+    "$q" -c 'import headroom' >/dev/null 2>&1 && continue     # an engine python would shadow the fake
+    printf '%s\n' "$q"; return 0
+  done
+  return 1
+}
 skip_note() {  # skip_note <reason> — a COUNTED skip
   # An uncounted bare `echo` of a skip is invisible to the Windows gate, which
   # builds its whole view of reality from FAIL lines: a fixture that stops
@@ -2689,7 +2713,7 @@ check_absent "fix/badge: same blob not shown as missed" "missed" "$out"
 
 # #5 — Python-tier TOON-lite (<5% engine savings) via a fake headroom shim,
 # so the lossless quoting path is exercised WITHOUT a real engine install.
-REALPY=$(PATH=/usr/bin:/bin:/usr/local/bin command -v python3 2>/dev/null || echo /usr/bin/python3)
+REALPY=$(real_python || echo /nonexistent/python3)
 if [ -x "$REALPY" ]; then
   hshim="$TMP/hshim"; mkdir -p "$hshim/headroom"
   : > "$hshim/headroom/__init__.py"
@@ -3402,7 +3426,7 @@ check_absent "w12: the probe's hijack nudge does not fire on POSIX" "sits in thi
 # so on Windows (no fcntl) EVERY hcat run silently failed to record its savings.
 # The import is guarded on its own now — this is the POSIX regression guard that
 # the flock path still writes the event after that refactor.
-W12PY=$(PATH=/usr/bin:/bin:/usr/local/bin command -v python3 2>/dev/null || echo /usr/bin/python3)
+W12PY=$(real_python || echo /nonexistent/python3)
 if [ -x "$W12PY" ]; then
   h12="$W/w12shim"; mkdir -p "$h12/headroom"
   : > "$h12/headroom/__init__.py"
