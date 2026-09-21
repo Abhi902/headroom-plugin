@@ -4,6 +4,16 @@ A tiny **status-line indicator for Claude Code** that shows — at a glance, at 
 
 No more wondering *"did I remember to compress that huge file, or did I just burn context?"* — the indicator tells you, honestly, in real time.
 
+> ### ⚠️ Updating from v2.7.4 or earlier? Run the doctor once.
+>
+> ```
+> /headroom-usage-indicator:doctor --fix
+> ```
+>
+> v2.8 spawns the bundled MCP by the **bare name** `headroom` — that change is what makes Windows work at all, and it removed the old launcher's `~/.headroom-venv` fallback. If an earlier doctor bootstrapped your engine into `~/.headroom-venv` (the default path for every release up to v2.7.4), it is **not** on your `PATH`, so the MCP stops connecting until `--fix` shims it into `~/.local/bin`.
+>
+> **The failure is quiet.** A dead MCP renders as an *idle* badge, which looks identical to "nothing compressed yet". SessionStart nudges you, and one command fixes it — but if your badge never leaves idle after updating, this is why.
+
 ---
 
 ## Quickstart (two commands and the doctor)
@@ -177,7 +187,11 @@ Works under **Git for Windows (Git Bash)** — Claude Code runs its hooks and th
 
 One Windows caveat worth knowing: the bundled MCP is spawned by the **bare name** `headroom`, and Windows resolves a bare command name from the spawning process's **project directory before PATH**. So a `headroom.exe` committed to a repository you open would take precedence over your installed engine. The doctor and the session probe both flag such a file if they find one — remove or rename it.
 
-`hcat` output is UTF-8 on every platform (`PYTHONIOENCODING=utf-8`). Desktop notifications from Dangi are macOS/Linux only for now. CI runs the resolver, `hcat`, the doctor and a shell-less MCP spawn on a real `windows-latest` runner — what it cannot run is Claude Code itself; see [#9](https://github.com/Abhi902/headroom-plugin/issues/9).
+**Windows on ARM:** `headroom-ai` ships compiled `abi3` wheels and publishes none for `win_arm64`, so an ARM64 interpreter matches nothing, falls back to the source distribution, and wants a full build toolchain. The doctor detects this by asking the interpreter for its own wheel tag (`uname` is no help — Git for Windows is an x86_64 build and reports x86_64 even on an ARM64 host) and tells you the real remedy: install the **x64** build of Python, which runs emulated and matches the `win_amd64` wheel.
+
+`hcat` output is UTF-8 on every platform (`PYTHONIOENCODING=utf-8`), and piping it into `head` exits quietly instead of printing a `BrokenPipeError` traceback — Windows has no `SIGPIPE`, so that path is handled explicitly rather than by the signal default. Desktop notifications from Dangi are macOS/Linux only for now.
+
+CI runs the full suite on `ubuntu-latest`, `macos-latest` **and** `windows-latest`, with a real engine installed on all three, plus a Windows-only pass that exercises the resolver against genuine venv/`uv tool`/pip layouts, `doctor --fix` end to end including idempotency, a shell-less MCP spawn by bare name with a negative control, and the status line rendered from PowerShell through the command the doctor actually wrote. Windows failures are ratcheted by name against [`.github/windows-known-failures.txt`](.github/windows-known-failures.txt) — an unlisted failure reds the build, and a listed fixture that starts passing raises a notice, so the list can only shrink. What CI still cannot run is Claude Code itself; see [#9](https://github.com/Abhi902/headroom-plugin/issues/9).
 
 ## Uninstall
 
@@ -259,6 +273,7 @@ Do **not** run the legacy installer if the plugin is installed — you'd registe
 - `data/model-prices.json` — the badge's price table as data; adding a model is an edit here, not a code change.
 - `.mcp.json` — bundled headroom MCP server definition (`headroom mcp serve`, spawned by name).
 - `test.sh` — the synthetic-transcript test suite; run it from the repo root.
+- `scripts/ci/` — `windows-check.sh` (the real-Windows gate: resolver layouts, `doctor --fix`, the status-line command) and `spawn-probe.mjs` (spawns an MCP server without a shell, the way Claude Code does, and fails unless a JSON-RPC `initialize` comes back).
 
 ## License
 
