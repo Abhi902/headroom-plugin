@@ -12,8 +12,54 @@ jobs:
       - uses: actions/checkout@v7
       - name: deps
         run: |
-          if command -v apt-get >/dev/null; then sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck; else brew install jq shellcheck; fi
-      - run: ./test.sh
+          if command -v apt-get >/dev/null; then
+            sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck locales
+            # the de_DE.UTF-8 fixtures skip without a generated locale
+            sudo locale-gen de_DE.UTF-8 && sudo update-locale
+          else
+            brew install jq shellcheck
+          fi
+      - name: real engine
+        run: |
+          # Until this existed, `deps` installed only jq and shellcheck, so SEVEN
+          # real-engine fixture groups skipped on BOTH POSIX platforms -- hcat
+          # compression, the two gate-deny paths, hcat SIGPIPE, the doctor healthy
+          # run, f7l block-9 and health engine-clear. After the Windows engine
+          # probe was fixed, Windows became the ONLY platform exercising the real
+          # engine, which is exactly backwards: every current user is on macOS or
+          # Linux. ubuntu finishing in 37s was the tell.
+          #
+          # Bare headroom-ai, not [all]: the extra pulls torch wherever
+          # sys_platform != "darwin" (~2.5 GB) and the bare package carries
+          # everything hcat and the MCP server need -- doctor.sh says so where it
+          # hedges the same way. $HOME/.headroom-venv is the resolver's default,
+          # so test.sh's probe finds it with no further wiring.
+          python3 -m venv "$HOME/.headroom-venv"
+          "$HOME/.headroom-venv/bin/pip" install -q headroom-ai
+          "$HOME/.headroom-venv/bin/python" -c "import headroom.compress; print('engine ok')"
+      - name: suite
+        run: |
+          set -o pipefail
+          ./test.sh 2>&1 | tee suite.log
+      - name: engine coverage gate
+        # Same assertion the Windows job carries, on all three platforms now. The
+        # lesson from F8 is that the dangerous failure is not a red test, it is
+        # coverage disappearing quietly -- and an engine-gated skip on a runner
+        # that just installed an engine is exactly that.
+        if: ${{ !cancelled() }}
+        run: |
+          [ -f suite.log ] || { echo "::error::suite.log missing — the suite step did not run"; exit 1; }
+          eng=$( { grep -cE '^skip - .*headroom venv not found' suite.log || true; } | tail -1 )
+          if [ "${eng:-0}" -gt 0 ]; then
+            echo "::error::$eng engine-gated fixture group(s) skipped although this job installed an engine:"
+            grep -E '^skip - .*headroom venv not found' suite.log | sort -u || true
+            exit 1
+          fi
+          if grep -qE '^skip - ' suite.log; then
+            echo "::notice::environment skips on this runner (not engine-related):"
+            grep -E '^skip - ' suite.log | sort -u
+          fi
+          grep -E '^[0-9]+ passed' suite.log | tail -1
   windows:
     runs-on: windows-latest
     defaults: { run: { shell: bash } }
