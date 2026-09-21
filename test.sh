@@ -3094,8 +3094,14 @@ check_eq "w10: marketplace.json 2.8.0" "2.8.0" "$(jq -r '.plugins[0].version // 
 W11="$W/w11"; mkdir -p "$W11/venv/bin" "$W11/home"
 printf '#!/bin/sh\nexit 0\n'  > "$W11/venv/bin/python";   chmod +x "$W11/venv/bin/python"
 printf '#!/bin/sh\necho hr\n' > "$W11/venv/bin/headroom"; chmod +x "$W11/venv/bin/headroom"
-out=$(printf '{"session_id":"w11"}' | env -u HCAT_PYTHON HOME="$W11/home" DOCTOR_VENV_DIR="$W11/venv" \
-      PATH="$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W11/state" bash "$PROBE"); rc=$?
+# DOCTOR_OS=unix is load-bearing, not decoration: this fixture asserts the POSIX
+# behaviour, and on a real Windows host is_windows() is true, so the probe would
+# (correctly) take the nudge-only branch and fail an assertion that names POSIX.
+# The Windows behaviour has its own fixture, w11-C2. Pinning the platform is what
+# makes each of them test the thing it is named after on every host.
+out=$(printf '{"session_id":"w11"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W11/home" \
+      DOCTOR_VENV_DIR="$W11/venv" PATH="$STUB:/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W11/state" bash "$PROBE"); rc=$?
 check        "w11: probe nudges when the engine resolves but headroom is off PATH" "not on PATH" "$out"
 check        "w11: the nudge names the v2.8 bare-name MCP spawn" "the bundled MCP spawns it by name" "$out"
 check_absent "w11: an off-PATH engine is not reported as never-installed" "engine not installed" "$out"
