@@ -3943,6 +3943,24 @@ check_absent "w14b: --fix removes the dead interpreter" \
              "/nope/does-not-exist/bash.exe" "$(jq -r '.statusLine.command' "$S14C")"
 check        "w14b: --fix rewires to a real bash" \
              "/gitroot/bin/bash" "$(jq -r '.statusLine.command' "$S14C")"
+# ...and the same repair with a NATIVE, backslash-spelled dead interpreter -- the
+# spelling a real Windows settings.json actually carries. The fixture above uses
+# forward slashes, which is precisely why the replacement pattern being an
+# unquoted GLOB stayed invisible: backslashes are eaten as pattern escapes, so
+# `${sl//$missing/$good}` could never match a native path and --fix fell through
+# to "could not locate ... fix it by hand" on every run, forever.
+S14CW="$W14/scw.json"
+W14WINMISS='C:\zz-missing\bin\bash.exe'
+jq -n --arg c "\"$W14WINMISS\" \"$W14C/headroom-statusline.sh\"" \
+  '{statusLine:{type:"command",command:$c}}' > "$S14CW"
+env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
+  PATH="$W14G/usr/bin:$FENG:$STUB:/usr/bin:/bin" \
+  DOCTOR_SETTINGS="$S14CW" DOCTOR_CLAUDE_DIR="$W14C" DOCTOR_VENV_DIR="$NOVENV" \
+  DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix >/dev/null 2>&1
+check_absent "w14b: --fix removes a NATIVE-spelled dead interpreter" \
+             "$W14WINMISS" "$(jq -r '.statusLine.command' "$S14CW")"
+check        "w14b: ...and repoints it at a real bash" \
+             "/gitroot/bin/bash" "$(jq -r '.statusLine.command' "$S14CW")"
 # a HEALTHY windows wiring must still pass untouched (no false alarm)
 S14D="$W14/sd.json"
 jq -n --arg c "\"$W14G/bin/bash\" \"$W14C/headroom-statusline.sh\"" \

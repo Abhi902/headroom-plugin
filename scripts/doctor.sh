@@ -839,7 +839,14 @@ else
       elif ! backup_settings; then
         say FAIL "could not back up settings.json before repointing the dead '$sl_interp_missing' interpreter — refusing to overwrite without one"
       else
-        sl_new_cmd=${sl//$sl_interp_missing/$sl_good_bash}
+        # QUOTE the pattern. Unquoted, it is a GLOB: a native
+        # C:\Program Files\Git\usr\bin\bash.exe has its backslashes eaten as
+        # pattern escapes and can never match the literal path in $sl, so on the
+        # only platform this repair exists for --fix always fell through to
+        # "could not locate ... fix it by hand" and kept exiting 1 every run.
+        # (A token containing * would over-match and persist a mangled command.)
+        # With it quoted, the `= "$sl"` guard below is a real no-match check.
+        sl_new_cmd=${sl//"$sl_interp_missing"/$sl_good_bash}
         if [ "$sl_new_cmd" = "$sl" ]; then
           say FAIL "could not locate '$sl_interp_missing' in the statusLine command to repoint it — fix statusLine.command in settings.json by hand"
         elif jq --arg c "$sl_new_cmd" '.statusLine.command = $c' \
@@ -889,7 +896,7 @@ else
           # with the wrong (or no) anchor can't also mangle an unrelated
           # sibling token that merely shares this one's prefix (e.g. a
           # coexisting ...headroom-statusline.sh.bak).
-          sl_new_cmd=${sl//$sl_respelled_raw$sl_respelled_delim/$CLAUDE_DIR/headroom-statusline.sh$sl_respelled_delim}
+          sl_new_cmd=${sl//"$sl_respelled_raw$sl_respelled_delim"/$CLAUDE_DIR/headroom-statusline.sh$sl_respelled_delim}
           if [ "$sl_new_cmd" = "$sl" ]; then
             # the replace found nothing to change -- never claim "fixed" for a
             # rewrite that silently did nothing, which would violate the

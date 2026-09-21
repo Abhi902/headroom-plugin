@@ -128,7 +128,11 @@ jobs:
       - name: full suite (gated against the known-failure list)
         run: |
           ./test.sh > suite.log 2>&1 || true
-          summary=$(grep -E '^[0-9]+ passed, [0-9]+ failed$' suite.log | tail -1)
+          # `shell: bash` runs as `bash --noprofile --norc -e -o pipefail`, and grep
+          # exits 1 on NO MATCH. Unguarded, the assignment below aborts the step
+          # before the friendly diagnostic underneath it can ever run -- so the
+          # "suite died early" branch was unreachable exactly when it was needed.
+          summary=$( { grep -E '^[0-9]+ passed, [0-9]+ failed$' suite.log || true; } | tail -1 )
           if [ -z "$summary" ]; then
             echo "::error::the suite printed no summary line — it died before finishing"
             tail -40 suite.log
@@ -139,8 +143,14 @@ jobs:
           # the suite's own FAIL lines are "FAIL - <name>"; doctor's nested
           # output inside a captured fixture is "FAIL    - ..." (say() pads to
           # 7), so anchoring on the single space keeps the two apart.
-          grep -E '^FAIL - ' suite.log | sed 's/^FAIL - //' | sort -u > observed.txt
-          grep -vE '^[[:space:]]*(#|$)' "$known" | sort -u > known.txt
+          # Same trap, worse consequence: when the known-failure list finally
+          # drains -- the stated GOAL of that file -- `grep '^FAIL - '` matches
+          # nothing, exits 1, pipefail propagates and set -e reds a REQUIRED gate
+          # on a perfectly green Windows suite, with no message. Guard the grep
+          # alone, never the whole redirection: `|| true` on the pipeline as a
+          # unit would also swallow a sed or sort failure.
+          { grep -E '^FAIL - ' suite.log || true; } | sed 's/^FAIL - //' | sort -u > observed.txt
+          { grep -vE '^[[:space:]]*(#|$)' "$known" || true; } | sort -u > known.txt
           new_fails=$(comm -23 observed.txt known.txt)
           now_passing=$(comm -13 observed.txt known.txt)
           if [ -n "$now_passing" ]; then
