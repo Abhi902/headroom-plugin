@@ -3704,7 +3704,21 @@ ln -sfn "$W13R/deadtarget" "$W13R/shim/headroom"
 # the doctor wrote in an earlier run, since gone dead", and it works on BOTH
 # platforms: no more skipping where MSYS turns ln -s into a copy.
 mkdir -p "$W13R/state"
-printf '%s\n%s\n' "$W13R/shim/headroom" "$W13R/deadtarget" > "$W13R/state/shim-provenance"
+# THREE lines, matching what _shim_record actually writes since 65dabd5: path,
+# source, and an IDENTITY for the file. A 2-line record still works, but only
+# through the legacy fallback, whose strongest available proof is `[ -L ]` plus
+# readlink -- symlink-only. MSYS turns `ln -s` into a copy, so on a real Windows
+# host that fallback cannot hold and the self-repair never fires. Compute the
+# identity exactly as _shim_record does (link on POSIX, checksum on the copy) so
+# this fixture means "a shim the doctor wrote in an earlier run, since gone dead"
+# on BOTH platforms rather than only where symlinks exist.
+if [ -L "$W13R/shim/headroom" ]; then
+  w13_prov_id="link:$(readlink "$W13R/shim/headroom")"
+else
+  w13_prov_id="sum:$(cksum < "$W13R/shim/headroom")"
+fi
+printf '%s\n%s\n%s\n' "$W13R/shim/headroom" "$W13R/deadtarget" "$w13_prov_id" \
+  > "$W13R/state/shim-provenance"
 S13R="$W13R/s.json"; doc_settings_wired "$W13R/cd" > "$S13R"
 w13_dead() {
   env -u HCAT_PYTHON PATH="$W13R/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13R" \
