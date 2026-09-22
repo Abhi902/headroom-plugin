@@ -3697,6 +3697,11 @@ printf '#!/bin/sh\necho hr\n' > "$W13R/venv/bin/headroom"; chmod +x "$W13R/venv/
 # at the same path looks like, which w19 asserts must NOT be deleted.
 printf '#!/bin/sh\nexit 1\n'  > "$W13R/deadtarget";        chmod +x "$W13R/deadtarget"
 ln -sfn "$W13R/deadtarget" "$W13R/shim/headroom"
+# MSYS `ln -s` silently writes a COPY, so on a real Windows host the link above is
+# not a link and the ownership proof (which IS the symlink on POSIX) cannot hold.
+# The product is correct there -- it writes a copy and compares bytes -- so skip
+# rather than assert POSIX semantics on a filesystem that has none.
+if [ -L "$W13R/shim/headroom" ]; then
 S13R="$W13R/s.json"; doc_settings_wired "$W13R/cd" > "$S13R"
 w13_dead() {
   env -u HCAT_PYTHON PATH="$W13R/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13R" \
@@ -3737,6 +3742,9 @@ out=$(w13_dead --fix)
 check_eq     "w13: the next --fix is a no-op (no ^fixed line)" "0" \
              "$(printf '%s\n' "$out" | grep -cE '^fixed ')"
 check        "w13: and it greens the repaired shim" "headroom CLI on PATH ($W13R/shim/headroom)" "$out"
+else
+  skip_note "w13 dead-own-shim self-repair (no real symlink support on this filesystem)"
+fi
 
 # w13-#10. shim_runs executes whatever `command -v headroom` resolves on every
 # plain /doctor run — by its own comment that may be a name squatter or a wedged
@@ -4309,7 +4317,7 @@ printf '#!/bin/sh\necho hr\n' > "$W18/bin/headroom";  chmod +x "$W18/bin/headroo
 printf '#!/bin/sh\nexit 1\n'  > "$W18/bin/python";    chmod +x "$W18/bin/python"   # executable, NOT importable
 printf '#!/bin/sh\nexit 0\n'  > "$W18/venv/bin/python"; chmod +x "$W18/venv/bin/python"  # the real engine
 out=$(gate_input "$BIGJSON" w18 | env -u HCAT_PYTHON HOME="$W18/home" DOCTOR_VENV_DIR="$W18/venv" \
-      PATH="$W18/bin:/usr/bin:/bin" HEADROOM_STATE_DIR="$W18/state" bash "$GATE")
+      PATH="$W18/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W18/state" bash "$GATE")
 check "w18: a decoy python beside headroom does not stop the gate denying" "deny" "$out"
 if [ -s "$W18/state/last-error" ]; then
   echo "FAIL - w18: a decoy python must not flip the badge to broken"; FAIL=$((FAIL+1))
