@@ -3666,7 +3666,14 @@ check "w13: control — a PE CLI still shims (so the check above discriminates)"
 W13R="$W/w13deadown"; mkdir -p "$W13R/cd" "$W13R/venv/bin" "$W13R/shim"
 printf '#!/bin/sh\nexit 0\n'  > "$W13R/venv/bin/python";   chmod +x "$W13R/venv/bin/python"
 printf '#!/bin/sh\necho hr\n' > "$W13R/venv/bin/headroom"; chmod +x "$W13R/venv/bin/headroom"
-printf '#!/bin/sh\nexit 1\n'  > "$W13R/shim/headroom";     chmod +x "$W13R/shim/headroom"
+# A dead OWN shim, in the shape the doctor actually writes one: on POSIX --fix
+# creates a SYMLINK, so simulate "it went dead" as a link to a target that still
+# resolves and is executable but fails --help (the relocated-trampoline case the
+# branch cites). Writing a regular file here would simulate a shape the doctor
+# never produces -- and is exactly what a pipx / pip --user / uv console script
+# at the same path looks like, which w19 asserts must NOT be deleted.
+printf '#!/bin/sh\nexit 1\n'  > "$W13R/deadtarget";        chmod +x "$W13R/deadtarget"
+ln -sfn "$W13R/deadtarget" "$W13R/shim/headroom"
 S13R="$W13R/s.json"; doc_settings_wired "$W13R/cd" > "$S13R"
 w13_dead() {
   env -u HCAT_PYTHON PATH="$W13R/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13R" \
@@ -4265,6 +4272,48 @@ if command -v shellcheck >/dev/null 2>&1; then
   fi
 else
   skip_note "shellcheck not installed"
+fi
+
+# --- w18. REGRESSION (review #5): the gate must pick the first IMPORTABLE python,
+# not the first EXECUTABLE one. A stray `python` beside the `headroom` console
+# script (pyenv/asdf/mise shims, uv's default install, or ~/.local/bin once
+# /doctor --fix drops its shim there) is executable but cannot import headroom.
+# resolve_engine_python stops at the first -x hit, so the gate recorded a broken
+# badge and FAILED OPEN on machines where the pre-2.8 gate worked correctly --
+# while /doctor on the same box still reported `ok - engine python`.
+W18="$W/w18-decoy"; mkdir -p "$W18/bin" "$W18/venv/bin" "$W18/home" "$W18/state"
+printf '#!/bin/sh\necho hr\n' > "$W18/bin/headroom";  chmod +x "$W18/bin/headroom"
+printf '#!/bin/sh\nexit 1\n'  > "$W18/bin/python";    chmod +x "$W18/bin/python"   # executable, NOT importable
+printf '#!/bin/sh\nexit 0\n'  > "$W18/venv/bin/python"; chmod +x "$W18/venv/bin/python"  # the real engine
+out=$(gate_input "$BIGJSON" w18 | env -u HCAT_PYTHON HOME="$W18/home" DOCTOR_VENV_DIR="$W18/venv" \
+      PATH="$W18/bin:/usr/bin:/bin" HEADROOM_STATE_DIR="$W18/state" bash "$GATE")
+check "w18: a decoy python beside headroom does not stop the gate denying" "deny" "$out"
+if [ -s "$W18/state/last-error" ]; then
+  echo "FAIL - w18: a decoy python must not flip the badge to broken"; FAIL=$((FAIL+1))
+else
+  echo "ok - w18: a decoy python must not flip the badge to broken"; PASS=$((PASS+1))
+fi
+
+# --- w19. REGRESSION (review #3): --fix must not DELETE a foreign headroom that
+# merely sits at the shim path. ~/.local/bin/headroom is DOCTOR_SHIM_DIR's default
+# and is exactly where pipx / `uv tool install` / `pip install --user` put a real
+# console script. is_own_shim() is a pure path compare, so a --help that overruns
+# the 5s bound (a cold headroom-ai[all] import with torch can) used to rm -f a user
+# binary with no backup -- and leave them with no engine when the venv was empty.
+W19="$W/w19-foreign"; mkdir -p "$W19/shim" "$W19/venv/bin" "$W19/cd" "$W19/state"
+printf '#!/bin/sh\nexit 1\n' > "$W19/shim/headroom"; chmod +x "$W19/shim/headroom"   # foreign: not ours, --help fails
+printf '#!/bin/sh\nexit 0\n' > "$W19/venv/bin/python"; chmod +x "$W19/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W19/venv/bin/headroom"; chmod +x "$W19/venv/bin/headroom"
+cp "$W19/shim/headroom" "$W19/foreign.orig"
+doc_settings_wired "$W19/cd" > "$W19/s.json" 2>/dev/null || printf '{}' > "$W19/s.json"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$W19/shim:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$W19/s.json" DOCTOR_CLAUDE_DIR="$W19/cd" DOCTOR_VENV_DIR="$W19/venv" \
+      DOCTOR_SHIM_DIR="$W19/shim" HEADROOM_STATE_DIR="$W19/state" bash "$DOCTOR" --fix 2>&1)
+if [ -f "$W19/shim/headroom" ] && cmp -s "$W19/shim/headroom" "$W19/foreign.orig"; then
+  echo "ok - w19: a foreign headroom at the shim path survives --fix byte-for-byte"; PASS=$((PASS+1))
+else
+  echo "FAIL - w19: --fix deleted or rewrote a foreign headroom at the shim path"; FAIL=$((FAIL+1))
+  printf '    doctor said: %s\n' "$(printf '%s' "$out" | grep -iE 'headroom|shim' | head -3)"
 fi
 
 echo

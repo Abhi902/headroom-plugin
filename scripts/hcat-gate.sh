@@ -130,7 +130,24 @@ if [ ! -x "$HCAT" ]; then
   legacy=1
 fi
 [ -x "$HCAT" ] || exit 0
-py=$(resolve_engine_python) || py=""
+# Pick the first IMPORTABLE candidate, not merely the first EXECUTABLE one --
+# doctor.sh:162-166 has always walked the list this way, and resolve_engine_python
+# stops at the first -x hit. A stray `python` beside the `headroom` console script
+# (pyenv/asdf/mise shims, uv's default install, or ~/.local/bin once /doctor --fix
+# puts its own shim there) is executable but cannot import headroom, so the gate
+# recorded a broken badge and stopped denying while /doctor on the SAME machine
+# reported `ok - engine python`. Before this lib landed the gate only ever saw
+# $HCAT_PYTHON or ~/.headroom-venv, so a decoy could not reach it.
+py=""
+if [ -n "${HCAT_PYTHON:-}" ]; then
+  py=$HCAT_PYTHON          # explicit override stays authoritative, as everywhere else
+elif type engine_python_candidates >/dev/null 2>&1; then
+  while IFS= read -r _c; do
+    [ -n "$_c" ] && [ -x "$_c" ] && "$_c" -c 'import headroom.compress' >/dev/null 2>&1 && { py=$_c; break; }
+  done < <(engine_python_candidates)
+else
+  py=$(resolve_engine_python) || py=""   # partial legacy copy: narrower lookup, no candidate list
+fi
 if [ -n "$py" ]; then
   # A resolved-but-broken engine is a real outage the fail-open would otherwise
   # hide — record it so the badge can show "broken" instead of mimicking idle.

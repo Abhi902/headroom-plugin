@@ -249,6 +249,35 @@ fi
 shim_target() {  # the shim file this platform writes (a copy named headroom.exe on Windows)
   if is_windows; then printf '%s' "$SHIM_DIR/headroom.exe"; else printf '%s' "$SHIM_DIR/headroom"; fi
 }
+shim_is_ours() {  # shim_is_ours <path> — did THIS doctor actually write that file?
+  # is_own_shim() answers "is this the PATH we would write", which a pipx / `uv
+  # tool install` / `pip install --user` console script at ~/.local/bin/headroom
+  # satisfies too -- that is DOCTOR_SHIM_DIR's default. Deleting it on a 5s
+  # --help timeout (a cold headroom-ai[all] import with torch can exceed that)
+  # destroys a user binary with no backup and can leave them with no engine at
+  # all. shim_headroom() one screen above already refuses to overwrite exactly
+  # this file for exactly this reason; this branch just never got the guard.
+  # So require CONTENT proof, matching how each platform writes the shim:
+  # POSIX writes a symlink, Windows copies the file.
+  # POSIX: the doctor writes a SYMLINK. pipx, `pip install --user` and uv all
+  # write a real file there, so the link itself is the ownership proof.
+  [ -L "$1" ] && return 0
+  # Windows: the doctor COPIES, so prove it by bytes -- against the engine CLI the
+  # shim is made FROM. resolve_headroom_cli cannot be used for this: its first tier
+  # is `command -v headroom`, which on any PATH containing SHIM_DIR resolves to the
+  # very file under test, so it would match itself and wave everything through.
+  local v c uvr
+  v=${DOCTOR_VENV_DIR:-$HOME/.headroom-venv}
+  for c in "$v/Scripts/headroom.exe" "$v/bin/headroom"; do
+    [ -f "$c" ] && cmp -s "$1" "$c" 2>/dev/null && return 0
+  done
+  if uvr=$(_er_uv_root 2>/dev/null) && [ -n "$uvr" ]; then
+    for c in "$uvr/Scripts/headroom.exe" "$uvr/bin/headroom"; do
+      [ -f "$c" ] && cmp -s "$1" "$c" 2>/dev/null && return 0
+    done
+  fi
+  return 1
+}
 is_own_shim() {  # is_own_shim <path> — is this the file THIS run would have written?
   # Compare with the .exe suffix normalized OFF both sides. shim_target() is
   # "$SHIM_DIR/headroom.exe" on Windows, but `command -v headroom` inside Git
@@ -519,15 +548,33 @@ native_sees_headroom() {  # can a NATIVE process resolve the bare name? CONFIDEN
   # (HKCU\Environment), which is the only thing that truly answers "will Claude
   # Code's MCP spawn resolve this name".
   is_windows || return 1          # POSIX: nothing to add, the Bash PATH IS the spawn PATH
-  local w p
+  local w p tmo
   w=$(command -v cmd.exe 2>/dev/null) || w=""
   [ -n "$w" ] && [ -x "$w" ] || return 1
-  p=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vE '^/(usr|bin|mingw32|mingw64|opt)(/|$)' | paste -sd: -)
+  # Resolve the bounded-wait binary BEFORE pruning, and call it by ABSOLUTE path.
+  # Same collision that killed the `env` form (c2ba9c5), one layer down:
+  # run_bounded's first choice `timeout` lives in /usr/bin -- which the prune
+  # removes -- and its fallback watchdog uses `sleep`, also /usr/bin. With both
+  # gone the watchdog span its iterations in microseconds and SIGKILLed cmd.exe
+  # before it could start, returning 124, so this probe could essentially never
+  # succeed and "verified NATIVELY" was unreachable.
+  tmo=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+  # Prune the NATIVE spellings too: Git for Windows puts `/c/Program Files/Git/usr/bin`
+  # on the machine PATH, which the MSYS-internal pattern below never matched. Same
+  # entry .github/workflows/test.yml's PowerShell step prunes by name.
+  p=$(printf '%s\n' "$PATH" | tr ':' '\n' \
+      | grep -vE '^/(usr|bin|mingw32|mingw64|opt)(/|$)' \
+      | grep -viE '[\\/]Git[\\/](usr|mingw64|mingw32)[\\/]bin[\\/]?$' \
+      | paste -sd: -)
   # subshell export, NOT `env` — see the mechanism note above: /usr/bin is what
   # the prune removes, and that is where the env binary lives.
   (
     export PATH="$p" MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-    run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" "$w" /c "where headroom"
+    if [ -n "$tmo" ]; then
+      "$tmo" "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" "$w" /c "where headroom"
+    else
+      "$w" /c "where headroom"   # no bounded-wait binary reachable; `where` is local and fast
+    fi
   ) >/dev/null 2>&1
 }
 if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
@@ -551,6 +598,7 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
       say ok "headroom CLI on PATH ($cli_now) — the bundled MCP spawns it by name (verified in this Bash environment, the closest proxy for Claude Code's MCP spawn env)"
     fi
   elif [ "$FIX" -eq 1 ] && [ "$cli_healed" -eq 0 ] && is_own_shim "$cli_now" \
+       && shim_is_ours "$cli_now" \
        && rm -f "$cli_now" 2>/dev/null; then
     # The dead file is the doctor's OWN shim from an earlier run. Reporting it
     # as "reinstall the engine" misdiagnoses an engine that check 2 just found
