@@ -51,13 +51,10 @@ rewrite: legacy absolute-path hcat rewrite is attributed
 w11: a foreign headroom in the shim dir is refused, not clobbered
 w11: a shim that resolves but does not run is a FAIL
 w11: run 1 shims the venv CLI and verifies it runs
-w13: --fix removes the dead own shim and repairs in the same run
-w13: a backslash in the override is still accepted (Windows paths need it)
 w13: a foreign SYMLINK at the shim path is refused, not repointed
 w13: a refused symlink is never reported as shimmed
 w13: and it is left exactly as it was
 w13: the foreign symlink still points where it did
-w13: the repaired shim points at the engine CLI
 w13: the windows PATH hint names the shim dir actually in use
 w1: darwin → not windows
 w1: python.exe sibling of headroom on PATH wins
