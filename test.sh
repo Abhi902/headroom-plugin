@@ -4489,14 +4489,24 @@ printf '#!/bin/sh\nexit 1\n' > "$W22/broken/bin/python"; chmod +x "$W22/broken/b
 # a python that imports fine
 printf '#!/bin/sh\nexit 0\n' > "$W22/venv/bin/python"; chmod +x "$W22/venv/bin/python"
 
+# PATH is load-bearing here, not decoration. These assert the resolver's tri-state
+# over a CONTROLLED candidate set, but the resolver also walks two ambient tiers:
+# `command -v headroom` and `uv tool dir`. The windows runner really does
+# `uv tool install headroom-ai`, so an unconstrained PATH let _er_uv_root resolve a
+# genuinely working interpreter and every case collapsed to status 0 --
+# "nothing installed" got C:\...\uv\tools/headroom-ai/Scripts/python.exe. macOS CI
+# has no uv, which is the only reason this passed there. Pin PATH so the fixture
+# tests its own candidates on every host instead of whatever the host happens to
+# have installed.
+w22_er() { ( set -u; export PATH=/usr/bin:/bin; unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$1"; shift; . "$ER"; "$@" ); }
 check_eq "w22: a working candidate resolves with status 0" "0" \
-  "$(unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$W22/venv"; er resolve_engine_python_validated >/dev/null; echo $?)"
+  "$(w22_er "$W22/venv" resolve_engine_python_validated >/dev/null; echo $?)"
 check_eq "w22: executable-but-unimportable resolves with status 2" "2" \
-  "$(unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$W22/broken"; er resolve_engine_python_validated >/dev/null; echo $?)"
+  "$(w22_er "$W22/broken" resolve_engine_python_validated >/dev/null; echo $?)"
 check_eq "w22: status 2 still PRINTS the broken interpreter" "$W22/broken/bin/python" \
-  "$(unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$W22/broken"; er resolve_engine_python_validated 2>/dev/null)"
+  "$(w22_er "$W22/broken" resolve_engine_python_validated 2>/dev/null)"
 check_eq "w22: nothing installed resolves with status 1" "1" \
-  "$(unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$W22/nonexistent"; er resolve_engine_python_validated >/dev/null; echo $?)"
+  "$(w22_er "$W22/nonexistent" resolve_engine_python_validated >/dev/null; echo $?)"
 
 # The gate must FAIL OPEN and light the badge for a resolved-but-broken engine
 # reached through the real walk. Denying here is what round 2 shipped: the user
