@@ -184,3 +184,12 @@ command.
 All fixes are idempotent — a second `--fix` run changes nothing. After fixing,
 report the `fixed` lines back, and suggest one more plain doctor run if the
 engine was just bootstrapped (the hcat smoke test is skipped in the same run).
+
+**Whenever a `headroom CLI not on PATH` item was acted on — whether it ended
+`fixed` or `FAIL` — always tell the user Claude Code must be RESTARTED before
+headroom's MCP tools work again.** Reaching that check at all means the bundled
+MCP, which is spawned by the bare name `headroom` at session start, already
+failed to connect earlier in this same session; shimming the CLI cannot revive a
+connection that is already dead. Reporting "all fixed" without the restart leaves
+the user with a clean bill of health and a tool that still cannot be reached for
+the rest of the session.

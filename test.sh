@@ -3015,6 +3015,9 @@ check "w6: no engine → CLI check skips" "headroom CLI on PATH (no engine yet" 
 # w7. Windows status-line wiring + Git Bash prerequisite
 W7="$W/w7"; mkdir -p "$W7/cd" "$W7/bashdir"
 printf '#!/bin/sh\nexit 0\n' > "$W7/bashdir/bash.exe"; chmod +x "$W7/bashdir/bash.exe"
+# review #2: an accepted CLAUDE_CODE_GIT_BASH_PATH must LOOK like Git for Windows
+# -- basename bash/bash.exe plus the git binary that always ships beside it.
+: > "$W7/bashdir/git.exe"
 S7="$W7/s.json"; printf '{}\n' > "$S7"
 # check 7 now validates the INTERPRETER token too, not just the script token.
 # The stub cygpath is deliberately lossy (it keeps only the basename and
@@ -3023,6 +3026,7 @@ S7="$W7/s.json"; printf '{}\n' > "$S7"
 # HEALTHY wiring stays healthy under the stub's round trip. On a real host
 # cygpath is lossless and the round trip lands on the actual bash.
 mkdir -p "$W7/cd"; printf '#!/bin/sh\nexit 0\n' > "$W7/cd/bash.exe"; chmod +x "$W7/cd/bash.exe"
+: > "$W7/cd/git.exe"
 # NOTE: CLAUDE_CODE_GIT_BASH_PATH is the REAL bash.exe fixture created above
 # ($W7/bashdir/bash.exe), not a fabricated 'C:\...' literal: check 0 does a
 # direct `-f` test with no cygpath translation (real Git Bash's MSYS runtime
@@ -3567,12 +3571,30 @@ S13I3="$W13I/s3.json"; printf '{}\n' > "$S13I3"
 check_eq "w13: a newline-bearing value is refused too" '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' \
          "$(w13_inj "$S13I3" "$W13I/cd3" "$w13_nldir/bash.exe")"
 # ...and the guard must NOT reject a backslash: every native Windows path has them
-W13I4="$W13I/bs"; mkdir -p "$W13I4"
-printf '#!/bin/sh\nexit 0\n' > "$W13I4/back\\slash.exe"; chmod +x "$W13I4/back\\slash.exe"
+W13I4="$W13I/bs"; mkdir -p "$W13I4/back\\slashdir"
+printf '#!/bin/sh\nexit 0\n' > "$W13I4/back\\slashdir/bash.exe"; chmod +x "$W13I4/back\\slashdir/bash.exe"
+: > "$W13I4/back\\slashdir/git.exe"
 S13I4="$W13I/s4.json"; printf '{}\n' > "$S13I4"
 check_eq "w13: a backslash in the override is still accepted (Windows paths need it)" \
-         '"C:\fake\back\slash.exe" "C:\fake\headroom-statusline.sh"' \
-         "$(w13_inj "$S13I4" "$W13I/cd4" "$W13I4/back\\slash.exe")"
+         '"C:\fake\bash.exe" "C:\fake\headroom-statusline.sh"' \
+         "$(w13_inj "$S13I4" "$W13I/cd4" "$W13I4/back\\slashdir/bash.exe")"
+
+# review #2: identity, not just quoting — an existing, executable file that is
+# NOT bash must fall through to the `command -v bash` fallback.
+# pwsh.exe sits WITH a git sibling, so only the basename rule can reject it;
+# bash.exe sits in its own dir WITHOUT one, so only the sibling rule can.
+W13I5="$W13I/notbash"; mkdir -p "$W13I5" "$W13I/nogit"
+printf '#!/bin/sh\nexit 0\n' > "$W13I5/pwsh.exe"; chmod +x "$W13I5/pwsh.exe"
+: > "$W13I5/git.exe"
+printf '#!/bin/sh\nexit 0\n' > "$W13I/nogit/bash.exe"; chmod +x "$W13I/nogit/bash.exe"
+S13I5="$W13I/s5.json"; printf '{}\n' > "$S13I5"
+check_eq "w13: a non-bash executable is refused as the interpreter" \
+         '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' \
+         "$(w13_inj "$S13I5" "$W13I/cd5" "$W13I5/pwsh.exe")"
+S13I6="$W13I/s6.json"; printf '{}\n' > "$S13I6"
+check_eq "w13: a bash.exe with no git sibling is refused too" \
+         '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' \
+         "$(w13_inj "$S13I6" "$W13I/cd6" "$W13I/nogit/bash.exe")"
 
 # w13-#9. An ACCEPTED override was written raw while the script token beside it
 # went through win_path, so a perfectly valid POSIX-spelled value was persisted
@@ -3581,6 +3603,7 @@ check_eq "w13: a backslash in the override is still accepted (Windows paths need
 W13W="$W/w13winpath"; mkdir -p "$W13W/cd" "$W13W/c/Program Files/Git/bin"
 w13_posix_bash="$W13W/c/Program Files/Git/bin/bash.exe"
 printf '#!/bin/sh\nexit 0\n' > "$w13_posix_bash"; chmod +x "$w13_posix_bash"
+: > "$W13W/c/Program Files/Git/bin/git.exe"
 S13W="$W13W/s.json"; printf '{}\n' > "$S13W"
 cmd13w=$(w13_inj "$S13W" "$W13W/cd" "$w13_posix_bash")
 check_eq     "w13: a POSIX-spelled accepted override is persisted in Windows form" \

@@ -457,7 +457,7 @@ sl_prefer_wrapper_bash() {  # <bash path, native or POSIX spelling> → possibly
   printf '%s\n' "$p"
 }
 sl_bash_path() {  # → the bash a Windows statusLine.command should run through
-  local b nl cr
+  local b nl cr bdir
   # CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT-scoped
   # settings.json — i.e. from repo config. `--fix` persists what we print here
   # into ~/.claude/settings.json as statusLine.command, which Claude Code then
@@ -478,6 +478,30 @@ sl_bash_path() {  # → the bash a Windows statusLine.command should run through
   cr=$(printf '\r')
   b=${CLAUDE_CODE_GIT_BASH_PATH:-}
   case $b in *'"'*|*'$'*|*'`'*|*"$nl"*|*"$cr"*) b="" ;; esac
+  # ...and it has to actually BE bash. The filter above only proves the value
+  # cannot break out of the quoted word; it does not prove identity, and merely
+  # existing on disk is not identity either. What we print is persisted into the
+  # GLOBAL ~/.claude/settings.json and executed by Claude Code about once a
+  # second, in every project, long after the user has left the directory the
+  # value came from -- and per the note above, env can come from a project-scoped
+  # settings.json, i.e. from repo config. Require the basename to be bash, and
+  # require the git binary Git for Windows always ships beside bin/bash.exe.
+  # Anything rejected falls through to the `command -v bash` fallback below,
+  # which the w12/w13 fixtures already cover.
+  if [ -n "$b" ]; then
+    case ${b##*[\\/]} in
+      bash|bash.exe) ;;
+      *) b="" ;;
+    esac
+  fi
+  if [ -n "$b" ]; then
+    bdir=${b%[\\/]*}
+    # Try the value's OWN spelling first, exactly as the -f test on $b below
+    # does: a POSIX-spelled override resolves directly, and only a native
+    # backslash spelling needs the cygpath round trip.
+    [ -f "$bdir/git.exe" ] || [ -f "$bdir/git" ] \
+      || [ -f "$(unix_path "$bdir/git.exe")" ] || [ -f "$(unix_path "$bdir/git")" ] || b=""
+  fi
   if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(command -v bash); fi
   b=$(sl_prefer_wrapper_bash "$b")
   # normalize the ACCEPTED value too, not just the fallback: an override may be
@@ -645,7 +669,13 @@ elif cli_res=$(resolve_headroom_cli); then
         fi
         say FAIL "headroom shimmed to $shim but it does not run (\`$shim --help\` failed)$shim_gone — reinstall the engine: $(reinstall_hint)"
       else
-        say fixed "headroom shimmed to $shim (resolves on PATH)"
+        # Say the restart part too. Reaching check 2b at all means the bundled
+        # MCP -- spawned by bare name at session start -- already failed to
+        # connect earlier in THIS session, so shimming it does not revive the
+        # dead connection. Without this, an agent following skills/doctor/SKILL.md
+        # reports "all fixed" while the tool stays unreachable for the rest of
+        # the session: the exact opaque failure this release exists to end.
+        say fixed "headroom shimmed to $shim (resolves on PATH) — restart Claude Code for the bundled MCP to connect this session"
       fi
     fi
   else

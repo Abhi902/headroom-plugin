@@ -55,9 +55,20 @@ _er_shebang_interp() {  # interpreter path from a script's #! line (env form via
 }
 
 _er_uv_root() {  # <uv tool dir>/headroom-ai when uv is installed
-  local d
+  # BOUND the spawn. This runs on SessionStart (session-probe.sh), on every gated
+  # Read (hcat-gate.sh) and on every hcat, so a wedged uv cache lock, a cold AV
+  # scan of the trampoline on Windows, or a stalled filesystem would otherwise
+  # hang session startup with no way out short of killing the process. doctor.sh
+  # already bounds its external calls with run_bounded; that helper lives in
+  # doctor.sh and never reached here.
+  local d t
   command -v uv >/dev/null 2>&1 || return 1
-  d=$(uv tool dir 2>/dev/null) || return 1
+  t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+  if [ -n "$t" ]; then
+    d=$("$t" "${ER_UV_TIMEOUT:-2}" uv tool dir 2>/dev/null) || return 1
+  else
+    d=$(uv tool dir 2>/dev/null) || return 1
+  fi
   [ -n "$d" ] || return 1
   printf '%s/headroom-ai' "$d"
 }
