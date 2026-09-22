@@ -181,6 +181,16 @@ If the user wants the project-settings scan pointed at a different directory
 than the current working one, set `DOCTOR_PROJECT_DIR` before running either
 command.
 
+**On Windows, `--fix` also registers the bundled MCP by absolute path** via
+`claude mcp add -s user headroom -- <shim> mcp serve`. This writes to the user's
+Claude Code MCP configuration, which is OUTSIDE `~/.claude/settings.json` and
+outside the plugin — list it when asking for consent. The reason is that Windows
+resolves a bare command name from the spawning process's current directory
+BEFORE PATH, so a `headroom.exe` committed to a repository would otherwise be
+spawned instead of the engine; an absolute registration does not resolve by name
+at all. The bundled bare-name entry stays as the fallback. Skipped with a `note`
+when the `claude` CLI is not on PATH.
+
 All fixes are idempotent — a second `--fix` run changes nothing. After fixing,
 report the `fixed` lines back, and suggest one more plain doctor run if the
 engine was just bootstrapped (the hcat smoke test is skipped in the same run).

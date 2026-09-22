@@ -711,6 +711,33 @@ if is_windows; then
   fi
 fi
 
+# 2b-win/2c. CLOSE the CWD tier rather than only reporting it. The check above can
+# only see a hijack that is already sitting there, and neither it nor the
+# SessionStart probe runs BEFORE the MCP is spawned -- so detection always arrives
+# after the foreign code has run. .mcp.json can express neither an absolute nor a
+# per-platform command, so the bundled entry has to stay a bare name. A USER-scoped
+# registration naming the shim's ABSOLUTE path does not resolve by name at all,
+# so no file in a project directory can win against it; the bundled bare-name
+# entry remains the fallback for anyone who never runs the doctor.
+if is_windows && [ "$FIX" -eq 1 ]; then
+  if ! command -v claude >/dev/null 2>&1; then
+    say note "\`claude\` is not on PATH, so the MCP was not registered by absolute path — the bundled bare-name entry still applies, and a headroom.* in a project directory would be spawned before it"
+  else
+    mcp_abs=$(resolve_headroom_cli 2>/dev/null) || mcp_abs=""
+    if [ -n "$mcp_abs" ]; then
+      if run_bounded 10 claude mcp get headroom 2>/dev/null | grep -qF "$mcp_abs"; then
+        say ok "bundled MCP already registered by absolute path ($mcp_abs) — the project-directory tier cannot win against it"
+      elif run_bounded 20 claude mcp add -s user \
+             -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 \
+             headroom -- "$mcp_abs" mcp serve >/dev/null 2>&1; then
+        say fixed "registered the bundled MCP by absolute path ($mcp_abs) — a headroom.* in a project directory can no longer be spawned in its place; restart Claude Code"
+      else
+        say fixable "could not register the MCP by absolute path (\`claude mcp add\` failed) — the bare-name entry still applies; run it by hand: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
+      fi
+    fi
+  fi
+fi
+
 # --- 3. bin/hcat + a real smoke compression of a generated ~26 KB JSON
 HCAT="$PLUGIN_ROOT/bin/hcat"
 if [ ! -x "$HCAT" ]; then

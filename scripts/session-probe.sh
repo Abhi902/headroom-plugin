@@ -118,7 +118,15 @@ engine_off_path() {
   # Windows keeps the nudge: flipping a sticky badge on a non-authoritative
   # answer there would be a permanent false "broken", the exact failure mode the
   # native-PATH advisory was removed for.
-  is_windows || note_error engine "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /doctor --fix"
+  # Component `mcp`, NOT `engine`. bin/hcat clears engine/runtime errors after every
+  # successful compression -- correctly, because a working compression proves the
+  # ENGINE. It proves nothing about whether the MCP can spawn `headroom` by name,
+  # and those are different failures. Filed as `engine` this badge flapped: yellow
+  # at session start, cleared by the first compression, yellow again next session,
+  # forever, for a condition that never changed -- which is the fastest way to
+  # teach someone to ignore the one always-visible health signal. Under `mcp` it
+  # persists until /doctor actually resolves it and clears the file.
+  is_windows || note_error mcp "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /doctor --fix"
 }
 # ...and the other half of "spawned by name": on Windows a bare command name is
 # resolved from the spawning process's current directory BEFORE PATH, so a

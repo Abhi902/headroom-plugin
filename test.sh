@@ -4347,6 +4347,74 @@ else
   printf '    doctor said: %s\n' "$(printf '%s' "$out" | grep -iE 'headroom|shim' | head -3)"
 fi
 
+# --- w20. REGRESSION (review #12): the broken badge must not FLAP. The probe
+# records the off-PATH MCP outage; bin/hcat clears engine/runtime errors after
+# every successful compression. Filed under the same component those two fought:
+# yellow at session start, cleared by the first compression, yellow again next
+# session -- forever, for a condition that never changed. `mcp` is a distinct
+# component precisely because a working compression proves the ENGINE and says
+# nothing about whether the MCP can spawn `headroom` by name.
+W20="$W/w20-flap"; mkdir -p "$W20/venv/bin" "$W20/home" "$W20/state" "$W20/ws"
+printf '#!/bin/sh\nexit 0\n'  > "$W20/venv/bin/python";   chmod +x "$W20/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W20/venv/bin/headroom"; chmod +x "$W20/venv/bin/headroom"
+printf '{"session_id":"w20"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W20/home" \
+  DOCTOR_VENV_DIR="$W20/venv" PATH="$STUB:/usr/bin:/bin" \
+  HEADROOM_STATE_DIR="$W20/state" bash "$PROBE" >/dev/null
+if [ -s "$W20/state/last-error" ]; then
+  echo "ok - w20: the probe records the off-PATH MCP outage"; PASS=$((PASS+1))
+else
+  echo "FAIL - w20: the probe records the off-PATH MCP outage"; FAIL=$((FAIL+1))
+fi
+check "w20: it is filed under the mcp component, not engine" "mcp" \
+      "$(cut -d' ' -f2 "$W20/state/last-error" 2>/dev/null)"
+if [ -n "${HEADROOM_PY:-}" ]; then
+  env -u HCAT_PYTHON HCAT_PYTHON="$HEADROOM_PY" HEADROOM_STATE_DIR="$W20/state" \
+      HEADROOM_WORKSPACE_DIR="$W20/ws" bash "$HCAT" "$BIGJSON" >/dev/null 2>&1 || true
+  if [ -s "$W20/state/last-error" ]; then
+    echo "ok - w20: a successful compression does NOT clear the MCP error"; PASS=$((PASS+1))
+  else
+    echo "FAIL - w20: a successful compression cleared the MCP error — the badge flaps again"; FAIL=$((FAIL+1))
+  fi
+else
+  skip_note "w20 compression half (headroom venv not found)"
+fi
+
+# --- w21. review #1: on Windows --fix registers the MCP by ABSOLUTE path, so the
+# project-directory tier (which resolves a bare name BEFORE PATH) has nothing to
+# win against. Detection alone always arrives after the foreign code has run.
+W21="$W/w21-mcpreg"; mkdir -p "$W21/stub" "$W21/venv/bin" "$W21/cd" "$W21/shim" "$W21/state"
+printf '#!/bin/sh\nexit 0\n'  > "$W21/venv/bin/python";   chmod +x "$W21/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W21/venv/bin/headroom"; chmod +x "$W21/venv/bin/headroom"
+cat > "$W21/stub/claude" <<'W21CLAUDE'
+#!/bin/sh
+reg="$CLAUDE_STUB_REG"
+if [ "$1" = "mcp" ] && [ "$2" = "get" ]; then [ -f "$reg" ] && cat "$reg"; exit 0; fi
+if [ "$1" = "mcp" ] && [ "$2" = "add" ]; then shift 2; printf '%s\n' "$*" > "$reg"; exit 0; fi
+exit 0
+W21CLAUDE
+chmod +x "$W21/stub/claude"
+link_tool "$(command -v jq)" "$W21/stub/jq"
+doc_settings_wired "$W21/cd" > "$W21/s.json"
+w21_run() {
+  env -u HCAT_PYTHON DOCTOR_OS=windows CLAUDE_STUB_REG="$W21/reg" \
+      PATH="$W21/stub:$W21/venv/bin:/usr/bin:/bin" DOCTOR_SETTINGS="$W21/s.json" \
+      DOCTOR_CLAUDE_DIR="$W21/cd" DOCTOR_VENV_DIR="$W21/venv" DOCTOR_SHIM_DIR="$W21/shim" \
+      HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" --fix 2>&1
+}
+out=$(w21_run)
+check "w21: --fix registers the bundled MCP by absolute path" "registered the bundled MCP by absolute path" "$out"
+check "w21: the registration names the resolved CLI, not a bare name" "headroom -- " "$(cat "$W21/reg" 2>/dev/null)"
+check "w21: ...and carries the bundled env" "HEADROOM_UPDATE_CHECK=off" "$(cat "$W21/reg" 2>/dev/null)"
+out=$(w21_run)
+check        "w21: a second --fix sees it already registered" "already registered by absolute path" "$out"
+check_absent "w21: ...and re-registers nothing (idempotent)" "registered the bundled MCP by absolute path — " "$out"
+# no claude CLI: say so plainly rather than silently leaving the bare name exposed
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$STUB:$W21/venv/bin:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$W21/s.json" DOCTOR_CLAUDE_DIR="$W21/cd" DOCTOR_VENV_DIR="$W21/venv" \
+      DOCTOR_SHIM_DIR="$W21/shim" HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" --fix 2>&1)
+check "w21: without the claude CLI the exposure is stated, not hidden" \
+      "would be spawned before it" "$out"
+
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
 [ "$FAIL" -eq 0 ]
