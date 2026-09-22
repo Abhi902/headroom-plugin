@@ -86,7 +86,7 @@ jobs:
       # (721 passed + 53 failed); it was 726 while the probe was POSIX-only, so a
       # regression of that fix lands at ~726 and must be caught. 760 sits above
       # that and leaves room for ordinary churn. RAISE as coverage grows.
-      MIN_FIXTURES: "760"
+      MIN_FIXTURES: "790"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking

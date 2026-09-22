@@ -138,13 +138,27 @@ fi
 # recorded a broken badge and stopped denying while /doctor on the SAME machine
 # reported `ok - engine python`. Before this lib landed the gate only ever saw
 # $HCAT_PYTHON or ~/.headroom-venv, so a decoy could not reach it.
-py=""
+# py_seen records that SOME candidate was executable. Without it, "every
+# candidate failed to import" and "there is no engine at all" both end with an
+# empty $py -- and the else branch below only exits 0 when `headroom` is absent
+# from PATH, so a broken-but-installed engine fell through and DENIED the Read
+# with no badge. The pre-lib code failed OPEN and recorded the outage; losing
+# that was strictly worse than the decoy bug this loop exists to fix.
+py=""; py_seen=""
 if [ -n "${HCAT_PYTHON:-}" ]; then
   py=$HCAT_PYTHON          # explicit override stays authoritative, as everywhere else
 elif type engine_python_candidates >/dev/null 2>&1; then
   while IFS= read -r _c; do
-    [ -n "$_c" ] && [ -x "$_c" ] && "$_c" -c 'import headroom.compress' >/dev/null 2>&1 && { py=$_c; break; }
+    [ -n "$_c" ] && [ -x "$_c" ] || continue
+    py_seen=$_c
+    "$_c" -c 'import headroom.compress' >/dev/null 2>&1 && { py=$_c; break; }
   done < <(engine_python_candidates)
+  if [ -z "$py" ] && [ -n "$py_seen" ]; then
+    # Candidates existed and none could import: a resolved-but-broken engine,
+    # which is the outage the import check below has always failed open on.
+    note_error engine "engine import failed ($py_seen) — gate failing open; run /doctor"
+    exit 0
+  fi
 else
   py=$(resolve_engine_python) || py=""   # partial legacy copy: narrower lookup, no candidate list
 fi

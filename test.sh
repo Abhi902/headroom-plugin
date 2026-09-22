@@ -3697,11 +3697,14 @@ printf '#!/bin/sh\necho hr\n' > "$W13R/venv/bin/headroom"; chmod +x "$W13R/venv/
 # at the same path looks like, which w19 asserts must NOT be deleted.
 printf '#!/bin/sh\nexit 1\n'  > "$W13R/deadtarget";        chmod +x "$W13R/deadtarget"
 ln -sfn "$W13R/deadtarget" "$W13R/shim/headroom"
-# MSYS `ln -s` silently writes a COPY, so on a real Windows host the link above is
-# not a link and the ownership proof (which IS the symlink on POSIX) cannot hold.
-# The product is correct there -- it writes a copy and compares bytes -- so skip
-# rather than assert POSIX semantics on a filesystem that has none.
-if [ -L "$W13R/shim/headroom" ]; then
+# Seed the provenance record an earlier `--fix` would have written. Ownership is
+# no longer proved by SHAPE -- pipx writes symlinks too, and a genuinely dead shim
+# points somewhere broken, which is precisely what a foreign link looks like -- so
+# the doctor records what it wrote. Seeding it here makes this fixture mean "a shim
+# the doctor wrote in an earlier run, since gone dead", and it works on BOTH
+# platforms: no more skipping where MSYS turns ln -s into a copy.
+mkdir -p "$W13R/state"
+printf '%s\n%s\n' "$W13R/shim/headroom" "$W13R/venv/bin/headroom" > "$W13R/state/shim-provenance"
 S13R="$W13R/s.json"; doc_settings_wired "$W13R/cd" > "$S13R"
 w13_dead() {
   env -u HCAT_PYTHON PATH="$W13R/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13R" \
@@ -3742,8 +3745,22 @@ out=$(w13_dead --fix)
 check_eq     "w13: the next --fix is a no-op (no ^fixed line)" "0" \
              "$(printf '%s\n' "$out" | grep -cE '^fixed ')"
 check        "w13: and it greens the repaired shim" "headroom CLI on PATH ($W13R/shim/headroom)" "$out"
+
+# ...and a foreign symlink with NO provenance record is still refused, which is
+# the half review #2 reopened: being a link is not ownership.
+W13P="$W/w13prov"; mkdir -p "$W13P/shim" "$W13P/venv/bin" "$W13P/cd" "$W13P/state" "$W13P/pipx"
+printf '#!/bin/sh\nexit 1\n' > "$W13P/pipx/headroom";     chmod +x "$W13P/pipx/headroom"
+ln -sfn "$W13P/pipx/headroom" "$W13P/shim/headroom"
+printf '#!/bin/sh\nexit 0\n'  > "$W13P/venv/bin/python";   chmod +x "$W13P/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W13P/venv/bin/headroom"; chmod +x "$W13P/venv/bin/headroom"
+doc_settings_wired "$W13P/cd" > "$W13P/s.json"
+env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$W13P/shim:$STUB:/usr/bin:/bin" \
+    DOCTOR_SETTINGS="$W13P/s.json" DOCTOR_CLAUDE_DIR="$W13P/cd" DOCTOR_VENV_DIR="$W13P/venv" \
+    DOCTOR_SHIM_DIR="$W13P/shim" HEADROOM_STATE_DIR="$W13P/state" bash "$DOCTOR" --fix >/dev/null 2>&1
+if [ -L "$W13P/shim/headroom" ] && [ "$(readlink "$W13P/shim/headroom")" = "$W13P/pipx/headroom" ]; then
+  echo "ok - w13: a pipx-shaped symlink with no provenance survives --fix"; PASS=$((PASS+1))
 else
-  skip_note "w13 dead-own-shim self-repair (no real symlink support on this filesystem)"
+  echo "FAIL - w13: --fix deleted a foreign symlink at the shim path (review #2)"; FAIL=$((FAIL+1))
 fi
 
 # w13-#10. shim_runs executes whatever `command -v headroom` resolves on every

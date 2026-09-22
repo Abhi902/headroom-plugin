@@ -249,6 +249,36 @@ fi
 shim_target() {  # the shim file this platform writes (a copy named headroom.exe on Windows)
   if is_windows; then printf '%s' "$SHIM_DIR/headroom.exe"; else printf '%s' "$SHIM_DIR/headroom"; fi
 }
+_shim_record() {  # _shim_record <shim> <source> — remember that WE wrote this file
+  # Inspection alone cannot answer "did the doctor write this?". Our POSIX shim is
+  # a symlink -- and so is pipx's. A shim that is genuinely DEAD points at
+  # something broken or moved, which is exactly what a foreign link looks like.
+  # So record it when we write it, in state the user's package managers do not
+  # touch. Best-effort: a missing record only costs the self-repair, never safety.
+  { mkdir -p "$HEALTH_STATE_DIR" \
+    && printf '%s\n%s\n' "$1" "$2" > "$HEALTH_STATE_DIR/shim-provenance"; } 2>/dev/null || true
+}
+_shim_recorded() {  # _shim_recorded <path> — did a previous run record writing it?
+  local rec
+  rec=$(head -1 "$HEALTH_STATE_DIR/shim-provenance" 2>/dev/null) || return 1
+  [ -n "$rec" ] && [ "$rec" = "$1" ]
+}
+_shim_source_cli() {  # the engine CLI a shim is made FROM — venv/uv tiers only.
+  # Deliberately NOT resolve_headroom_cli: its first tier is `command -v headroom`,
+  # which on any PATH containing SHIM_DIR resolves to the very file under test and
+  # would match itself.
+  local v c uvr
+  v=${DOCTOR_VENV_DIR:-$HOME/.headroom-venv}
+  for c in "$v/Scripts/headroom.exe" "$v/bin/headroom"; do
+    [ -f "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  if uvr=$(_er_uv_root 2>/dev/null) && [ -n "$uvr" ]; then
+    for c in "$uvr/Scripts/headroom.exe" "$uvr/bin/headroom"; do
+      [ -f "$c" ] && { printf '%s' "$c"; return 0; }
+    done
+  fi
+  return 1
+}
 shim_is_ours() {  # shim_is_ours <path> — did THIS doctor actually write that file?
   # is_own_shim() answers "is this the PATH we would write", which a pipx / `uv
   # tool install` / `pip install --user` console script at ~/.local/bin/headroom
@@ -259,23 +289,29 @@ shim_is_ours() {  # shim_is_ours <path> — did THIS doctor actually write that 
   # this file for exactly this reason; this branch just never got the guard.
   # So require CONTENT proof, matching how each platform writes the shim:
   # POSIX writes a symlink, Windows copies the file.
-  # POSIX: the doctor writes a SYMLINK. pipx, `pip install --user` and uv all
-  # write a real file there, so the link itself is the ownership proof.
-  [ -L "$1" ] && return 0
+  # POSIX: the doctor writes a SYMLINK -- but so does pipx, so being a link is
+  # NOT the proof. It has to point where OUR shim would point. shim_headroom()
+  # already makes exactly this distinction 48 lines up ("a link that already
+  # names the resolved CLI is not foreign"); this branch has to hold the same
+  # bar or the destructive path stays weaker than the safe one.
+  # 1. Provenance first: a file we recorded writing is ours even when it now
+  #    points somewhere broken -- which is what "dead shim" means.
+  _shim_recorded "$1" && return 0
+  # 2. No record (a shim from an older version): fall back to proof by shape, and
+  #    keep it strict. Being a symlink is NOT enough -- pipx writes those too --
+  #    so it has to name the CLI our shim would name. shim_headroom() draws the
+  #    same line 48 lines up; the destructive path must not be the weaker one.
+  local tgt
+  tgt=$(_shim_source_cli) || tgt=""
+  if [ -L "$1" ]; then
+    [ -n "$tgt" ] && [ "$(readlink "$1")" = "$tgt" ] && return 0
+    return 1
+  fi
   # Windows: the doctor COPIES, so prove it by bytes -- against the engine CLI the
   # shim is made FROM. resolve_headroom_cli cannot be used for this: its first tier
   # is `command -v headroom`, which on any PATH containing SHIM_DIR resolves to the
   # very file under test, so it would match itself and wave everything through.
-  local v c uvr
-  v=${DOCTOR_VENV_DIR:-$HOME/.headroom-venv}
-  for c in "$v/Scripts/headroom.exe" "$v/bin/headroom"; do
-    [ -f "$c" ] && cmp -s "$1" "$c" 2>/dev/null && return 0
-  done
-  if uvr=$(_er_uv_root 2>/dev/null) && [ -n "$uvr" ]; then
-    for c in "$uvr/Scripts/headroom.exe" "$uvr/bin/headroom"; do
-      [ -f "$c" ] && cmp -s "$1" "$c" 2>/dev/null && return 0
-    done
-  fi
+  [ -n "$tgt" ] && cmp -s "$1" "$tgt" 2>/dev/null && return 0
   return 1
 }
 is_own_shim() {  # is_own_shim <path> — is this the file THIS run would have written?
@@ -346,9 +382,9 @@ shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the
     # follow it and clobber its target); the guards above already refused to
     # adopt any link that is not ours
     rm -f "$target" 2>/dev/null
-    cp "$1" "$target" 2>/dev/null && { : > "$TMPD/shim-written"; printf '%s' "$target"; }
+    cp "$1" "$target" 2>/dev/null && { : > "$TMPD/shim-written"; _shim_record "$target" "$1"; printf '%s' "$target"; }
   else
-    ln -sfn "$1" "$target" 2>/dev/null && { : > "$TMPD/shim-written"; printf '%s' "$target"; }
+    ln -sfn "$1" "$target" 2>/dev/null && { : > "$TMPD/shim-written"; _shim_record "$target" "$1"; printf '%s' "$target"; }
   fi
 }
 run_bounded() {  # run_bounded <seconds> <cmd> [args...] — the command's own status, nonzero if it overran
