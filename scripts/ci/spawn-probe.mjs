@@ -1,7 +1,8 @@
 // spawn-probe.mjs — CI-only. Spawns an MCP stdio server WITHOUT a shell (the way
 // Claude Code's MCP client does), sends `initialize`, and exits 0 only when a
 // JSON-RPC result comes back. Usage: node spawn-probe.mjs <command> [args...]
-// Exit: 0 handshake ok · 2 process exited early · 3 spawn error · 4 timeout
+// Exit: 0 handshake ok · 1 usage · 2 process exited early · 3 spawn refused
+//       (target present) · 4 timeout · 5 ENOENT (target not found)
 import { spawn } from "node:child_process";
 
 const [cmd, ...args] = process.argv.slice(2);

@@ -8,6 +8,11 @@ jobs:
       fail-fast: false
       matrix: { os: [ubuntu-latest, macos-latest] }
     runs-on: ${{ matrix.os }}
+    env:
+      # Coarse collapse guard, not a drift tracker -- keep it comfortably under
+      # the real count so a legitimately environment-skipped fixture cannot red
+      # the build, while a vanished engine-gated GROUP still trips it.
+      MIN_FIXTURES: 780
     steps:
       - uses: actions/checkout@v7
       - name: deps
@@ -59,6 +64,18 @@ jobs:
             echo "::notice::environment skips on this runner (not engine-related):"
             grep -E '^skip - ' suite.log | sort -u
           fi
+          # ...and a FLOOR, the second signal the windows job already has. The
+          # engine grep keys on one hand-typed phrase repeated across test.sh and
+          # this file with nothing tying them together; reword it, or add a new
+          # skip branch with different wording that swallows an engine-gated
+          # block, and the grep counts zero and passes. The floor notices the
+          # collapse regardless of how the skip is spelled.
+          ran=$( { grep -oE '^[0-9]+ passed, [0-9]+ failed' suite.log || true; } | tail -1 | awk '{print $1+$3}' )
+          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-780}" ]; then
+            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-780}) — coverage collapsed"
+            exit 1
+          fi
+          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-780})"
           grep -E '^[0-9]+ passed' suite.log | tail -1
   windows:
     runs-on: windows-latest
@@ -130,7 +147,7 @@ jobs:
           PATH="$p" env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /c "echo %PATH% & where headroom" 2>&1 | head -4
           exit 0
       - name: windows-check (required gate)
-        run: VENV_DIR="$(cygpath -u "$VENV_DIR")" bash scripts/ci/windows-check.sh
+        run: VENV_DIR="$(cygpath -u "$VENV_DIR")" WRAPPER_BASH_EXPECTED=1 bash scripts/ci/windows-check.sh
       - name: MCP spawn probe (shell-less, by name) + negative control
         # Run even when an earlier step failed. Every NATIVE-namespace assertion in
         # this job sits after windows-check, which is POSIX; with no `if:`, one
@@ -144,9 +161,12 @@ jobs:
           $env:PATH = "$env:VENV_DIR\Scripts;" + $env:PATH
           node scripts/ci/spawn-probe.mjs headroom mcp serve
           if ($LASTEXITCODE -ne 0) { throw "bare 'headroom mcp serve' failed to spawn/handshake ($LASTEXITCODE)" }
-          # spawn-probe maps ENOENT and EFTYPE to the same exit 3, so a renamed
-          # or moved target would "pass" this control without ever demonstrating
-          # that Windows refuses a shell-less .sh. Prove the target exists first.
+          # spawn-probe distinguishes ENOENT (exit 5) from a refused-but-present
+          # target (exit 3) -- see its header table. A renamed or moved target
+          # would therefore report 5 rather than failing the existence check
+          # below, so prove the target exists first and then accept 3 or 5 as
+          # the spawn-refusal signal (the branch a few lines down does exactly
+          # that). Without the existence check, 5 would read as a refusal.
           $shTarget = "$PWD\scripts\session-probe.sh"
           if (-not (Test-Path -LiteralPath $shTarget)) { throw "negative control target is missing: $shTarget" }
           node scripts/ci/spawn-probe.mjs $shTarget

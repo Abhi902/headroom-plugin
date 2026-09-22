@@ -141,8 +141,16 @@ case $cmd in \"*bash.exe\"\ \"*headroom-statusline.sh\") ok "doctor: statusLine 
 sl_b=$(command -v bash)
 case $sl_b in
   */usr/bin/bash|*/usr/bin/bash.exe)
-    sl_root=${sl_b%/*}; sl_root=${sl_root%/*}; sl_root=${sl_root%/*}
-    sl_wrapper="$sl_root/bin/${sl_b##*/}"
+    # Resolve the wrapper in the NATIVE namespace, the way doctor.sh's
+    # _sl_drive_posix/_sl_same_native do. Stripping three /-components off
+    # /usr/bin/bash leaves an empty root, so the old form tested "/bin/bash" --
+    # and inside a real Git Bash /bin is a MOUNT ALIAS of /usr/bin, which
+    # doctor.sh itself calls out as a trap. So `[ -f ]` was unconditionally true:
+    # this gate never checked that <gitroot>/bin/bash.exe exists, and the skip it
+    # documents for a Git install without the bin/ sibling could never be taken.
+    sl_b_win=$(cygpath -w "$sl_b" 2>/dev/null || printf '%s' "$sl_b")
+    sl_wrapper_win="${sl_b_win%\\usr\\bin\\*}\\bin\\${sl_b_win##*\\}"
+    sl_wrapper=$(cygpath -u "$sl_wrapper_win" 2>/dev/null || printf '%s' "$sl_wrapper_win")
     if [ -f "$sl_wrapper" ]; then
       case $cmd in
         *[\\/]usr[\\/]bin[\\/]bash*)
@@ -151,10 +159,21 @@ case $sl_b in
                "that bash loses MSYS coreutils when Claude Code spawns it natively" ;;
         *) ok "doctor: statusLine uses Git's external wrapper bash, not usr/bin ($cmd)" ;;
       esac
+    elif [ "${WRAPPER_BASH_EXPECTED:-0}" = "1" ]; then
+      # Same shape as UV_EXPECTED above: the workflow knows this runner is Git
+      # for Windows, so the wrapper MUST be there. This assertion is the only
+      # regression guard on the wrapper-bash fix — the PowerShell differential is
+      # explicitly not evidence for it — so letting it skip would retire the
+      # guard silently (review #9).
+      fail "wrapper bash $sl_wrapper absent although WRAPPER_BASH_EXPECTED=1" "command -v bash: $sl_b"
     else
       skip "wrapper-bash promotion (no $sl_wrapper on this runner)"
     fi ;;
-  *) skip "wrapper-bash promotion (command -v bash is $sl_b, not usr/bin)" ;;
+  *) if [ "${WRAPPER_BASH_EXPECTED:-0}" = "1" ]; then
+       fail "command -v bash is $sl_b, not a usr/bin spelling, so the wrapper-bash guard did not run (WRAPPER_BASH_EXPECTED=1)"
+     else
+       skip "wrapper-bash promotion (command -v bash is $sl_b, not usr/bin)"
+     fi ;;
 esac
 out2=$(doctor_sb); rc2=$?
 [ "$rc2" -eq 0 ] && ok "doctor --fix run 2 exits 0" || fail "doctor --fix run 2 exited $rc2"
@@ -179,4 +198,12 @@ echo
 summary="$PASS passed, $FAIL failed, $SKIP skipped"
 [ "$SKIP" -gt 0 ] && summary="$summary — skipped: $SKIP_NAMES"
 echo "$summary"
+# A required gate that reports success no matter how many of its assertions
+# stopped running is the F8 shape one level down. Genuinely optional layouts may
+# still skip, but the count is bounded so a runner-image change cannot quietly
+# retire assertions (review #9).
+if [ "$SKIP" -gt "${WINDOWS_CHECK_MAX_SKIPS:-1}" ]; then
+  echo "windows-check: $SKIP skipped exceeds max ${WINDOWS_CHECK_MAX_SKIPS:-1} — assertions stopped running: $SKIP_NAMES" >&2
+  exit 1
+fi
 [ "$FAIL" -eq 0 ]
