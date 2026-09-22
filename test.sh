@@ -3735,16 +3735,28 @@ check "w13: a dead own shim is recognised through the .exe spelling too" \
       "this file is the doctor's own shim from an earlier run" "$out"
 
 out=$(w13_dead --fix)
+# shim_target() is headroom.exe on Windows and headroom on POSIX, so match the
+# path PREFIX rather than the full line -- the product is right on both.
 check        "w13: --fix removes the dead own shim and repairs in the same run" \
-             "headroom shimmed to $W13R/shim/headroom (resolves on PATH)" "$out"
+             "headroom shimmed to $W13R/shim/headroom" "$out"
+
 check_absent "w13: the repaired run no longer reports the does-not-run FAIL" \
              "does not run" "$out"
-check_eq     "w13: the repaired shim points at the engine CLI" "$W13R/venv/bin/headroom" \
-             "$(readlink "$W13R/shim/headroom")"
+# POSIX shims are symlinks, Windows shims are copies -- assert whichever this
+# platform actually produced rather than asserting POSIX on both.
+w13_repaired=$W13R/shim/headroom; [ -e "$w13_repaired" ] || w13_repaired=$W13R/shim/headroom.exe
+if [ -L "$w13_repaired" ]; then
+  check_eq   "w13: the repaired shim points at the engine CLI" "$W13R/venv/bin/headroom" \
+             "$(readlink "$w13_repaired")"
+elif cmp -s "$w13_repaired" "$W13R/venv/bin/headroom"; then
+  echo "ok - w13: the repaired shim points at the engine CLI"; PASS=$((PASS+1))
+else
+  echo "FAIL - w13: the repaired shim points at the engine CLI"; FAIL=$((FAIL+1))
+fi
 out=$(w13_dead --fix)
 check_eq     "w13: the next --fix is a no-op (no ^fixed line)" "0" \
              "$(printf '%s\n' "$out" | grep -cE '^fixed ')"
-check        "w13: and it greens the repaired shim" "headroom CLI on PATH ($W13R/shim/headroom)" "$out"
+check        "w13: and it greens the repaired shim" "headroom CLI on PATH ($W13R/shim/headroom" "$out"
 
 # ...and a foreign symlink with NO provenance record is still refused, which is
 # the half review #2 reopened: being a link is not ownership.
@@ -3757,10 +3769,14 @@ doc_settings_wired "$W13P/cd" > "$W13P/s.json"
 env -u HCAT_PYTHON DOCTOR_OS=unix PATH="$W13P/shim:$STUB:/usr/bin:/bin" \
     DOCTOR_SETTINGS="$W13P/s.json" DOCTOR_CLAUDE_DIR="$W13P/cd" DOCTOR_VENV_DIR="$W13P/venv" \
     DOCTOR_SHIM_DIR="$W13P/shim" HEADROOM_STATE_DIR="$W13P/state" bash "$DOCTOR" --fix >/dev/null 2>&1
-if [ -L "$W13P/shim/headroom" ] && [ "$(readlink "$W13P/shim/headroom")" = "$W13P/pipx/headroom" ]; then
-  echo "ok - w13: a pipx-shaped symlink with no provenance survives --fix"; PASS=$((PASS+1))
+# Assert SURVIVAL and content, not shape: MSYS turns `ln -s` into a copy, so a
+# [ -L ] test would fail on Windows even when the file was left untouched -- which
+# is the only thing this fixture is actually about. cmp reads through a symlink
+# and compares a copy byte-for-byte, so it proves it on both platforms.
+if [ -e "$W13P/shim/headroom" ] && cmp -s "$W13P/shim/headroom" "$W13P/pipx/headroom"; then
+  echo "ok - w13: a pipx-shaped shim with no provenance survives --fix"; PASS=$((PASS+1))
 else
-  echo "FAIL - w13: --fix deleted a foreign symlink at the shim path (review #2)"; FAIL=$((FAIL+1))
+  echo "FAIL - w13: --fix deleted or rewrote a foreign shim at the shim path (review #2)"; FAIL=$((FAIL+1))
 fi
 
 # w13-#10. shim_runs executes whatever `command -v headroom` resolves on every
