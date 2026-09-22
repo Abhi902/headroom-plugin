@@ -144,10 +144,13 @@ fi
 # from PATH, so a broken-but-installed engine fell through and DENIED the Read
 # with no badge. The pre-lib code failed OPEN and recorded the outage; losing
 # that was strictly worse than the decoy bug this loop exists to fix.
-py=""; py_seen=""
+py=""; py_seen=""; py_validated=""
 if type resolve_engine_python_validated >/dev/null 2>&1; then
   py=$(resolve_engine_python_validated); case $? in
-    0) ;;                       # working interpreter
+    # Status 0 means the resolver already ran the import probe, bounded -- EXCEPT
+    # for an HCAT_PYTHON override, which it returns authoritatively without
+    # probing. Only the probed case may skip the re-check below.
+    0) [ -z "${HCAT_PYTHON:-}" ] && py_validated=1 ;;
     2) py_seen=$py; py="" ;;    # resolved but cannot import: an OUTAGE, not absence
     *) py="" ;;                 # nothing installed: ordinary red-idle
   esac
@@ -173,13 +176,35 @@ if [ -n "$py" ]; then
   # exits 4) — verify the import and fail OPEN (allow the Read) on a broken
   # engine. `.compress` also distinguishes the real headroom-ai package from
   # a name-squatted `headroom` on PyPI (see doctor.sh/bin/hcat).
-  # Only runs on the rare deny path, so the interpreter spawn is fine.
-  if ! "$py" -c 'import headroom.compress' >/dev/null 2>&1; then
-    note_error engine "engine import failed ($py) — gate failing open; run /doctor"
-    exit 0
+  #
+  # SKIP it when resolve_engine_python_validated already probed this exact
+  # candidate: this runs on every gated Read (before the per-session dedup
+  # below), so repeating the resolver's own bounded probe doubled the spawns
+  # the shared resolver was introduced to bound. What is left -- an
+  # HCAT_PYTHON override, or the legacy narrow resolver -- is bounded too.
+  if [ -z "$py_validated" ]; then
+    if type _er_bounded >/dev/null 2>&1; then
+      _er_bounded "${ER_PY_TIMEOUT:-5}" "$py" -c 'import headroom.compress' >/dev/null 2>&1
+    else
+      "$py" -c 'import headroom.compress' >/dev/null 2>&1
+    fi
+    _gate_st=$?
+    # 124 = the probe outran its bound, not proof of a broken engine; treat it
+    # the way the resolver does and let the Read through on the engine we have.
+    if [ "$_gate_st" -ne 0 ] && [ "$_gate_st" -ne 124 ]; then
+      note_error engine "engine import failed ($py) — gate failing open; run /doctor"
+      exit 0
+    fi
   fi
 else
+  # No interpreter resolved at all. Denying here would point the user at hcat,
+  # which without an engine exits 3 unless jq can carry the toon-lite tier --
+  # so only deny when that tier can actually deliver. `headroom` resolving on
+  # PATH is not enough: this PR's own Windows shim can put the CLI in a
+  # python-less ~/.local/bin, and the gate now shares hcat's broad resolver, so
+  # it already knows hcat will find no interpreter either.
   command -v headroom >/dev/null 2>&1 || exit 0
+  command -v jq >/dev/null 2>&1 || exit 0
 fi
 
 sid=$(printf '%s' "$in" | jq -r '.session_id // "unknown"' 2>/dev/null) || sid="unknown"

@@ -59,25 +59,41 @@ _er_bounded() {  # _er_bounded <secs> <cmd...> — coreutils timeout, else a wat
   # nothing here may hang unboundedly. doctor.sh's run_bounded is the same idea,
   # but it lives in doctor.sh and never reached these entry points. Keep it
   # bash-3.2 safe: no `wait -n`, no arrays.
-  local t secs pid waited
+  local t secs pid waited ticks unit
   t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
   if [ -n "$t" ]; then "$t" "$@"; return $?; fi
   secs=$1; shift
+  # Poll sub-second where the platform allows. The previous `sleep 1` ran BEFORE
+  # the first re-poll, so on a host without coreutils (stock macOS) every bounded
+  # call paid a full second even when the child exited immediately -- and this
+  # runs per candidate, on every gated Read, every hcat and every SessionStart.
+  # Resolve the unit once per process; `none` means no usable sleep at all.
+  if [ -z "${_ER_SLEEP_UNIT:-}" ]; then
+    if sleep 0.1 2>/dev/null; then _ER_SLEEP_UNIT=0.1; _ER_SLEEP_TICKS=10
+    elif sleep 1 2>/dev/null; then _ER_SLEEP_UNIT=1;   _ER_SLEEP_TICKS=1
+    else _ER_SLEEP_UNIT=none; _ER_SLEEP_TICKS=0; fi
+  fi
+  # No usable sleep: run UNBOUNDED rather than spin. A failing `sleep` used to
+  # return instantly while `waited` still advanced, so the watchdog SIGKILLed a
+  # perfectly healthy child within milliseconds and reported 124 -- the exact
+  # shape that made doctor.sh's native probe unreachable (see run_bounded).
+  if [ "$_ER_SLEEP_UNIT" = none ]; then "$@"; return $?; fi
+  unit=$_ER_SLEEP_UNIT; ticks=$(( secs * _ER_SLEEP_TICKS ))
   "$@" &
   pid=$!
   waited=0
   while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
+    if [ "$waited" -ge "$ticks" ]; then
       kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 124
     fi
-    sleep 1; waited=$((waited+1))
+    sleep "$unit"; waited=$((waited+1))
   done
   wait "$pid"; return $?
 }
 
 resolve_engine_python_validated() {  # first IMPORTABLE candidate, not first executable
   # ONE definition of "which interpreter is the engine", shared by bin/hcat,
-  # hcat-gate.sh and doctor.sh. Resolving by mere executability picks up a stray
+  # hcat-gate.sh and doctor.sh (check 2). Resolving by mere executability picks up a stray
   # `python` beside the headroom console script (pyenv/asdf/mise shims, uv's
   # default install, ~/.local/bin once --fix shims there) which cannot import
   # headroom -- so consumers disagreed about the engine on the same machine.
@@ -88,12 +104,23 @@ resolve_engine_python_validated() {  # first IMPORTABLE candidate, not first exe
   #   1  prints nothing (no engine installed at all)
   # Callers need 1 vs 2: one is the ordinary red-idle state, the other is an
   # outage that must fail open AND light the badge.
-  local c seen=""
+  local c seen="" st
+  # HCAT_PYTHON is authoritative with no fallback (an existing contract, pinned by
+  # the suite), so it is returned unprobed -- status 0 here means "this is the
+  # engine", not "its import was verified". Callers that must know re-check it.
   if [ -n "${HCAT_PYTHON:-}" ]; then printf '%s\n' "$HCAT_PYTHON"; return 0; fi
   while IFS= read -r c; do
     [ -n "$c" ] && [ -x "$c" ] || continue
     seen=$c
-    if _er_bounded "${ER_PY_TIMEOUT:-5}" "$c" -c 'import headroom.compress' >/dev/null 2>&1; then
+    _er_bounded "${ER_PY_TIMEOUT:-5}" "$c" -c 'import headroom.compress' >/dev/null 2>&1
+    st=$?
+    # 0 imports. 124 means the probe outran its bound -- and doctor.sh's own
+    # comment concedes a cold headroom-ai[all] import with torch can do that on a
+    # slow disk. ACCEPT it: calling a working engine broken is the worse error,
+    # especially while doctor.sh's walk is unbounded and would report `ok` on the
+    # same machine. Accepting also stops the walk, so one slow candidate costs one
+    # timeout, not one per candidate.
+    if [ "$st" -eq 0 ] || [ "$st" -eq 124 ]; then
       printf '%s\n' "$c"; return 0
     fi
   done < <(engine_python_candidates)

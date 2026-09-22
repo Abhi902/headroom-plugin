@@ -158,7 +158,19 @@ if [ -n "${HCAT_PYTHON:-}" ]; then
   else
     HCAT_PY_BROKEN=1
   fi
+elif type resolve_engine_python_validated >/dev/null 2>&1; then
+  # Use the SHARED resolver. This walk was the model the gate and bin/hcat copied,
+  # and keeping a private copy here meant three definitions of "which interpreter
+  # is the engine" -- able to disagree about the same machine, and this one alone
+  # unbounded, so a wedged interpreter could hang a plain /doctor forever.
+  # The doctor may wait longer than a hook: it is interactive, and a cold
+  # headroom-ai[all] import is exactly what it is here to diagnose.
+  PY=$(ER_PY_TIMEOUT="${DOCTOR_PY_TIMEOUT:-60}" resolve_engine_python_validated); case $? in
+    0) ;;
+    *) PY="" ;;
+  esac
 else
+  # partial/legacy install with no lib beside this script
   while IFS= read -r cand; do
     if [ -n "$cand" ] && [ -x "$cand" ] && "$cand" -c 'import headroom.compress' >/dev/null 2>&1; then
       PY=$cand; break
@@ -255,13 +267,42 @@ _shim_record() {  # _shim_record <shim> <source> — remember that WE wrote this
   # something broken or moved, which is exactly what a foreign link looks like.
   # So record it when we write it, in state the user's package managers do not
   # touch. Best-effort: a missing record only costs the self-repair, never safety.
+  # Third line is an IDENTITY for the file we just wrote: the link it names
+  # (POSIX) or a checksum of its bytes (the Windows copy). A path alone proves
+  # nothing later -- if pipx or `pip install --user` puts ITS console script at
+  # the same path afterwards, a path-keyed record would hand a user binary to
+  # the deleter below, which is the very bug the shape proofs exist to stop.
+  # A merely DEAD shim keeps its link string and its bytes, so the self-repair
+  # still recognises it -- on both platforms now, not just POSIX.
+  local id
+  if [ -L "$1" ]; then id="link:$(readlink "$1" 2>/dev/null)"
+  else id="sum:$(cksum < "$1" 2>/dev/null)"; fi
   { mkdir -p "$HEALTH_STATE_DIR" \
-    && printf '%s\n%s\n' "$1" "$2" > "$HEALTH_STATE_DIR/shim-provenance"; } 2>/dev/null || true
+    && printf '%s\n%s\n%s\n' "$1" "$2" "$id" > "$HEALTH_STATE_DIR/shim-provenance"; } 2>/dev/null || true
 }
-_shim_recorded() {  # _shim_recorded <path> — did a previous run record writing it?
-  local rec
-  rec=$(head -1 "$HEALTH_STATE_DIR/shim-provenance" 2>/dev/null) || return 1
-  [ -n "$rec" ] && [ "$rec" = "$1" ]
+_shim_recorded() {  # _shim_recorded <path> — did we write it, and is it still that file?
+  local rec id now src
+  rec=$(sed -n 1p "$HEALTH_STATE_DIR/shim-provenance" 2>/dev/null) || return 1
+  id=$(sed -n 3p "$HEALTH_STATE_DIR/shim-provenance" 2>/dev/null) || id=""
+  [ -n "$rec" ] || return 1
+  # Normalise the .exe spelling on BOTH sides, as is_own_shim already does: the
+  # record stores shim_target() (headroom.exe on Windows) while callers pass
+  # `command -v headroom`, the suffix-less spelling inside Git Bash. A verbatim
+  # compare could therefore never match on the one platform that writes a copy.
+  [ "${rec%.exe}" = "${1%.exe}" ] || return 1
+  if [ -n "$id" ]; then
+    if [ -L "$1" ]; then now="link:$(readlink "$1" 2>/dev/null)"
+    else now="sum:$(cksum < "$1" 2>/dev/null)"; fi
+    [ "$now" = "$id" ]
+    return $?
+  fi
+  # A 2-line record predates the identity line. The strongest proof still
+  # available is that our symlink continues to name the source we recorded
+  # writing it from -- which a DEAD shim does (its target broke or moved; the
+  # link string did not), and a foreign console script dropped at the same path
+  # does not. A bare path match is never enough on its own.
+  src=$(sed -n 2p "$HEALTH_STATE_DIR/shim-provenance" 2>/dev/null) || src=""
+  [ -n "$src" ] && [ -L "$1" ] && [ "$(readlink "$1" 2>/dev/null)" = "$src" ]
 }
 _shim_source_cli() {  # the engine CLI a shim is made FROM — venv/uv tiers only.
   # Deliberately NOT resolve_headroom_cli: its first tier is `command -v headroom`,
@@ -493,7 +534,7 @@ sl_prefer_wrapper_bash() {  # <bash path, native or POSIX spelling> → possibly
   printf '%s\n' "$p"
 }
 sl_bash_path() {  # → the bash a Windows statusLine.command should run through
-  local b nl cr bdir
+  local b nl cr bdir _sl_pwd _sl_ov _sl_ovdir
   # CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT-scoped
   # settings.json — i.e. from repo config. `--fix` persists what we print here
   # into ~/.claude/settings.json as statusLine.command, which Claude Code then
@@ -546,9 +587,31 @@ sl_bash_path() {  # → the bash a Windows statusLine.command should run through
   # the workspace, so refuse an override that resolves inside it; rejected values
   # fall through to the `command -v bash` path the w12/w13 fixtures already cover.
   if [ -n "$b" ]; then
-    case "$(unix_path "$b")" in
-      "${DOCTOR_PROJECT_DIR:-$PWD}"/*) b="" ;;
+    # (a) An override must be ABSOLUTE. A relative value like tools/bash.exe
+    #     satisfies every rule above and the -f test below (both resolve against
+    #     the workspace cwd) while never matching an absolute prefix -- so the
+    #     prefix test alone let the payload straight through.
+    case $b in
+      /*|[A-Za-z]:[\\/]*|\\\\*) ;;
+      *) b="" ;;
     esac
+  fi
+  if [ -n "$b" ]; then
+    # (b) Compare against $PWD, NOT ${DOCTOR_PROJECT_DIR:-$PWD}. DOCTOR_PROJECT_DIR
+    #     is itself an environment variable, so the same project-scoped
+    #     settings.json `env` block that delivers CLAUDE_CODE_GIT_BASH_PATH could
+    #     redirect this check with one more key and re-open the hole it closes.
+    #     DOCTOR_PROJECT_DIR stays a test/scan seam elsewhere; it must not be able
+    #     to weaken a security decision. $PWD is set by the shell, not by config.
+    _sl_pwd=$(cd "$PWD" 2>/dev/null && pwd -P) || _sl_pwd=$PWD
+    _sl_ov=$(unix_path "$b")
+    _sl_ovdir=$(cd "$(dirname "$_sl_ov")" 2>/dev/null && pwd -P) || _sl_ovdir=$(dirname "$_sl_ov")
+    # Canonicalise both sides so `..`, a symlinked workspace or a subdirectory
+    # invocation cannot spell a path that slips past a literal prefix compare.
+    case "$_sl_ovdir/" in
+      "$_sl_pwd"/*) b="" ;;
+    esac
+    [ "$_sl_ovdir" = "$_sl_pwd" ] && b=""
   fi
   if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(command -v bash); fi
   b=$(sl_prefer_wrapper_bash "$b")
@@ -671,7 +734,8 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
     fi
   elif [ "$FIX" -eq 1 ] && [ "$cli_healed" -eq 0 ] && is_own_shim "$cli_now" \
        && shim_is_ours "$cli_now" \
-       && rm -f "$cli_now" 2>/dev/null; then
+       && rm -f "$cli_now" 2>/dev/null \
+       && { rm -f "$HEALTH_STATE_DIR/shim-provenance" 2>/dev/null; :; }; then
     # The dead file is the doctor's OWN shim from an earlier run. Reporting it
     # as "reinstall the engine" misdiagnoses an engine that check 2 just found
     # healthy, and the identical FAIL repeated on every subsequent --fix with
@@ -743,16 +807,22 @@ done   # end of the one-shot self-repair retry that begins at `while [ "$cli_ret
 # spawned instead of the installed engine. Nothing in .mcp.json can prevent that;
 # the doctor can at least see it and say so.
 if is_windows; then
-  hj_dir=${DOCTOR_PROJECT_DIR:-$PWD}
+  # Scan the real cwd AND the test/scan seam -- never only the seam. Making
+  # DOCTOR_PROJECT_DIR a REPLACEMENT meant the same project-scoped settings.json
+  # `env` channel this check defends against could point it at an empty
+  # directory and switch the detector off with one key.
   hj_found=""
-  # the spellings come from scripts/lib/engine-resolve.sh (PATHEXT order, .com
-  # FIRST) so this list and session-probe.sh's cannot drift apart again
-  for hj in $(headroom_name_variants); do
-    [ -f "$hj_dir/$hj" ] || continue
-    # .exe/.cmd/.bat are executable to Windows by extension; the extensionless
-    # name only matters when Git Bash would run it
-    case $hj in headroom) [ -x "$hj_dir/$hj" ] || continue ;; esac
-    hj_found="$hj_dir/$hj"; break
+  for hj_dir in "$PWD" ${DOCTOR_PROJECT_DIR:+"$DOCTOR_PROJECT_DIR"}; do
+    # the spellings come from scripts/lib/engine-resolve.sh (PATHEXT order, .com
+    # FIRST) so this list and session-probe.sh's cannot drift apart again
+    for hj in $(headroom_name_variants); do
+      [ -f "$hj_dir/$hj" ] || continue
+      # .exe/.cmd/.bat are executable to Windows by extension; the extensionless
+      # name only matters when Git Bash would run it
+      case $hj in headroom) [ -x "$hj_dir/$hj" ] || continue ;; esac
+      hj_found="$hj_dir/$hj"; break
+    done
+    [ -n "$hj_found" ] && break
   done
   if [ -n "$hj_found" ]; then
     say FAIL "an executable $hj_found sits in the project directory — on Windows a bare command name resolves from the project directory BEFORE PATH, so the bundled MCP would spawn that file instead of the installed headroom engine; remove or rename it"
@@ -774,20 +844,38 @@ if is_windows; then
   # for whatever came back `fixable`) had no basis to ever recommend --fix for this
   # reason, and an otherwise-healthy Windows install stayed exposed with a clean
   # bill of health.
-  mcp_abs=""
-  if command -v claude >/dev/null 2>&1; then
-    # NATIVE spelling. resolve_headroom_cli yields a Git Bash path, and Claude Code
-    # spawns MCP commands outside Git Bash where that does not resolve — the same
-    # thing win_path already fixes for statusLine a few lines up. win_path is a
-    # no-op on an already-native path, so the uv tier is unaffected. The
-    # MSYS_NO_PATHCONV guards stop MSYS rewriting the argument on the way in,
-    # which would also break the fixed-string idempotency probe below.
-    mcp_abs=$(resolve_headroom_cli 2>/dev/null) && mcp_abs=$(win_path "$mcp_abs") || mcp_abs=""
+  # Resolve the engine path FIRST and unconditionally: resolve_headroom_cli does
+  # not depend on `claude`, and gating it behind that test left the no-claude
+  # remedy below shipping a literal "<engine path>" placeholder an agent cannot run.
+  # NATIVE spelling. resolve_headroom_cli yields a Git Bash path, and Claude Code
+  # spawns MCP commands outside Git Bash where that does not resolve — the same
+  # thing win_path already fixes for statusLine a few lines up. win_path is a
+  # no-op on an already-native path, so the uv tier is unaffected. The
+  # MSYS_NO_PATHCONV guards stop MSYS rewriting the argument on the way in,
+  # which would also break the fixed-string idempotency probe below.
+  mcp_abs=$(resolve_headroom_cli 2>/dev/null) && mcp_abs=$(win_path "$mcp_abs") || mcp_abs=""
+  # ...and never register a path that does not START. 2b may have just FAILed this
+  # very file as dead (both reach it through `command -v headroom`), and persisting
+  # it into the user's global MCP config would print `fixed` over an entry that can
+  # never connect — the same misdiagnosis 2b's own liveness probe exists to stop.
+  if [ -n "$mcp_abs" ] && ! shim_runs "$(unix_path "$mcp_abs")"; then
+    mcp_abs=""; mcp_dead=1
+  else
+    mcp_dead=0
   fi
   if ! command -v claude >/dev/null 2>&1; then
-    say note "\`claude\` is not on PATH, so the MCP could not be registered by absolute path — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it; once the CLI is available run: claude mcp add -s user headroom -- \"<engine path>\" mcp serve"
+    if [ -n "$mcp_abs" ]; then
+      say note "\`claude\` is not on PATH, so the MCP could not be registered by absolute path — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it; once the CLI is available run: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
+    else
+      say note "\`claude\` is not on PATH, so the MCP could not be registered by absolute path — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it; fix the engine first, then re-run /doctor --fix"
+    fi
+  elif [ "$mcp_dead" -eq 1 ]; then
+    say fixable "the resolved headroom CLI does not start, so the MCP was not registered by absolute path — the project-directory tier stays open until the engine is repaired; fix the engine (see check 2b) and re-run /doctor --fix"
   elif [ -z "$mcp_abs" ]; then
-    :   # no engine resolved — check 2 above already said so; do not add noise here
+    # Say SOMETHING. check 2 reports the engine, but it can be `ok` while
+    # resolve_headroom_cli still returns nothing (HCAT_PYTHON set with the CLI
+    # elsewhere), and then this exposure was reported by nobody at all.
+    say skip "MCP registration by absolute path (no headroom CLI resolved yet — fix the engine first)"
   elif ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; run_bounded 10 claude mcp get headroom ) 2>/dev/null | grep -qF "$mcp_abs"; then
     say ok "bundled MCP registered by absolute path ($mcp_abs) — the project-directory tier cannot win against it"
   elif [ "$FIX" -eq 1 ]; then

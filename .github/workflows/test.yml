@@ -12,7 +12,11 @@ jobs:
       # Coarse collapse guard, not a drift tracker -- keep it comfortably under
       # the real count so a legitimately environment-skipped fixture cannot red
       # the build, while a vanished engine-gated GROUP still trips it.
-      MIN_FIXTURES: 800
+      # 815 execute at this head. The floor has to sit close enough that losing a
+      # whole engine-gated group trips it: the largest such group is 15 assertions,
+      # so a floor of 800 let exactly that group vanish and still pass (-lt 800 is
+      # false at 800). RAISE THIS whenever fixtures are added.
+      MIN_FIXTURES: 810
     steps:
       - uses: actions/checkout@v7
       - name: deps
@@ -71,11 +75,11 @@ jobs:
           # block, and the grep counts zero and passes. The floor notices the
           # collapse regardless of how the skip is spelled.
           ran=$( { grep -oE '^[0-9]+ passed, [0-9]+ failed' suite.log || true; } | tail -1 | awk '{print $1+$3}' )
-          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-800}" ]; then
-            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-800}) — coverage collapsed"
+          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-810}" ]; then
+            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-810}) — coverage collapsed"
             exit 1
           fi
-          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-800})"
+          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-810})"
           grep -E '^[0-9]+ passed' suite.log | tail -1
   windows:
     runs-on: windows-latest

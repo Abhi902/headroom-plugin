@@ -3704,7 +3704,7 @@ ln -sfn "$W13R/deadtarget" "$W13R/shim/headroom"
 # the doctor wrote in an earlier run, since gone dead", and it works on BOTH
 # platforms: no more skipping where MSYS turns ln -s into a copy.
 mkdir -p "$W13R/state"
-printf '%s\n%s\n' "$W13R/shim/headroom" "$W13R/venv/bin/headroom" > "$W13R/state/shim-provenance"
+printf '%s\n%s\n' "$W13R/shim/headroom" "$W13R/deadtarget" > "$W13R/state/shim-provenance"
 S13R="$W13R/s.json"; doc_settings_wired "$W13R/cd" > "$S13R"
 w13_dead() {
   env -u HCAT_PYTHON PATH="$W13R/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S13R" \
@@ -4461,6 +4461,102 @@ out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$STUB:$W21/venv/bin:/usr/bin:/b
       DOCTOR_SHIM_DIR="$W21/shim" HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" --fix 2>&1)
 check "w21: without the claude CLI the exposure is stated, not hidden" \
       "would be spawned before it" "$out"
+
+# --- w22. REGRESSION (review round 3): the tri-state contract of
+# resolve_engine_python_validated, which two hooks branch on and NOTHING
+# exercised. Every pre-existing "broken engine" fixture sets HCAT_PYTHON, which
+# the resolver returns authoritatively WITHOUT probing -- so the candidate walk,
+# and with it the 1-vs-2 distinction the whole design rests on, was untested.
+# That is exactly how a round-2 fix shipped green while the gate denied Reads.
+W22="$W/w22-tristate"; mkdir -p "$W22/bin" "$W22/venv/bin" "$W22/broken/bin" "$W22/home" "$W22/state"
+printf '#!/bin/sh\necho hr\n' > "$W22/bin/headroom"; chmod +x "$W22/bin/headroom"
+# a python that RUNS but cannot import headroom: the resolved-but-broken engine
+printf '#!/bin/sh\nexit 1\n' > "$W22/broken/bin/python"; chmod +x "$W22/broken/bin/python"
+# a python that imports fine
+printf '#!/bin/sh\nexit 0\n' > "$W22/venv/bin/python"; chmod +x "$W22/venv/bin/python"
+
+check_eq "w22: a working candidate resolves with status 0" "0" \
+  "$(unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$W22/venv"; er resolve_engine_python_validated >/dev/null; echo $?)"
+check_eq "w22: executable-but-unimportable resolves with status 2" "2" \
+  "$(unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$W22/broken"; er resolve_engine_python_validated >/dev/null; echo $?)"
+check_eq "w22: status 2 still PRINTS the broken interpreter" "$W22/broken/bin/python" \
+  "$(unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$W22/broken"; er resolve_engine_python_validated 2>/dev/null)"
+check_eq "w22: nothing installed resolves with status 1" "1" \
+  "$(unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$W22/nonexistent"; er resolve_engine_python_validated >/dev/null; echo $?)"
+
+# The gate must FAIL OPEN and light the badge for a resolved-but-broken engine
+# reached through the real walk. Denying here is what round 2 shipped: the user
+# lost Reads and got no badge explaining why.
+rm -f "$W22/state/last-error"
+out=$(gate_input "$BIGJSON" w22 | env -u HCAT_PYTHON HOME="$W22/home" DOCTOR_VENV_DIR="$W22/broken" \
+      PATH="$W22/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W22/state" bash "$GATE")
+if printf '%s' "$out" | grep -q '"permissionDecision"[[:space:]]*:[[:space:]]*"deny"'; then
+  echo "FAIL - w22: a broken engine must let the Read through, not deny it"; FAIL=$((FAIL+1))
+else
+  echo "ok - w22: a broken engine lets the Read through (fails open)"; PASS=$((PASS+1))
+fi
+if grep -q 'engine' "$W22/state/last-error" 2>/dev/null; then
+  echo "ok - w22: a broken engine lights the badge"; PASS=$((PASS+1))
+else
+  echo "FAIL - w22: a broken engine must record an engine error"; FAIL=$((FAIL+1))
+fi
+
+# bin/hcat must reach the SAME verdict as the gate. It collapsed status 1 and 2
+# into one empty value, so a broken engine printed "headroom python not found",
+# exited 3 and recorded nothing -- where every earlier version exited 4.
+rm -f "$W22/state/last-error"
+hout=$(env -u HCAT_PYTHON HOME="$W22/home" DOCTOR_VENV_DIR="$W22/broken" \
+       PATH="$W22/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W22/state" \
+       bash "$HCAT" "$BIGJSON" 2>&1 >/dev/null); hrc=$?
+check_eq "w22: hcat exits 4 on a resolved-but-broken engine" "4" "$hrc"
+check "w22: hcat names the broken interpreter" "cannot import headroom.compress" "$hout"
+if grep -q 'engine' "$W22/state/last-error" 2>/dev/null; then
+  echo "ok - w22: hcat lights the badge on a broken engine"; PASS=$((PASS+1))
+else
+  echo "FAIL - w22: hcat must record an engine error on a broken engine"; FAIL=$((FAIL+1))
+fi
+
+# --- w22b. REGRESSION (review round 3): a STALE provenance record must not hand
+# a user's binary to the deleter. The record proved only a PATH, and nothing
+# invalidated it when the shim went away -- so once pipx / `pip install --user`
+# put ITS console script at that same path, the doctor read its own old record,
+# called the file "ours" and rm -f'd it. That is the identical destruction the
+# shape proofs (w19) exist to prevent, reached through the provenance fast path.
+W22B="$W/w22b-stale"; mkdir -p "$W22B/shim" "$W22B/venv/bin" "$W22B/cd" "$W22B/state"
+printf '#!/bin/sh\nexit 1\n'  > "$W22B/shim/headroom";     chmod +x "$W22B/shim/headroom"   # foreign, fails --help
+printf '#!/bin/sh\nexit 0\n'  > "$W22B/venv/bin/python";   chmod +x "$W22B/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W22B/venv/bin/headroom"; chmod +x "$W22B/venv/bin/headroom"
+cp "$W22B/shim/headroom" "$W22B/foreign.orig"
+# a record this doctor really could have left behind, now stale: same path, but
+# the file living there is no longer the one we wrote
+printf '%s\n%s\n%s\n' "$W22B/shim/headroom" "$W22B/venv/bin/headroom" "link:$W22B/venv/bin/headroom" \
+  > "$W22B/state/shim-provenance"
+S22B="$W22B/s.json"; doc_settings_wired "$W22B/cd" > "$S22B" 2>/dev/null || printf '{}' > "$S22B"
+env -u HCAT_PYTHON PATH="$W22B/shim:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$S22B" \
+    DOCTOR_CLAUDE_DIR="$W22B/cd" DOCTOR_VENV_DIR="$W22B/venv" DOCTOR_SHIM_DIR="$W22B/shim" \
+    HEADROOM_STATE_DIR="$W22B/state" bash "$DOCTOR" --fix >/dev/null 2>&1 || true
+if [ -f "$W22B/shim/headroom" ] && cmp -s "$W22B/shim/headroom" "$W22B/foreign.orig"; then
+  echo "ok - w22b: a stale provenance record does not license deleting a foreign binary"; PASS=$((PASS+1))
+else
+  echo "FAIL - w22b: --fix destroyed a foreign binary via a stale provenance record"; FAIL=$((FAIL+1))
+fi
+
+# --- w23. REGRESSION (review round 3): _er_bounded must actually bound, and a
+# probe that OUTRUNS its bound is not proof of a broken engine. doctor.sh's own
+# comment concedes a cold headroom-ai[all] import with torch can exceed it, so
+# treating the timeout as "broken" declared a working engine dead while
+# /doctor -- whose walk is unbounded -- reported ok on the same machine.
+W23="$W/w23-bound"; mkdir -p "$W23/venv/bin"
+printf '#!/bin/sh\nsleep 8\nexit 0\n' > "$W23/venv/bin/python"; chmod +x "$W23/venv/bin/python"
+t0=$(date +%s)
+w23_st=$(unset HCAT_PYTHON; export DOCTOR_VENV_DIR="$W23/venv" ER_PY_TIMEOUT=1; er resolve_engine_python_validated >/dev/null; echo $?)
+t1=$(date +%s)
+check_eq "w23: a slow-but-working engine is accepted, not called broken" "0" "$w23_st"
+if [ $((t1 - t0)) -lt 6 ]; then
+  echo "ok - w23: the bound engaged (returned in $((t1 - t0))s, child sleeps 8)"; PASS=$((PASS+1))
+else
+  echo "FAIL - w23: ER_PY_TIMEOUT did not bound the probe ($((t1 - t0))s)"; FAIL=$((FAIL+1))
+fi
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

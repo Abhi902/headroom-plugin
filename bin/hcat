@@ -68,10 +68,20 @@ fi
 # first executable one. A decoy `python` beside the headroom console script would
 # otherwise be chosen here and fail at import time with exit 4, while /doctor on
 # the same machine reported a healthy engine.
+PY=""; PY_BROKEN=""
 if type resolve_engine_python_validated >/dev/null 2>&1; then
-  PY=$(resolve_engine_python_validated) || PY=""
+  # Dispatch on the status, do NOT collapse it with `||`. Status 2 means an
+  # interpreter resolved but cannot import headroom -- a real outage. Folding it
+  # into the empty/`not found` case made hcat print "headroom python not found",
+  # exit 3 and light no badge, where every earlier version exited 4 and recorded
+  # the breakage. hcat-gate.sh dispatches the same way; these two must agree.
+  PY=$(resolve_engine_python_validated); case $? in
+    0) ;;
+    2) PY_BROKEN=$PY; PY="" ;;
+    *) PY="" ;;
+  esac
 else
-  PY=$(resolve_engine_python) || PY=""
+  PY=$(resolve_engine_python) || PY=""   # partial legacy copy: narrower lookup
 fi
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   # No engine: TOON-lite lossless tier (pure jq) before giving up. A uniform
@@ -110,10 +120,16 @@ if [ -z "$PY" ] || [ ! -x "$PY" ]; then
       fi
     fi
   fi
+  # A never-installed engine is the ordinary idle state, NOT a breakage. A
+  # resolved-but-broken one IS: say which interpreter, record it, and keep the
+  # base's exit 4 so callers can still tell the two apart.
+  if [ -n "$PY_BROKEN" ]; then
+    echo "hcat: engine python found but cannot import headroom.compress ($PY_BROKEN) — run /doctor" >&2
+    note_error engine "hcat: engine import failed ($PY_BROKEN) — run /doctor"
+    exit 4
+  fi
   echo "hcat: headroom python not found (pip install \"headroom-ai[all]\", or set HCAT_PYTHON)" >&2
-  # A never-installed engine is the ordinary idle state, NOT a breakage — only
-  # a resolved-but-dead explicit override records a broken badge (PY is
-  # non-empty here exactly when HCAT_PYTHON points at a non-executable).
+  # PY is non-empty here exactly when HCAT_PYTHON points at a non-executable.
   [ -n "$PY" ] && note_error engine "hcat: HCAT_PYTHON is not executable ($PY) — run /doctor"
   exit 3
 fi

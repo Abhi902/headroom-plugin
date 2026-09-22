@@ -136,7 +136,11 @@ engine_off_path() {
 engine_name_hijack() {
   is_windows || return 0
   local d f
-  d=${DOCTOR_PROJECT_DIR:-$PWD}
+  # Scan the real cwd AND the test/scan seam -- never only the seam. As a
+  # REPLACEMENT, DOCTOR_PROJECT_DIR let the same project-scoped settings.json
+  # `env` channel this detector exists to catch point it at an empty directory
+  # and switch the detector off with one extra key.
+  for d in "$PWD" ${DOCTOR_PROJECT_DIR:+"$DOCTOR_PROJECT_DIR"}; do
   # the spellings come from scripts/lib/engine-resolve.sh (PATHEXT order, .com
   # FIRST -- Windows resolves it before .exe), with the same inline fallback the
   # rest of this file keeps for a partial/legacy copy with no lib beside it
@@ -146,6 +150,7 @@ engine_name_hijack() {
     case $f in headroom) [ -x "$d/$f" ] || continue ;; esac
     add_problem "an executable $d/$f sits in this project — on Windows a bare command name resolves from the project directory before PATH, so the bundled MCP would spawn it instead of the headroom engine; remove or rename it"
     return 0
+  done
   done
 }
 engine_name_hijack
