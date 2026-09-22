@@ -54,6 +54,53 @@ _er_shebang_interp() {  # interpreter path from a script's #! line (env form via
   esac
 }
 
+_er_bounded() {  # _er_bounded <secs> <cmd...> — coreutils timeout, else a watchdog
+  # The lib is sourced by SessionStart, by every gated Read and by every hcat, so
+  # nothing here may hang unboundedly. doctor.sh's run_bounded is the same idea,
+  # but it lives in doctor.sh and never reached these entry points. Keep it
+  # bash-3.2 safe: no `wait -n`, no arrays.
+  local t secs pid waited
+  t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+  if [ -n "$t" ]; then "$t" "$@"; return $?; fi
+  secs=$1; shift
+  "$@" &
+  pid=$!
+  waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 124
+    fi
+    sleep 1; waited=$((waited+1))
+  done
+  wait "$pid"; return $?
+}
+
+resolve_engine_python_validated() {  # first IMPORTABLE candidate, not first executable
+  # ONE definition of "which interpreter is the engine", shared by bin/hcat,
+  # hcat-gate.sh and doctor.sh. Resolving by mere executability picks up a stray
+  # `python` beside the headroom console script (pyenv/asdf/mise shims, uv's
+  # default install, ~/.local/bin once --fix shims there) which cannot import
+  # headroom -- so consumers disagreed about the engine on the same machine.
+  #
+  # Exit status carries the distinction an empty result cannot:
+  #   0  prints a working interpreter
+  #   2  prints the last EXECUTABLE-but-broken one (a resolved-but-broken engine)
+  #   1  prints nothing (no engine installed at all)
+  # Callers need 1 vs 2: one is the ordinary red-idle state, the other is an
+  # outage that must fail open AND light the badge.
+  local c seen=""
+  if [ -n "${HCAT_PYTHON:-}" ]; then printf '%s\n' "$HCAT_PYTHON"; return 0; fi
+  while IFS= read -r c; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    seen=$c
+    if _er_bounded "${ER_PY_TIMEOUT:-5}" "$c" -c 'import headroom.compress' >/dev/null 2>&1; then
+      printf '%s\n' "$c"; return 0
+    fi
+  done < <(engine_python_candidates)
+  [ -n "$seen" ] && { printf '%s\n' "$seen"; return 2; }
+  return 1
+}
+
 _er_uv_root() {  # <uv tool dir>/headroom-ai when uv is installed
   # BOUND the spawn. This runs on SessionStart (session-probe.sh), on every gated
   # Read (hcat-gate.sh) and on every hcat, so a wedged uv cache lock, a cold AV
@@ -61,14 +108,9 @@ _er_uv_root() {  # <uv tool dir>/headroom-ai when uv is installed
   # hang session startup with no way out short of killing the process. doctor.sh
   # already bounds its external calls with run_bounded; that helper lives in
   # doctor.sh and never reached here.
-  local d t
+  local d
   command -v uv >/dev/null 2>&1 || return 1
-  t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
-  if [ -n "$t" ]; then
-    d=$("$t" "${ER_UV_TIMEOUT:-2}" uv tool dir 2>/dev/null) || return 1
-  else
-    d=$(uv tool dir 2>/dev/null) || return 1
-  fi
+  d=$(_er_bounded "${ER_UV_TIMEOUT:-2}" uv tool dir 2>/dev/null) || return 1
   [ -n "$d" ] || return 1
   printf '%s/headroom-ai' "$d"
 }

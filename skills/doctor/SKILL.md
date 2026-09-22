@@ -182,7 +182,7 @@ than the current working one, set `DOCTOR_PROJECT_DIR` before running either
 command.
 
 **On Windows, `--fix` also registers the bundled MCP by absolute path** via
-`claude mcp add -s user headroom -- <shim> mcp serve`. This writes to the user's
+`claude mcp add -s user -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 headroom -- <native shim path> mcp serve`. This writes to the user's
 Claude Code MCP configuration, which is OUTSIDE `~/.claude/settings.json` and
 outside the plugin — list it when asking for consent. The reason is that Windows
 resolves a bare command name from the spawning process's current directory

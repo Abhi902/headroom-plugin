@@ -538,6 +538,18 @@ sl_bash_path() {  # → the bash a Windows statusLine.command should run through
     [ -f "$bdir/git.exe" ] || [ -f "$bdir/git" ] \
       || [ -f "$(unix_path "$bdir/git.exe")" ] || [ -f "$(unix_path "$bdir/git")" ] || b=""
   fi
+  # ...and PROVENANCE, which is the part shape cannot give us. A repo can satisfy
+  # every rule above by committing tools/bash.exe (the payload) beside an empty
+  # tools/git.exe and pointing CLAUDE_CODE_GIT_BASH_PATH at it from its own
+  # project-scoped settings.json -- the exact delivery route the comment at the
+  # top of this function names. A real Git for Windows install never lives under
+  # the workspace, so refuse an override that resolves inside it; rejected values
+  # fall through to the `command -v bash` path the w12/w13 fixtures already cover.
+  if [ -n "$b" ]; then
+    case "$(unix_path "$b")" in
+      "${DOCTOR_PROJECT_DIR:-$PWD}"/*) b="" ;;
+    esac
+  fi
   if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(command -v bash); fi
   b=$(sl_prefer_wrapper_bash "$b")
   # normalize the ACCEPTED value too, not just the fallback: an override may be
@@ -755,22 +767,40 @@ fi
 # registration naming the shim's ABSOLUTE path does not resolve by name at all,
 # so no file in a project directory can win against it; the bundled bare-name
 # entry remains the fallback for anyone who never runs the doctor.
-if is_windows && [ "$FIX" -eq 1 ]; then
+if is_windows; then
+  # DETECT unconditionally, MUTATE only under --fix — the split every neighbouring
+  # check uses. Buried entirely inside --fix, this reported nothing on a read-only
+  # run, so an agent following the doctor skill (read-only first, then ask consent
+  # for whatever came back `fixable`) had no basis to ever recommend --fix for this
+  # reason, and an otherwise-healthy Windows install stayed exposed with a clean
+  # bill of health.
+  mcp_abs=""
+  if command -v claude >/dev/null 2>&1; then
+    # NATIVE spelling. resolve_headroom_cli yields a Git Bash path, and Claude Code
+    # spawns MCP commands outside Git Bash where that does not resolve — the same
+    # thing win_path already fixes for statusLine a few lines up. win_path is a
+    # no-op on an already-native path, so the uv tier is unaffected. The
+    # MSYS_NO_PATHCONV guards stop MSYS rewriting the argument on the way in,
+    # which would also break the fixed-string idempotency probe below.
+    mcp_abs=$(resolve_headroom_cli 2>/dev/null) && mcp_abs=$(win_path "$mcp_abs") || mcp_abs=""
+  fi
   if ! command -v claude >/dev/null 2>&1; then
-    say note "\`claude\` is not on PATH, so the MCP was not registered by absolute path — the bundled bare-name entry still applies, and a headroom.* in a project directory would be spawned before it"
-  else
-    mcp_abs=$(resolve_headroom_cli 2>/dev/null) || mcp_abs=""
-    if [ -n "$mcp_abs" ]; then
-      if run_bounded 10 claude mcp get headroom 2>/dev/null | grep -qF "$mcp_abs"; then
-        say ok "bundled MCP already registered by absolute path ($mcp_abs) — the project-directory tier cannot win against it"
-      elif run_bounded 20 claude mcp add -s user \
-             -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 \
-             headroom -- "$mcp_abs" mcp serve >/dev/null 2>&1; then
-        say fixed "registered the bundled MCP by absolute path ($mcp_abs) — a headroom.* in a project directory can no longer be spawned in its place; restart Claude Code"
-      else
-        say fixable "could not register the MCP by absolute path (\`claude mcp add\` failed) — the bare-name entry still applies; run it by hand: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
-      fi
+    say note "\`claude\` is not on PATH, so the MCP could not be registered by absolute path — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it; once the CLI is available run: claude mcp add -s user headroom -- \"<engine path>\" mcp serve"
+  elif [ -z "$mcp_abs" ]; then
+    :   # no engine resolved — check 2 above already said so; do not add noise here
+  elif ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; run_bounded 10 claude mcp get headroom ) 2>/dev/null | grep -qF "$mcp_abs"; then
+    say ok "bundled MCP registered by absolute path ($mcp_abs) — the project-directory tier cannot win against it"
+  elif [ "$FIX" -eq 1 ]; then
+    if ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+         run_bounded 20 claude mcp add -s user \
+           -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 \
+           headroom -- "$mcp_abs" mcp serve ) >/dev/null 2>&1; then
+      say fixed "registered the bundled MCP by absolute path ($mcp_abs) — a headroom.* in a project directory can no longer be spawned in its place; restart Claude Code"
+    else
+      say fixable "could not register the MCP by absolute path (\`claude mcp add\` failed) — the bare-name entry still applies; run it by hand: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
     fi
+  else
+    say fixable "bundled MCP is registered by bare name only — a headroom.* dropped into a project directory could still be spawned before it; --fix registers it by absolute path via \`claude mcp add -s user\`"
   fi
 fi
 

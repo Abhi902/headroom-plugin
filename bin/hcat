@@ -64,7 +64,15 @@ if [ ! -f "$FILE" ] || [ ! -r "$FILE" ]; then
   exit 2
 fi
 
-PY=$(resolve_engine_python) || PY=""
+# Same rule as the gate and the doctor: the first IMPORTABLE candidate, not the
+# first executable one. A decoy `python` beside the headroom console script would
+# otherwise be chosen here and fail at import time with exit 4, while /doctor on
+# the same machine reported a healthy engine.
+if type resolve_engine_python_validated >/dev/null 2>&1; then
+  PY=$(resolve_engine_python_validated) || PY=""
+else
+  PY=$(resolve_engine_python) || PY=""
+fi
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   # No engine: TOON-lite lossless tier (pure jq) before giving up. A uniform
   # JSON array (same flat keys per row) renders as one header row + CSV-like

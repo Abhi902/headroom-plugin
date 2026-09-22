@@ -145,22 +145,20 @@ fi
 # with no badge. The pre-lib code failed OPEN and recorded the outage; losing
 # that was strictly worse than the decoy bug this loop exists to fix.
 py=""; py_seen=""
-if [ -n "${HCAT_PYTHON:-}" ]; then
-  py=$HCAT_PYTHON          # explicit override stays authoritative, as everywhere else
-elif type engine_python_candidates >/dev/null 2>&1; then
-  while IFS= read -r _c; do
-    [ -n "$_c" ] && [ -x "$_c" ] || continue
-    py_seen=$_c
-    "$_c" -c 'import headroom.compress' >/dev/null 2>&1 && { py=$_c; break; }
-  done < <(engine_python_candidates)
-  if [ -z "$py" ] && [ -n "$py_seen" ]; then
-    # Candidates existed and none could import: a resolved-but-broken engine,
-    # which is the outage the import check below has always failed open on.
-    note_error engine "engine import failed ($py_seen) — gate failing open; run /doctor"
-    exit 0
-  fi
+if type resolve_engine_python_validated >/dev/null 2>&1; then
+  py=$(resolve_engine_python_validated); case $? in
+    0) ;;                       # working interpreter
+    2) py_seen=$py; py="" ;;    # resolved but cannot import: an OUTAGE, not absence
+    *) py="" ;;                 # nothing installed: ordinary red-idle
+  esac
 else
-  py=$(resolve_engine_python) || py=""   # partial legacy copy: narrower lookup, no candidate list
+  py=$(resolve_engine_python) || py=""   # partial legacy copy: narrower lookup
+fi
+if [ -n "$py_seen" ]; then
+  # Fail OPEN and light the badge. Denying here would be worse than the decoy bug
+  # this resolution fixes: the user loses Reads with no idea why.
+  note_error engine "engine import failed ($py_seen) — gate failing open; run /doctor"
+  exit 0
 fi
 if [ -n "$py" ]; then
   # A resolved-but-broken engine is a real outage the fail-open would otherwise

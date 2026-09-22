@@ -4423,7 +4423,21 @@ check "w21: --fix registers the bundled MCP by absolute path" "registered the bu
 check "w21: the registration names the resolved CLI, not a bare name" "headroom -- " "$(cat "$W21/reg" 2>/dev/null)"
 check "w21: ...and carries the bundled env" "HEADROOM_UPDATE_CHECK=off" "$(cat "$W21/reg" 2>/dev/null)"
 out=$(w21_run)
-check        "w21: a second --fix sees it already registered" "already registered by absolute path" "$out"
+check        "w21: a second --fix sees it already registered" "MCP registered by absolute path" "$out"
+# review #3: the DETECT half must run read-only too, or an agent following the
+# doctor skill (read-only first, consent second) can never recommend --fix for it.
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows CLAUDE_STUB_REG="$W21/reg2" \
+      PATH="$W21/stub:$W21/venv/bin:/usr/bin:/bin" DOCTOR_SETTINGS="$W21/s.json" \
+      DOCTOR_CLAUDE_DIR="$W21/cd" DOCTOR_VENV_DIR="$W21/venv" DOCTOR_SHIM_DIR="$W21/shim" \
+      HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" 2>&1)
+check        "w21: a READ-ONLY run reports the bare-name exposure as fixable" \
+             "registered by bare name only" "$out"
+check_absent "w21: ...and a read-only run registers nothing" "registered the bundled MCP" "$out"
+if [ -f "$W21/reg2" ]; then
+  echo "FAIL - w21: a read-only run must not call claude mcp add"; FAIL=$((FAIL+1))
+else
+  echo "ok - w21: a read-only run must not call claude mcp add"; PASS=$((PASS+1))
+fi
 check_absent "w21: ...and re-registers nothing (idempotent)" "registered the bundled MCP by absolute path — " "$out"
 # no claude CLI: say so plainly rather than silently leaving the bare name exposed
 out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$STUB:$W21/venv/bin:/usr/bin:/bin" \
