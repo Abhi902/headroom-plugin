@@ -1,0 +1,420 @@
+name: test
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix: { os: [ubuntu-latest, macos-latest] }
+    runs-on: ${{ matrix.os }}
+    env:
+      # Coarse collapse guard, not a drift tracker -- keep it comfortably under
+      # the real count so a legitimately environment-skipped fixture cannot red
+      # the build, while a vanished engine-gated GROUP still trips it.
+      # ~872 execute at this head (review round 6: 876 on macOS, the Linux runner
+      # ran 4 fewer last round). The floor has to sit close enough that losing a
+      # whole engine-gated group trips it: the largest such group is 15
+      # assertions, so the floor sits just under 872 - 15. RAISE THIS
+      # whenever fixtures are added -- at 810 it had drifted ~65 below the real
+      # count and would have let four such groups vanish green.
+      MIN_FIXTURES: 855
+    steps:
+      - uses: actions/checkout@v7
+      - name: deps
+        run: |
+          if command -v apt-get >/dev/null; then
+            sudo apt-get update -q && sudo apt-get install -y -q jq shellcheck locales
+            # the de_DE.UTF-8 fixtures skip without a generated locale
+            sudo locale-gen de_DE.UTF-8 && sudo update-locale
+          else
+            brew install jq shellcheck
+          fi
+      - name: real engine
+        run: |
+          # Until this existed, `deps` installed only jq and shellcheck, so SEVEN
+          # real-engine fixture groups skipped on BOTH POSIX platforms -- hcat
+          # compression, the two gate-deny paths, hcat SIGPIPE, the doctor healthy
+          # run, f7l block-9 and health engine-clear. After the Windows engine
+          # probe was fixed, Windows became the ONLY platform exercising the real
+          # engine, which is exactly backwards: every current user is on macOS or
+          # Linux. ubuntu finishing in 37s was the tell.
+          #
+          # Bare headroom-ai, not [all]: the extra pulls torch wherever
+          # sys_platform != "darwin" (~2.5 GB) and the bare package carries
+          # everything hcat and the MCP server need -- doctor.sh says so where it
+          # hedges the same way. $HOME/.headroom-venv is the resolver's default,
+          # so test.sh's probe finds it with no further wiring.
+          python3 -m venv "$HOME/.headroom-venv"
+          "$HOME/.headroom-venv/bin/pip" install -q headroom-ai
+          "$HOME/.headroom-venv/bin/python" -c "import headroom.compress; print('engine ok')"
+      - name: suite
+        run: |
+          set -o pipefail
+          ./test.sh 2>&1 | tee suite.log
+      - name: engine coverage gate
+        # Same assertion the Windows job carries, on all three platforms now. The
+        # lesson from F8 is that the dangerous failure is not a red test, it is
+        # coverage disappearing quietly -- and an engine-gated skip on a runner
+        # that just installed an engine is exactly that.
+        if: ${{ !cancelled() }}
+        run: |
+          [ -f suite.log ] || { echo "::error::suite.log missing — the suite step did not run"; exit 1; }
+          eng=$( { grep -cE '^skip - .*headroom venv not found' suite.log || true; } | tail -1 )
+          if [ "${eng:-0}" -gt 0 ]; then
+            echo "::error::$eng engine-gated fixture group(s) skipped although this job installed an engine:"
+            grep -E '^skip - .*headroom venv not found' suite.log | sort -u || true
+            exit 1
+          fi
+          if grep -qE '^skip - ' suite.log; then
+            echo "::notice::environment skips on this runner (not engine-related):"
+            grep -E '^skip - ' suite.log | sort -u
+          fi
+          # ...and a FLOOR, the second signal the windows job already has. The
+          # engine grep keys on one hand-typed phrase repeated across test.sh and
+          # this file with nothing tying them together; reword it, or add a new
+          # skip branch with different wording that swallows an engine-gated
+          # block, and the grep counts zero and passes. The floor notices the
+          # collapse regardless of how the skip is spelled.
+          ran=$( { grep -oE '^[0-9]+ passed, [0-9]+ failed' suite.log || true; } | tail -1 | awk '{print $1+$3}' )
+          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-855}" ]; then
+            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-855}) — coverage collapsed"
+            exit 1
+          fi
+          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-855})"
+          grep -E '^[0-9]+ passed' suite.log | tail -1
+  windows:
+    runs-on: windows-latest
+    defaults: { run: { shell: bash } }
+    env:
+      VENV_DIR: ${{ github.workspace }}/.headroom-venv
+      # 774 executed on the first run where the engine probe actually worked
+      # (721 passed + 53 failed); it was 726 while the probe was POSIX-only, so a
+      # regression of that fix lands at ~726 and must be caught. 760 sits above
+      # that and leaves room for ordinary churn. RAISE as coverage grows.
+      # 849 executed on the round-5 run (792 passed + 57 known failures); round 6
+      # adds ~22 more, so 850 keeps a whole 15-assertion group's worth of margin.
+      MIN_FIXTURES: "850"
+      # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
+      # step below gates on .github/windows-known-failures.txt by NAME, so a
+      # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking
+      # that file is the goal; never add to it to make CI green.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.12" }
+      - name: real engine (venv + uv tool)
+        run: |
+          python -m venv "$VENV_DIR"
+          "$VENV_DIR/Scripts/python.exe" -m pip install -q "headroom-ai[all]" || "$VENV_DIR/Scripts/python.exe" -m pip install -q headroom-ai
+          "$VENV_DIR/Scripts/python.exe" -c "import headroom.compress; print('engine ok')"
+          # `uv tool install` stays non-fatal (a transient PyPI failure must not red
+          # a required gate), but when it SUCCEEDS the layout must actually be
+          # there — windows-check.sh turns its skip into a fail on UV_EXPECTED=1.
+          if pip install -q uv && uv tool install headroom-ai; then
+            echo "UV_EXPECTED=1" >> "$GITHUB_ENV"
+          else
+            echo "uv install skipped (non-fatal)"
+          fi
+      - name: stub-jq diagnostic (never fails; evidence only)
+        run: |
+          set +e
+          real=$(command -v jq); echo "jq: $real"; jq --version
+          d=/tmp/diagstub; rm -rf "$d"; mkdir -p "$d"; printf '{}' > "$d/s.json"
+          probe() { echo "  $1 runnable: $("$d/jq" --version 2>&1)"; \
+                    echo "  $1 parses:   $(PATH=\"$d:/usr/bin:/bin\" "$d/jq" -n '[inputs] | length' "$d/s.json" 2>&1)"; }
+          rm -f "$d/jq"; ln -sf "$real" "$d/jq";            echo "symlink:"; probe symlink
+          rm -f "$d/jq"; cp "$real" "$d/jq";                echo "copy:";    probe copy
+          rm -f "$d/jq"; printf '#!/bin/sh\nexec "%s" "$@"\n' "$real" > "$d/jq"; chmod +x "$d/jq"
+          echo "wrapper:"; probe wrapper
+          exit 0
+      - name: native PATH diagnostic (never fails; evidence only)
+        # Settles WHY a `cmd.exe /c where headroom` probe returned a false
+        # negative in the e45dfb0 run, for a dir that provably held a real PE and
+        # was first on PATH. Two candidates, identical symptom:
+        #   (a) MSYS_NO_PATHCONV=1 also suppresses PATH env-var conversion, so
+        #       cmd receives a colon-separated POSIX PATH; then %PATH% below
+        #       comes back colon-separated.
+        #   (b) the prune leaves System32 unresolvable, so `where` itself never
+        #       runs; then %PATH% looks correct and `where` still fails.
+        # ANSWERED (2026-09-22): neither. %PATH% arrives in correct Windows form
+        # with the guards on, and the prune run printed `env: command not found`
+        # — the prune strips /usr/bin, which is where the `env` BINARY lives, so
+        # the probe died before cmd.exe was reached. Kept as a live regression
+        # check: if this ever prints a colon-separated %PATH%, the other
+        # hypothesis has come true after all.
+        run: |
+          set +e
+          d=$(mktemp -d); : > "$d/headroom.exe"
+          echo "--- baseline: no guards, ambient PATH ---"
+          cmd.exe /c "echo %PATH% & where headroom" 2>&1 | head -4
+          echo "--- with MSYS_NO_PATHCONV=1 + MSYS2_ARG_CONV_EXCL ---"
+          env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /c "echo %PATH% & where headroom" 2>&1 | head -4
+          echo "--- with the MSYS-dir prune applied ---"
+          p=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vE '^/(usr|bin|mingw32|mingw64|opt)(/|$)' | paste -sd: -)
+          PATH="$p" env MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /c "echo %PATH% & where headroom" 2>&1 | head -4
+          exit 0
+      - name: windows-check (required gate)
+        run: VENV_DIR="$(cygpath -u "$VENV_DIR")" WRAPPER_BASH_EXPECTED=1 bash scripts/ci/windows-check.sh
+      - name: MCP spawn probe (shell-less, by name) + negative control
+        # Run even when an earlier step failed. Every NATIVE-namespace assertion in
+        # this job sits after windows-check, which is POSIX; with no `if:`, one
+        # failed POSIX assertion silently took 100% of the native coverage with
+        # it -- the stats.jsonl filename bug skipped all four of these, and the
+        # job just read "windows red, one assertion failed". The job still goes
+        # red; what changes is that the native evidence actually reports.
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:VENV_DIR\Scripts;" + $env:PATH
+          node scripts/ci/spawn-probe.mjs headroom mcp serve
+          if ($LASTEXITCODE -ne 0) { throw "bare 'headroom mcp serve' failed to spawn/handshake ($LASTEXITCODE)" }
+          # spawn-probe distinguishes ENOENT (exit 5) from a refused-but-present
+          # target (exit 3) -- see its header table. A renamed or moved target
+          # would therefore report 5 rather than failing the existence check
+          # below, so prove the target exists first and then accept 3 or 5 as
+          # the spawn-refusal signal (the branch a few lines down does exactly
+          # that). Without the existence check, 5 would read as a refusal.
+          $shTarget = "$PWD\scripts\session-probe.sh"
+          if (-not (Test-Path -LiteralPath $shTarget)) { throw "negative control target is missing: $shTarget" }
+          node scripts/ci/spawn-probe.mjs $shTarget
+          # -ne 0 was too loose: the probe also exits 1 (usage) and 2 (server
+          # exited early), so a .sh that Windows actually STARTED and ran to
+          # completion would have satisfied the control that exists to prove
+          # Windows cannot start it. Only a spawn failure counts -- 3 (refused an
+          # existing target) or 5 (ENOENT), never 1 or 2.
+          if ($LASTEXITCODE -eq 5) {
+            Write-Host "::notice::negative control: target exists but Windows reported ENOENT (exit 5)"
+          } elseif ($LASTEXITCODE -ne 3) {
+            throw "negative control: expected a spawn failure (3, or 5 for ENOENT), got $LASTEXITCODE"
+          }
+          Write-Host "negative control ok (exit $LASTEXITCODE)"
+          exit 0
+      - name: MCP spawn probe through the DOCTOR's own shim
+        # Run even when an earlier step failed. Every NATIVE-namespace assertion in
+        # this job sits after windows-check, which is POSIX; with no `if:`, one
+        # failed POSIX assertion silently took 100% of the native coverage with
+        # it -- the stats.jsonl filename bug skipped all four of these, and the
+        # job just read "windows red, one assertion failed". The job still goes
+        # red; what changes is that the native evidence actually reports.
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          # The probe above prepends the venv Scripts dir, so it exercises pip's
+          # original launcher. The file `doctor.sh --fix` actually writes lives in
+          # windows-check.sh's sandbox and was only ever run through Git Bash by
+          # `--help`; prove that copy is spawnable shell-less too, with only its
+          # directory prepended and the bare name asserted to resolve inside it.
+          $dir = (Get-Content ./shimdir.path -Raw).Trim()
+          if (-not (Test-Path -LiteralPath $dir)) { throw "doctor shim dir missing: $dir" }
+          Write-Host "doctor shim dir: $dir"
+          # prepend ONLY the sandbox shim dir (node itself must stay resolvable),
+          # then prove the bare name really resolves to the doctor's copy
+          $env:PATH = "$dir;" + $env:PATH
+          $resolved = (Get-Command headroom -ErrorAction SilentlyContinue).Source
+          Write-Host "bare 'headroom' resolves to: $resolved"
+          if (-not $resolved -or -not $resolved.StartsWith($dir)) { throw "bare 'headroom' did not resolve to the doctor's shim ($resolved)" }
+          node scripts/ci/spawn-probe.mjs headroom mcp serve
+          if ($LASTEXITCODE -ne 0) { throw "the doctor's own shim failed to spawn/handshake ($LASTEXITCODE)" }
+      - name: status line runs from PowerShell with the command doctor wrote
+        # Run even when an earlier step failed. Every NATIVE-namespace assertion in
+        # this job sits after windows-check, which is POSIX; with no `if:`, one
+        # failed POSIX assertion silently took 100% of the native coverage with
+        # it -- the stats.jsonl filename bug skipped all four of these, and the
+        # job just read "windows red, one assertion failed". The job still goes
+        # red; what changes is that the native evidence actually reports.
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          # Now that this step runs even after a windows-check failure, say
+          # plainly when the handoff file never got written, instead of dying in
+          # Get-Content and reading like a second unrelated break.
+          if (-not (Test-Path -LiteralPath ./statusline.cmd)) {
+            throw "statusline.cmd was never written — windows-check did not reach its statusLine assertions; fix that failure first"
+          }
+          $cmd = Get-Content ./statusline.cmd
+          Write-Host "command: $cmd"
+          $m = [regex]::Matches($cmd, '"([^"]+)"')
+          $bash = $m[0].Groups[1].Value
+          $script = $m[1].Groups[1].Value
+          if (-not $bash -or -not $script) { throw "could not parse statusLine command: $cmd" }
+          $json = '{"transcript_path":"","model":{"id":"claude-opus-4-8"},"session_id":"ci"}'
+          # Claude Code spawns the status line from a NATIVE Windows process, so the
+          # child inherits no MSYS coreutils unless the wired bash sets them up
+          # itself. windows-latest carries Git\usr\bin on the MACHINE PATH, which
+          # masks a wrongly-wired bash and made this step pass either way. Prune it
+          # so the step tests what it claims to test.
+          $orig = $env:PATH
+          $pruned = ($orig -split ';' | Where-Object { $_ -notmatch '[\\/]Git[\\/]usr[\\/]bin[\\/]?$' }) -join ';'
+          Write-Host ("pruned {0} PATH entry(ies) matching Git\usr\bin" -f (($orig -split ';').Count - ($pruned -split ';').Count))
+          $env:PATH = $pruned
+          $out = $json | & $bash $script
+          Write-Host "badge: $out"
+          if (-not $out) { throw "status line printed nothing with Git\usr\bin pruned from PATH" }
+          # Emptiness is not health. statusline.sh renders its FAILURE state as a
+          # non-empty line on stdout with exit 0 -- "▲ headroom broken (...) · run
+          # /doctor" -- so the exact state the plugin calls broken satisfied a
+          # bare -not $out. Assert the shape: with an empty transcript_path the
+          # expected render is the idle badge.
+          if ("$out" -match 'headroom broken') { throw "status line rendered the BROKEN badge: $out" }
+          if ("$out" -notmatch 'headroom')     { throw "status line printed no headroom badge: $out" }
+
+          # --- the ACTIVE render, with a NATIVE transcript path.
+          # Passing "transcript_path":"" made statusline.sh's `[ -n "$tp" ] && [ -f
+          # "$tp" ]` guard false, so the whole transcript block was skipped and
+          # three MSYS-tools-on-a-native-path crossings never ran in CI at all:
+          # `[ -f ]`, `stat -c%s`/`stat -f%z`, and `jq` reading that path. Those
+          # are precisely the operations everything here assumes MSYS translates
+          # for free -- a belief whose only fixtures run on a POSIX host. The
+          # assertions above cannot notice, because all three idle renders carry
+          # the literal "headroom idle", which matches 'headroom' and not
+          # 'headroom broken'.
+          # The path MUST go over natively: that is what Claude Code passes on
+          # Windows, and it is the entire premise being checked. ConvertTo-Json
+          # escapes the backslashes, so no hand-rolled quoting can get it wrong.
+          $tp  = Join-Path $PWD 'ci-transcript.jsonl'
+          $now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z')
+          Set-Content -LiteralPath $tp -Encoding utf8 -Value @(
+            '{"timestamp":"' + $now + '","message":{"content":[{"type":"tool_use","id":"f9","name":"mcp__headroom__headroom_compress"}]}}'
+            '{"message":{"content":[{"type":"tool_result","tool_use_id":"f9","content":[{"type":"text","text":"{\"tokens_saved\": 5000}"}]}]}}'
+          )
+          $json2 = @{ transcript_path = $tp; model = @{ id = 'claude-opus-4-8' }; session_id = 'ci-f9' } | ConvertTo-Json -Compress
+          Write-Host "native transcript: $tp"
+          $out2 = $json2 | & $bash $script
+          Write-Host "active badge: $out2"
+          if (-not $out2) { throw "status line printed nothing for the seeded transcript" }
+          if ("$out2" -match 'headroom broken') { throw "seeded transcript rendered the BROKEN badge: $out2" }
+          if ("$out2" -match 'headroom idle') {
+            throw "seeded transcript still rendered IDLE — the MSYS tools could not read the NATIVE transcript path, so the translation this branch assumes does not hold: $out2"
+          }
+          # Differential: the MSYS-INTERNAL bash should NOT manage this. If it does,
+          # the prune proved nothing on this runner -- say so loudly, but do NOT red
+          # a required gate over a runner-image detail.
+          $internal = Join-Path (Split-Path (Split-Path $bash)) 'usr\bin\bash.exe'
+          if (Test-Path -LiteralPath $internal) {
+            $neg = ($json | & $internal $script 2>$null)
+            if ($neg -and "$neg" -eq "$out") {
+              # NOTE for whoever reads that notice later: it is NOT the evidence
+              # for the wrapper-bash promotion. windows-latest does not reproduce
+              # the coreutils-less condition, so this differential cannot justify
+              # the fix to a sceptic. The real evidence is the independent
+              # Windows tester's report plus windows-check's WIRING assertion,
+              # which is what actually stops a regression.
+              Write-Host "::notice::negative control inconclusive - $internal produced the same badge with a pruned PATH, so this runner does not discriminate the two bashes (this is NOT the evidence for the promotion; see the comment above)"
+            } else {
+              Write-Host "negative control ok - the MSYS-internal bash does not reproduce the badge"
+            }
+          } else {
+            Write-Host "::notice::no usr\bin\bash.exe beside $bash - differential skipped"
+          }
+          $env:PATH = $orig
+      - name: full suite (gated against the known-failure list)
+        # Run even when an earlier step failed. Every NATIVE-namespace assertion in
+        # this job sits after windows-check, which is POSIX; with no `if:`, one
+        # failed POSIX assertion silently took 100% of the native coverage with
+        # it -- the stats.jsonl filename bug skipped all four of these, and the
+        # job just read "windows red, one assertion failed". The job still goes
+        # red; what changes is that the native evidence actually reports.
+        if: ${{ !cancelled() }}
+        run: |
+          # Point the suite's engine probe at the venv this job built. Without it
+          # the probe finds nothing on Windows and every real-engine fixture
+          # SKIPS -- on the one host that actually has an engine installed.
+          HEADROOM_TEST_VENV="$(cygpath -u "$VENV_DIR")" ./test.sh > suite.log 2>&1 || true
+          # `shell: bash` runs as `bash --noprofile --norc -e -o pipefail`, and grep
+          # exits 1 on NO MATCH. Unguarded, the assignment below aborts the step
+          # before the friendly diagnostic underneath it can ever run -- so the
+          # "suite died early" branch was unreachable exactly when it was needed.
+          summary=$( { grep -E '^[0-9]+ passed, [0-9]+ failed' suite.log || true; } | tail -1 )
+          if [ -z "$summary" ]; then
+            echo "::error::the suite printed no summary line — it died before finishing"
+            tail -40 suite.log
+            exit 1
+          fi
+          echo "$summary"
+          known=.github/windows-known-failures.txt
+          # the suite's own FAIL lines are "FAIL - <name>"; doctor's nested
+          # output inside a captured fixture is "FAIL    - ..." (say() pads to
+          # 7), so anchoring on the single space keeps the two apart.
+          # Same trap, worse consequence: when the known-failure list finally
+          # drains -- the stated GOAL of that file -- `grep '^FAIL - '` matches
+          # nothing, exits 1, pipefail propagates and set -e reds a REQUIRED gate
+          # on a perfectly green Windows suite, with no message. Guard the grep
+          # alone, never the whole redirection: `|| true` on the pipeline as a
+          # unit would also swallow a sed or sort failure.
+          { grep -E '^FAIL - ' suite.log || true; } | sed 's/^FAIL - //' | sort -u > observed.txt
+          { grep -vE '^[[:space:]]*(#|$)' "$known" || true; } | sort -u > known.txt
+          # COVERAGE FLOOR. Everything below reasons from FAIL lines alone, so a
+          # fixture that stops RUNNING -- renamed, deleted, or dropped into one of
+          # the suite's skip branches -- emits neither "ok -" nor "FAIL -" and is
+          # therefore indistinguishable from one that passed. That is not
+          # hypothetical: until the engine probe was fixed, every real-engine
+          # fixture skipped on the one host with a real engine installed while
+          # this gate still reported "no unlisted Windows failures". Assert that
+          # the suite actually ran. RAISE this as coverage grows; only lower it
+          # with a reason in the PR that lowers it.
+          ran=$(( $(echo "$summary" | sed -E 's/ passed.*//') + $(echo "$summary" | sed -E 's/.*, ([0-9]+) failed.*/\1/') ))
+          echo "fixtures executed: $ran (floor: $MIN_FIXTURES)"
+          if [ "$ran" -lt "$MIN_FIXTURES" ]; then
+            echo "::error::only $ran fixtures ran on Windows, floor is $MIN_FIXTURES — coverage collapsed silently; check the skip branches in suite.log"
+            grep -E '^skip - ' suite.log | sort -u || true
+            exit 1
+          fi
+          # A DIRECT coverage signal, worth more than the coarse floor above: this
+          # job installs a real engine, so no engine-gated fixture has any business
+          # skipping. A nonzero skip count here IS the #5 regression -- the probe
+          # failing to see a Windows venv -- and unlike a fixture count it cannot
+          # drift as fixtures are added or retired.
+          # Key on the ENGINE-gated skips specifically, not on any skip at all.
+          # The first cut errored on a nonzero total and was wrong: this runner
+          # legitimately skips 4 groups for environment reasons (no de_DE locale,
+          # no `python3` on the Git Bash PATH, no shellcheck) that have nothing to
+          # do with the engine probe. What must never happen is a fixture
+          # skipping because the probe cannot see the venv this job just built.
+          eng_skips=$( { grep -cE '^skip - .*headroom venv not found' suite.log || true; } | tail -1 )
+          if [ "${eng_skips:-0}" -gt 0 ]; then
+            echo "::error::$eng_skips engine-gated fixture group(s) skipped on a host with a real engine installed — the probe is not seeing this venv:"
+            grep -E '^skip - .*headroom venv not found' suite.log | sort -u || true
+            exit 1
+          fi
+          # the rest are visibility, not failure
+          if grep -qE '^skip - ' suite.log; then
+            echo "::notice::environment skips on this runner (not engine-related):"
+            grep -E '^skip - ' suite.log | sort -u
+          fi
+          new_fails=$(comm -23 observed.txt known.txt)
+          now_passing=$(comm -13 observed.txt known.txt)
+          # Accumulate BOTH directions and exit ONCE. Exiting on the first made
+          # the gate report at most one class per run: a reconciliation that
+          # delisted three passing fixtures could not see the four unlisted
+          # FAILURES underneath them, and only downloading the suite.log artifact
+          # closed the gap. One signal masking another, again -- and this gate is
+          # what future maintainers debug through, so half a truth teaches them
+          # to distrust it.
+          rc=0
+          if [ -n "$now_passing" ]; then
+            # An ERROR, not a notice: a listed fixture that "passes" is equally
+            # the signature of one that stopped running, and a notice nobody
+            # actions lets the list rot into fiction.
+            echo "::error::these fixtures are listed as known-failing but did NOT fail — delete them from $known (or, if they stopped RUNNING, fix that):"
+            printf '%s\n' "$now_passing"
+            rc=1
+          fi
+          if [ -n "$new_fails" ]; then
+            echo "::error::these fixtures failed on Windows and are NOT in $known — fix them, or add them with a reason:"
+            printf '%s\n' "$new_fails"
+            echo "--- full context for the new failures ---"
+            printf '%s\n' "$new_fails" | while IFS= read -r n; do
+              [ -n "$n" ] || continue
+              grep -F -A4 "FAIL - $n" suite.log || true
+            done
+            rc=1
+          fi
+          [ "$rc" -eq 0 ] || exit 1
+          echo "no unlisted Windows failures ($(wc -l < observed.txt) known, $(wc -l < known.txt) listed)"
+      - name: upload the windows suite log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-suite-log
+          path: suite.log

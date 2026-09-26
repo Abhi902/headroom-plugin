@@ -1,0 +1,113 @@
+# Fixtures known to fail when the suite is run on a REAL Windows host.
+#
+# The suite is a POSIX-host simulation of Windows: the w* fixtures force
+# DOCTOR_OS=windows while building fake engines, fake bashes and fake settings
+# as POSIX files, because the host actually running the suite has to be able to
+# execute and stat them. On a genuine Windows host those assumptions stop
+# holding (is_windows() is really true, cygpath is real and rewrites every
+# spelling, /tmp paths are MSYS paths), so a batch of fixtures cannot pass there
+# as written. That is a property of the fixtures, not of the product — the
+# product-level Windows guarantees are covered by the REAL steps in the windows
+# job (resolver against real venv/pip/uv layouts, hcat on non-ASCII, doctor
+# --fix end to end incl. idempotency, a shell-less MCP spawn with a .sh negative
+# control, and the status line driven from PowerShell).
+#
+# This file replaces the old WIN_FAIL_BASELINE count. A count could hide a NEW
+# failure behind a fixture that had just been fixed; a name list cannot. CI
+# fails on any failing fixture not listed here, and tells you to delete a line
+# whenever a listed fixture starts passing. Entries are exact fixture names.
+#
+# Shrinking this list is the goal. Do not add to it to make CI green.
+doctor: foreign statusLine preserved by --fix
+f2: legacy hooks removed through the link
+f2: settings.json is still a symlink after --fix
+f2: statusLine fix landed in the target
+f7a: chained with the installer template
+f7a: custom command preserved in the chain
+f7a: headroom badge appended
+f7aa: legacy hook entries survive when the backup fails
+f7aa: primary settings.json legacy-hook removal backup failure refuses the rewrite
+f7b: doctor-written statusLine has refreshInterval 1
+f7bb: project-level legacy hook entries survive when the backup fails
+f7bb: project-level settings legacy-hook removal backup failure refuses the rewrite
+f7s: a settings.json backup failure refuses the statusLine.command rewrite
+f7s: the command is left untouched when the backup fails
+f7u: settings.local.json legacy-hook removal backup failure refuses the rewrite
+f7u: settings.local.json's legacy hook entries survive when the backup fails
+f7v: fresh statusLine-wire backup failure refuses the rewrite
+f7v: no orphan statusline.sh copy is dropped when the backup fails
+portability: DANGI_NO_NOTIFY silences notify-send
+portability: linux env still nudges
+portability: notify-send carries the message
+portability: notify-send cooldown per session
+portability: notify-send invoked without osascript
+portability: notify-send not doubled
+portability: stale lock stolen with GNU-only stat
+review: legacy deny cites sibling hcat path
+review: legacy-path hcat counts
+review: piped hcat counts
+rewrite: gate-rewritten cat is attributed
+rewrite: legacy absolute-path hcat rewrite is attributed
+w11: a foreign headroom in the shim dir is refused, not clobbered
+w11: a shim that resolves but does not run is a FAIL
+w11: run 1 shims the venv CLI and verifies it runs
+w13: a foreign SYMLINK at the shim path is refused, not repointed
+w13: a refused symlink is never reported as shimmed
+w13: and it is left exactly as it was
+w13: the foreign symlink still points where it did
+w13: the windows PATH hint names the shim dir actually in use
+w1: darwin → not windows
+w1: python.exe sibling of headroom on PATH wins
+w1: win_path passthrough without cygpath
+w3: gate denies with a Scripts/ engine
+w6: --fix shims and verifies
+w6: FAIL carries the zsh snippet
+w6: shim is a symlink to the venv CLI
+w6: windows hint names the shim dir this run uses
+
+# --- appeared when the engine-probe fix let these blocks run on Windows at all.
+# Categorised, because "52 entries" is unreadable as a risk signal otherwise:
+#   [POSIX-ONLY]  the behaviour genuinely differs; permanent, not debt.
+#   [UNPORTED]    the fixture assumes POSIX; the PRODUCT may well be fine.
+#   [PRODUCT]     a real Windows-side wart, worth fixing on its own merits.
+#
+# (The [PRODUCT] SIGPIPE pair that lived here is FIXED, not listed: bin/hcat now
+# carries a top-level BrokenPipeError handler, and HCAT_NO_SIGPIPE=1 lets ubuntu
+# and macOS reproduce the Windows path so it stays guarded from a POSIX host.)
+#
+# [UNPORTED] hcat's receipt cites the path python resolved, which on Windows is
+# the NATIVE spelling (C:\Users\RUNNER~1\...) while the fixture expects the
+# POSIX one (/tmp/...). The product is arguably MORE correct here; the assertion
+# is the POSIX-only part. Fix is to accept either spelling on Windows.
+hcat: header cites source path
+#
+# (`doctor: healthy has no fixable` was listed here as [UNPORTED]. A second,
+# independent read called it [PRODUCT] instead — and was right. The probe never
+# reads the persisted Path; it asks a native child that inherits Git Bash's
+# PATH, so a dir on that PATH should be found and the CI log shows it was not.
+# The fixture was correct and the product was wrong. The advisory has been
+# removed rather than listed; see the removal note in doctor.sh check 2b.)
+
+# --- [UNPORTED] surfaced when real_python() let these two blocks run on Windows
+# for the first time (they had been pinned to a POSIX `python3` that Git Bash
+# does not have, so they skipped SILENTLY on every Windows run and never reached
+# this list). They fail with EMPTY output, not wrong output — the fixtures drive
+# hcat through a stub interpreter and a fake `headroom` package injected on
+# PYTHONPATH, and that harness does not work under Git Bash. The failure is in
+# the scaffolding, not in hcat: the same code paths pass on macOS and Linux, and
+# the Windows-side behaviour they stand for is covered directly by
+# windows-check.sh (real engine, real venv, stats.jsonl asserted).
+#
+# Porting them means making the stub-interpreter + PYTHONPATH harness work under
+# Git Bash. Worth doing — it is 10 of the 50 — but it is fixture work on a
+# platform that needs a real host to iterate on, not a blind edit.
+fix/ptoon: comma key quoted
+fix/ptoon: null-looking string quoted
+fix/ptoon: numeric string quoted
+fix/ptoon: python <5% engine path exit 0
+fix/ptoon: python tier used (lossless, not engine-absent)
+fix/ptoon: stats event strategy toon-lite
+w12: hcat engine tier exit 0 after the fcntl refactor
+w12: the engine tier still prints its receipt
+w12: the event carries the token counts
+w12: the stats event still lands via the POSIX flock path

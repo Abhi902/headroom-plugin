@@ -4,6 +4,16 @@ A tiny **status-line indicator for Claude Code** that shows — at a glance, at 
 
 No more wondering *"did I remember to compress that huge file, or did I just burn context?"* — the indicator tells you, honestly, in real time.
 
+> ### ⚠️ Updating from v2.7.4 or earlier? Run the doctor once.
+>
+> ```
+> /headroom-usage-indicator:doctor --fix
+> ```
+>
+> v2.8 spawns the bundled MCP by the **bare name** `headroom` — that change is what makes Windows work at all, and it removed the old launcher's `~/.headroom-venv` fallback. If an earlier doctor bootstrapped your engine into `~/.headroom-venv` (the default path for every release up to v2.7.4), it is **not** on your `PATH`, so the MCP stops connecting until `--fix` shims it into `~/.local/bin`.
+>
+> **The failure is quiet.** A dead MCP renders as an *idle* badge, which looks identical to "nothing compressed yet". SessionStart nudges you, and one command fixes it — but if your badge never leaves idle after updating, this is why.
+
 ---
 
 ## Quickstart (two commands and the doctor)
@@ -45,7 +55,7 @@ This plugin does **not** compress anything by itself — the actual compression 
 
 The good news: you no longer have to plumb the engine in yourself. The plugin bundles the MCP server registration (its tools appear as `mcp__headroom__headroom_compress` and friends), and if the engine itself is missing, the **doctor** offers to bootstrap it into `~/.headroom-venv`. If headroom is absent and you decline, everything stays politely silent — the badge sits at "idle", the gate lets Reads through — nothing breaks.
 
-> **v2.7.3 — the bundled MCP server actually connects now.** From v2.5 through v2.7.2 the bundled registration was shipped broken: its launcher path carried literal quotes, and because Claude Code spawns an MCP `stdio` command *directly* (no shell ever unwraps quoting), every connection attempt died instantly and `/plugin` showed a ✗ beside headroom. It went unnoticed because anyone with a pre-plugin manual registration in `~/.claude.json` still had the tools from there. If you're upgrading, run **`/headroom-usage-indicator:doctor --fix`** once — it repairs an already-installed broken copy in place (with a backup), and from now on it judges that launcher *exactly as spawned* rather than being fooled by its own quote-stripping.
+> **v2.7.3 — the bundled MCP server actually connects now.** From v2.5 through v2.7.2 the bundled registration was shipped broken: its launcher path carried literal quotes, and because Claude Code spawns an MCP `stdio` command *directly* (no shell ever unwraps quoting), every connection attempt died instantly and `/plugin` showed a ✗ beside headroom. It went unnoticed because anyone with a pre-plugin manual registration in `~/.claude.json` still had the tools from there. If you're upgrading, run **`/headroom-usage-indicator:doctor --fix`** once — it repairs an already-installed broken copy in place (with a backup), and from that release on it judged that launcher *exactly as spawned* rather than being fooled by its own quote-stripping (v2.8 removed the launcher and its quote-stripping altogether — the bundled MCP now spawns the bare `headroom` name).
 
 ## What it does
 
@@ -138,8 +148,8 @@ For the curious — after the Quickstart, here is where everything lives:
 |---|---|---|
 | Dangi, the hcat gate, session-probe, the session ledger | `hooks/hooks.json` inside the plugin | auto-registered while the plugin is enabled (SessionStart, PreToolUse, PostToolUse, Stop, SessionEnd) |
 | `hcat` | `bin/hcat` inside the plugin | on Claude's Bash PATH automatically |
-| headroom MCP registration | `.mcp.json` inside the plugin | bundled; the launcher finds your engine |
-| headroom engine (Python) | `~/.headroom-venv` (or your own install) | the doctor bootstraps it with your consent |
+| headroom MCP registration | `.mcp.json` inside the plugin | bundled; spawns `headroom mcp serve` by name — the doctor makes sure `headroom` is on PATH |
+| headroom engine (Python) | `~/.headroom-venv` (or your own install: pip, pipx, uv) | the doctor bootstraps it with your consent and shims `headroom` into `~/.local/bin` |
 | status line | `statusLine` in `~/.claude/settings.json`, pointing at a copy of `scripts/statusline.sh` at `~/.claude/headroom-statusline.sh` (with its `attribution.jq` + `headroom-state.sh` deps in `~/.claude/lib/`) | **the one manual step** — the doctor writes it for you (merge-aware: an existing custom status line is kept and backed up under `_headroomStatusLineBackup`), and provisions the `lib/` deps the badge needs to count savings (v2.7.1) |
 
 If you'd rather wire the status line by hand, the merge-aware installer lives in `skills/headroom-usage-indicator/SKILL.md`; the standalone entry it writes boils down to (with your real home directory in place of `/Users/you` — a `~` inside the quoted path would never be expanded):
@@ -165,6 +175,24 @@ The hooks, `hcat`, and the MCP definition update with the plugin — nothing to 
 
 **Coming from v2.7.2 or earlier, run `/headroom-usage-indicator:doctor --fix` once too** — v2.7.3 fixes the bundled MCP registration that never connected (see [above](#the-gauge-and-the-engine)), and `--fix` repairs the already-installed broken copy rather than waiting for the next fresh install.
 
+**Coming from v2.7.4 or earlier, run `/headroom-usage-indicator:doctor --fix` once more** — v2.8 spawns the bundled MCP by its bare name, so you need headroom on PATH. If the doctor bootstrapped your engine into `~/.headroom-venv`, `--fix` shims it into `~/.local/bin`; if that directory isn't on PATH, it also registers the engine as a user-scoped MCP by absolute path (`claude mcp add -s user headroom ...`), so the MCP works without a shell-rc edit. The bundled bare-name entry stays unconnected until `headroom` is on PATH; the doctor prints the one rc line for that too.
+
+## Windows
+
+Works under **Git for Windows (Git Bash)** — Claude Code runs its hooks and the status line through it, so it is a hard prerequisite (PowerShell-only setups are not supported). Then:
+
+1. `winget install jqlang.jq` and a Python 3.10+ (`winget install Python.Python.3.12`, or `uv`).
+2. Install the plugin as in the Quickstart and run `/headroom-usage-indicator:doctor --fix`. The doctor finds a venv in the `Scripts\` layout, `uv tool install headroom-ai` trampolines and pip's `headroom.exe` launchers, bootstraps a venv with `py -3`/`python` if nothing is installed, shims `headroom.exe` into `%USERPROFILE%\.local\bin`, and writes the status line as `"C:\…\Git\bin\bash.exe" "C:\Users\you\.claude\headroom-statusline.sh"`.
+3. **Expect `--fix` to end in a red `FAIL` the first time, and treat it as the last install step rather than an error.** On a stock Windows box `%USERPROFILE%\.local\bin` is not on **Path**, so the doctor shims `headroom.exe` there and then tells you so (printing the Git Bash spelling of the path, forward slashes and all). Add that directory to your user **Path** (Settings → System → About → Advanced system settings → Environment Variables) and restart Claude Code — the MCP cannot connect until you do. The doctor deliberately does not edit your registry for you. Installing the engine with `uv tool install headroom-ai` or `pipx` instead puts `headroom` on PATH for you and skips this step entirely.
+
+One Windows caveat worth knowing: the bundled MCP is spawned by the **bare name** `headroom`, and Windows resolves a bare command name from the spawning process's **project directory before PATH**. So a `headroom.exe` committed to a repository you open would run instead of your installed engine, and detection alone cannot stop it, because nothing runs before the MCP is spawned. `/headroom-usage-indicator:doctor --fix` also **registers the engine by its absolute path** (`claude mcp add -s user`), so you always have one headroom server that cannot be hijacked this way. **It does not remove the exposure:** Claude Code keeps the plugin's bundled server under its own name, so the bare-name entry is still spawned next to it. The doctor and the session probe flag such a file if they find one in the project; remove or rename it.
+
+**Windows on ARM:** `headroom-ai` ships compiled `abi3` wheels and publishes none for `win_arm64`, so an ARM64 interpreter matches nothing, falls back to the source distribution, and wants a full build toolchain. The doctor detects this by asking the interpreter for its own wheel tag (`uname` is no help — Git for Windows is an x86_64 build and reports x86_64 even on an ARM64 host) and tells you the real remedy: install the **x64** build of Python, which runs emulated and matches the `win_amd64` wheel.
+
+`hcat` output is UTF-8 on every platform (`PYTHONIOENCODING=utf-8`), and piping it into `head` exits quietly instead of printing a `BrokenPipeError` traceback — Windows has no `SIGPIPE`, so that path is handled explicitly rather than by the signal default. Desktop notifications from Dangi are macOS/Linux only for now.
+
+CI runs the full suite on `ubuntu-latest`, `macos-latest` **and** `windows-latest`, with a real engine installed on all three, plus a Windows-only pass that exercises the resolver against genuine venv/`uv tool`/pip layouts, `doctor --fix` end to end including idempotency, a shell-less MCP spawn by bare name with a negative control, and the status line rendered from PowerShell through the command the doctor actually wrote. Windows failures are ratcheted by name against [`.github/windows-known-failures.txt`](.github/windows-known-failures.txt) — an unlisted failure reds the build, and a listed fixture that starts passing also reds the build until its line is deleted, so the list can only shrink. What CI still cannot run is Claude Code itself; see [#9](https://github.com/Abhi902/headroom-plugin/issues/9).
+
 ## Uninstall
 
 Leaving should be as easy as arriving:
@@ -173,7 +201,9 @@ Leaving should be as easy as arriving:
 /plugin uninstall headroom-usage-indicator@headroom-tools
 ```
 
-That removes the hooks, `hcat`, and the MCP registration in one go. Then tidy the two things that live outside the plugin:
+That removes the hooks, `hcat`, and the bundled MCP in one go. Then tidy what lives outside the plugin:
+
+0. if `/headroom-usage-indicator:doctor --fix` ever registered the engine by absolute path (Windows, or macOS/Linux with `headroom` off PATH), remove that user-scoped server too: `claude mcp remove headroom -s user` (`claude mcp get headroom` shows whether one exists);
 
 1. remove the `"statusLine"` block from `~/.claude/settings.json` (or ask Claude to *"remove the headroom status line"* — if you had a custom status line before, restore it from `_headroomStatusLineBackup`);
 2. delete the state and the script copy:
@@ -231,7 +261,7 @@ If you can't (or won't) use the plugin marketplace, the copy-everything-to-`~/.c
 Two honest caveats about the legacy flow:
 
 - **`hcat` is NOT on Claude's PATH** in a legacy install — the "on PATH" convenience only exists while the plugin is enabled. Claude must invoke it by full path: `~/.claude/hcat <file>`. The gate is install-aware: in a legacy layout its deny message cites that full sibling path (`~/.claude/hcat "<path>"`), and the bare-`hcat`/on-PATH wording appears only for plugin installs.
-- You must also install and register the **headroom engine and MCP server yourself** (→ https://github.com/headroomlabs-ai/headroom), and you need `jq` (`brew install jq` or `apt install jq`).
+- You must install the **headroom engine** yourself (→ https://github.com/headroomlabs-ai/headroom) **and register its MCP server yourself** — this repo's `.mcp.json` is only read when Claude Code loads it as the enabled plugin (or while you are working inside this repo), never in your other projects, so a legacy install has to add the server (`headroom mcp serve`) to its own MCP configuration. Putting `headroom` on PATH is necessary but not sufficient: it is what makes the registered bare-name command spawn once you have registered it. You also need `jq` (`brew install jq` or `apt install jq`).
 
 Do **not** run the legacy installer if the plugin is installed — you'd register every hook twice.
 
@@ -241,10 +271,11 @@ Do **not** run the legacy installer if the plugin is installed — you'd registe
 - `skills/doctor/SKILL.md` — the doctor: checks `jq`, the engine, the MCP, the hooks, the status line, and ambient-health state; fixes what you consent to, including legacy-install and project-settings cleanup.
 - `hooks/hooks.json` — plugin-native registration for session-probe (SessionStart), the hcat gate (PreToolUse), Dangi (PostToolUse), and the session ledger (Stop, SessionEnd).
 - `bin/hcat` — compress-at-the-source, on Claude's PATH while the plugin is enabled; falls back to a lossless TOON-lite (jq-only) rendering when the Python engine is absent.
-- `scripts/` — `statusline.sh`, `dangi-hook.sh`, `hcat-gate.sh`, `session-probe.sh`, `ledger-hook.sh`, `doctor.sh`, `mcp-launcher.sh` (the working parts), plus `scripts/lib/` (`attribution.jq`, `headroom-state.sh` — shared deps the installer copies next to the status-line script).
+- `scripts/` — `statusline.sh`, `dangi-hook.sh`, `hcat-gate.sh`, `session-probe.sh`, `ledger-hook.sh`, `doctor.sh` (the working parts), plus `scripts/lib/` (`attribution.jq`, `headroom-state.sh`, `engine-resolve.sh` — shared deps the installer copies next to the status-line script).
 - `data/model-prices.json` — the badge's price table as data; adding a model is an edit here, not a code change.
-- `.mcp.json` — bundled headroom MCP server definition (the launcher finds your engine).
+- `.mcp.json` — bundled headroom MCP server definition (`headroom mcp serve`, spawned by name).
 - `test.sh` — the synthetic-transcript test suite; run it from the repo root.
+- `scripts/ci/` — `windows-check.sh` (the real-Windows gate: resolver layouts, `doctor --fix`, the status-line command) and `spawn-probe.mjs` (spawns an MCP server without a shell, the way Claude Code does, and fails unless a JSON-RPC `initialize` comes back).
 
 ## License
 

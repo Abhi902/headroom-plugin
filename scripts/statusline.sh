@@ -123,7 +123,7 @@ compute() {
     | idset($rcpt | map(.id)) as $ridx
     | ([.[] | select(.timestamp)
         | select(any(.message.content[]?; .type=="tool_use"
-            and (((.name // "") == $tool) or ($ridx[.id // ""] // false))))
+            and ((.name | tool_match($tool)) or ($ridx[.id // ""] // false))))
         | .timestamp] | max // "") as $last
     | "\($mids|length)|\($saved)|\($big)|\($rcpt|length)|\($rcpt | map(.s) | add // 0)|\($last)"
   ' "$tp" 2>/dev/null)
