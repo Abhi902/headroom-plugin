@@ -117,3 +117,12 @@ w12: the stats event still lands via the POSIX flock path
 # non-executable registered command on Windows; the probe's `[ -x ]` guard is
 # exercised on ubuntu/macos, where the mode bit is real.
 w25: a non-executable registered command still records the outage
+
+# --- [POSIX-ONLY] added in review round 11. "No Git for Windows bash outside
+# the project" cannot be staged on a real Windows host: Git Bash keeps bash in
+# /usr/bin next to every tool the doctor needs, and those tools copied into a
+# private dir cannot load their MSYS DLLs from there (the doctor dies before
+# the check). The refuse-to-wire logic itself runs on ubuntu/macos.
+w28b: --fix with no bash outside the project FAILs
+w28b: the read-only preview FAILs the same way
+w28c: a dead interpreter with no bash outside the project previews as FAIL

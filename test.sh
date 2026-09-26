@@ -3599,7 +3599,7 @@ check_eq "w13: a backslash in the override is still accepted (Windows paths need
          "$(w13_inj "$S13I4" "$W13I/cd4" "$W13I4/back\\slashdir/bash.exe")"
 
 # review #2: identity, not just quoting — an existing, executable file that is
-# NOT bash must fall through to the `command -v bash` fallback.
+# NOT bash must fall through to sl_path_bash (the first PATH bash outside the project).
 # pwsh.exe sits WITH a git sibling, so only the basename rule can reject it;
 # bash.exe sits in its own dir WITHOUT one, so only the sibling rule can.
 W13I5="$W13I/notbash"; mkdir -p "$W13I5" "$W13I/nogit"
@@ -4124,7 +4124,7 @@ chmod +x "$W14/cygpath"
 W14G="$W14/gitroot"; mkdir -p "$W14G/bin" "$W14G/usr/bin"
 # These stand in for Git for Windows' two bashes. They must be REAL working
 # bashes, not inert stubs: the fixture puts their directory first on PATH so
-# the doctor's own `command -v bash` finds them, and anything else on that PATH
+# the doctor's PATH fallback (sl_path_bash) finds them, and anything else on that PATH
 # that shebangs to `#!/usr/bin/env bash` (the stub jq does) would otherwise be
 # hijacked by an inert stub — which silently turned every JSON check in the
 # doctor into a failure. What is under test is WHICH path gets picked, not that
@@ -4142,7 +4142,7 @@ out=$(env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows \
   DOCTOR_SHIM_DIR="$W14/shim" DOCTOR_CYGPATH="$W14/cygpath" "$BASHBIN" "$DOCTOR" --fix 2>&1)
 check "w14a: the wire actually happened" "statusLine wired to" "$out"
 # Assert on the distinctive path TAIL, not the absolute path: MSYS resolves
-# PATH entries to their native spelling, so the doctor's own `command -v bash`
+# PATH entries to their native spelling, so the doctor's PATH fallback (sl_path_bash)
 # returns C:/Users/RUNNER~1/... on a real Windows host where a POSIX host
 # returns /tmp/... . Which bash got chosen is the point; how it is spelled is not.
 check    "w14a: fallback prefers <gitroot>/bin/bash.exe over usr/bin" \
@@ -5234,6 +5234,79 @@ cp "$ROOT/scripts/lib/headroom-state.sh" "$ROOT/scripts/lib/doctor-mcp.sh" "$W28
 sed '/^headroom_hijack_file() {/,/^}/d' "$ROOT/scripts/lib/engine-resolve.sh" > "$W28/stale/scripts/lib/engine-resolve.sh"
 out=$(bash "$W28/stale/scripts/doctor.sh" 2>&1); rc=$?
 check_eq "w28b: a stale engine-resolve.sh without headroom_hijack_file exits 1" "1" "$rc"
+check    "w28b: ...BECAUSE the lib guard refused it (not some later check)" "doctor-mcp.sh missing or stale" "$out"
+
+# --- w28c. REGRESSION (PR #10 review round 11).
+W28C="$W28/c"; mkdir -p "$W28C"
+# the promotion guard: a promoted path whose canonical dir is inside the project
+# is refused and the (outside) pre-promotion bash kept
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28/sys:/usr/bin:/bin" \
+      sl_fn eval "sl_prefer_wrapper_bash() { printf '%s\n' '$W28P/bin/bash.exe'; }; sl_bash_path")
+check_eq "w28c: a promotion into the project is reverted to the outside bash" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+# sl_bash_path is computed once per cwd per run (TMPD cache hit), and a cwd change misses
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28/sys:/usr/bin:/bin" \
+      sl_fn eval "export TMPD='$W28C/t1'; mkdir -p \"\$TMPD\"; a=\$(sl_bash_path); PATH=/nonexistent; b=\$(sl_bash_path); [ -n \"\$a\" ] && [ \"\$a\" = \"\$b\" ] && echo hit || echo miss")
+check_eq "w28c: a second sl_bash_path in the same run is served from the cache" "hit" "$got"
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28/sys:/usr/bin:/bin" \
+      sl_fn eval "export TMPD='$W28C/t2'; mkdir -p \"\$TMPD\"; a=\$(sl_bash_path); cd '$W28/sys'; PATH=/nonexistent; b=\$(sl_bash_path); [ -z \"\$b\" ] && echo recomputed || echo stale")
+check_eq "w28c: ...but not after a cd (keyed on the cwd)" "recomputed" "$got"
+# the workspace roots are computed once per cwd per run: count the git probes
+got=$(cd "$W28P/src" && bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'
+  export TMPD='$W28C/t3'; mkdir -p \"\$TMPD\"; n=0
+  eval \"orig_\$(declare -f _dm_git)\"; _dm_git() { echo x >> \"\$TMPD/n\"; orig__dm_git \"\$@\"; }
+  cnt() { wc -l < \"\$TMPD/n\" 2>/dev/null | tr -d ' '; }
+  under_workspace /; first=\$(cnt); under_workspace /; under_workspace /tmp; echo \"\${first:-0}:\$(cnt)\"")
+case $got in
+  0:0) echo "FAIL - w28c: the roots probe never ran git (fixture broken)"; FAIL=$((FAIL+1)) ;;
+  *:*) [ "${got%%:*}" = "${got#*:}" ] && { echo "ok - w28c: repeated containment checks reuse the cached roots ($got git probes)"; PASS=$((PASS+1)); } \
+                                      || { echo "FAIL - w28c: repeated containment checks re-ran git ($got)"; FAIL=$((FAIL+1)); } ;;
+esac
+# UNC overrides are refused (both spellings) and fall through to the PATH bash
+for unc in '\\host\share\bin\bash.exe' '//host/share/bin/bash.exe'; do
+  got=$(cd "$W28P/src" && CLAUDE_CODE_GIT_BASH_PATH="$unc" PATH="$W28/sys:/usr/bin:/bin" sl_fn sl_bash_path)
+  check_eq "w28c: a network-share override is refused ($unc)" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+done
+# a dead statusLine interpreter with no bash outside the project previews as FAIL
+jq -n --arg c "\"$W28C/gone/bash.exe\" \"$W28N/cd/headroom-statusline.sh\"" '{statusLine:{type:"command",command:$c}}' > "$W28C/dead.json"
+mkdir -p "$W28N/cd"; printf '#!/bin/sh\n' > "$W28N/cd/headroom-statusline.sh"
+out=$(cd "$W28P/src" && env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" \
+      PATH="$W28N/tools:$W28P/bin" DOCTOR_SETTINGS="$W28C/dead.json" DOCTOR_CLAUDE_DIR="$W28N/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W28N/shim" HEADROOM_STATE_DIR="$W28N/state" "$BASHBIN" "$DOCTOR" 2>&1)
+check "w28c: a dead interpreter with no bash outside the project previews as FAIL" "no such interpreter exists, and no Git for Windows bash was found outside this project" "$out"
+check_absent "w28c: ...never as a fixable --fix cannot honour" "fixable - statusLine runs through" "$out"
+# the lib guard also requires _er_bounded
+mkdir -p "$W28C/stale2/scripts/lib"
+cp "$DOCTOR" "$W28C/stale2/scripts/doctor.sh"
+cp "$ROOT/scripts/lib/headroom-state.sh" "$ROOT/scripts/lib/doctor-mcp.sh" "$W28C/stale2/scripts/lib/"
+sed '/^_er_bounded() {/,/^}/d' "$ROOT/scripts/lib/engine-resolve.sh" > "$W28C/stale2/scripts/lib/engine-resolve.sh"
+out=$(bash "$W28C/stale2/scripts/doctor.sh" 2>&1); rc=$?
+check_eq "w28c: a stale engine-resolve.sh without _er_bounded exits 1" "1" "$rc"
+check    "w28c: ...refused by the lib guard" "doctor-mcp.sh missing or stale" "$out"
+# a native Git-for-Windows override keeps bin\bash.exe: canonicalising through the
+# /bin alias (cygpath -u of the Git root) would collapse it onto usr\bin
+W28W="$W28C/win"; mkdir -p "$W28W/drives/c/Git/bin" "$W28W/proj/.git" "$W28W/proj/src"
+printf '#!/bin/sh\nexit 0\n' > "$W28W/drives/c/Git/bin/bash.exe"; chmod +x "$W28W/drives/c/Git/bin/bash.exe"; : > "$W28W/drives/c/Git/bin/git.exe"
+mkdir -p "$W28W/aliased/usr/bin"; printf '#!/bin/sh\nexit 0\n' > "$W28W/aliased/usr/bin/bash.exe"; chmod +x "$W28W/aliased/usr/bin/bash.exe"
+W28Wc=$(cd "$W28W" && pwd -P)   # the doctor canonicalises, so match the physical spelling too
+# models a real Git Bash: cygpath -u of the Git root lands on / (so ...\bin\bash.exe
+# resolves through the /bin -> /usr/bin alias), while the drive mount /c/... does not
+cat > "$W28W/cyg" <<WCYG
+#!/bin/sh
+m=\$1; shift
+case "\$m:\$1" in
+  -u:C:*git.exe) printf '%s\n' '$W28W/drives/c/Git/bin/git.exe' ;;
+  -u:C:*)        printf '%s\n' '$W28W/aliased/usr/bin/bash.exe' ;;
+  -w:$W28W/drives/c/*) r=\${1#$W28W/drives/c/}; printf 'C:\\\\%s\n' "\$(printf '%s' "\$r" | tr '/' '\\\\')" ;;
+  -w:$W28Wc/drives/c/*) r=\${1#$W28Wc/drives/c/}; printf 'C:\\\\%s\n' "\$(printf '%s' "\$r" | tr '/' '\\\\')" ;;
+  -w:$W28W/aliased/*)  printf '%s\n' 'C:\Git\usr\bin\bash.exe' ;;
+  *) printf '%s\n' "\$1" ;;
+esac
+WCYG
+chmod +x "$W28W/cyg"
+got=$(cd "$W28W/proj/src" && CLAUDE_CODE_GIT_BASH_PATH='C:\Git\bin\bash.exe' DOCTOR_DRIVE_ROOT="$W28W/drives" \
+      PATH="$W28/sys:/usr/bin:/bin" SL_FUNCS="$SL_FUNCS" DOCTOR_OS=windows DOCTOR_CYGPATH="$W28W/cyg" "$BASHBIN" -c "
+        . '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; eval \"\$SL_FUNCS\"; sl_bash_path")
+check_eq "w28c: a native Git override is persisted as Git\\bin\\bash.exe, not collapsed to usr\\bin" 'C:\Git\bin\bash.exe' "$got"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

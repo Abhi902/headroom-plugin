@@ -80,8 +80,11 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   home=$(_dm_canon "${HOME:-/}") || home=${HOME:-/}
   # The roots depend only on the cwd: compute them (up to three bounded git
   # spawns) once per cwd per run, not once per candidate, via the run's TMPD.
-  if [ -n "${TMPD:-}" ] && [ "$(sed -n 1p "$TMPD/ws-roots" 2>/dev/null)" = "$pwd_c" ]; then
-    r2=$(sed -n 2p "$TMPD/ws-roots"); r3=$(sed -n 3p "$TMPD/ws-roots")
+  # (builtin reads, not sed: callers may run under a restricted PATH)
+  local ck=""
+  [ -n "${TMPD:-}" ] && { IFS= read -r ck; IFS= read -r r2; IFS= read -r r3; } < "$TMPD/ws-roots" 2>/dev/null
+  if [ -n "$ck" ] && [ "$ck" = "$pwd_c" ]; then
+    :
   else
     r2=$(worktree_top "$pwd_c"); r3=$(workspace_root "$pwd_c")
     [ -n "${TMPD:-}" ] && printf '%s\n%s\n%s\n' "$pwd_c" "$r2" "$r3" > "$TMPD/ws-roots" 2>/dev/null

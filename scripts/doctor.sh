@@ -531,17 +531,35 @@ sl_prefer_wrapper_bash() {  # <bash path, native or POSIX spelling> → possibly
 sl_bash_path() {  # → the bash a Windows statusLine.command should run through (memoised per run)
   # Several checks ask; the answer depends only on this process's env, PATH and
   # cwd, and computing it spawns git per candidate. Cache it in the run's TMPD.
-  if [ -n "${TMPD:-}" ] && [ -f "$TMPD/sl-bash" ]; then cat "$TMPD/sl-bash"; return 0; fi
+  # Keyed on the cwd (line 1), like the ws-roots cache: a later caller that
+  # changed directory must not read another project's answer.
+  # (builtin reads, not sed: callers may run under a restricted PATH)
+  local _slk _slv
+  if [ -n "${TMPD:-}" ] && { IFS= read -r _slk && IFS= read -r _slv; } < "$TMPD/sl-bash" 2>/dev/null \
+     && [ "$_slk" = "$PWD" ]; then
+    [ -n "$_slv" ] && printf '%s\n' "$_slv"; return 0
+  fi
   local _slb; _slb=$(_sl_bash_path_compute)
-  [ -n "${TMPD:-}" ] && printf '%s\n' "$_slb" > "$TMPD/sl-bash" 2>/dev/null
+  [ -n "${TMPD:-}" ] && printf '%s\n%s\n' "$PWD" "$_slb" > "$TMPD/sl-bash" 2>/dev/null
   [ -n "$_slb" ] && printf '%s\n' "$_slb"
   return 0
 }
+sl_no_bash_reason() {  # the one wording for "no usable bash outside the project" (3 call sites)
+  printf '%s' "no Git for Windows bash was found outside this project (a bash inside the project is never wired) — install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH to its bash.exe"
+}
 _sl_canon_file() {  # _sl_canon_file <path> -> canonical dir (pwd -P) + basename; fails if not locatable
+  # A drive spelling goes through the DRIVE mount (/c/...), not cygpath -u:
+  # Git Bash mounts its own install root at /, so C:\...\Git\bin maps to /bin,
+  # which aliases /usr/bin -- canonicalising there would turn the wrapper
+  # bash back into the coreutils-less usr/bin one (the w16 trap).
   local u d
-  u=$(unix_path "$1")
-  case $u in /*) ;; *) return 1 ;; esac
+  case $1 in
+    [A-Za-z]:[\\/]*) u=$(_sl_drive_posix "$1") ;;
+    *) u=$(unix_path "$1") ;;
+  esac
+  case $u in //*) return 1 ;; /*) ;; *) return 1 ;; esac
   d=$(cd "$(dirname "$u")" 2>/dev/null && pwd -P) || return 1
+  case $d in //*) return 1 ;; esac
   printf '%s\n' "$d/${u##*/}"
 }
 _sl_bash_path_compute() {
@@ -602,8 +620,12 @@ _sl_bash_path_compute() {
     #     satisfies every rule above and the -f test below (both resolve against
     #     the workspace cwd) while never matching an absolute prefix -- so the
     #     prefix test alone let the payload straight through.
+    #     A network share (\\host\share, //host/share) is refused too: Git for
+    #     Windows is never installed on one, and a repo-controlled share is
+    #     exactly what must not be persisted into the GLOBAL settings.
     case $b in
-      /*|[A-Za-z]:[\\/]*|\\\\*) ;;
+      //*|\\\\*) b="" ;;
+      /*|[A-Za-z]:[\\/]*) ;;
       *) b="" ;;
     esac
   fi
@@ -641,8 +663,12 @@ _sl_bash_path_compute() {
   # too, or a project `usr` symlink beside a planted bin/bash.exe re-admits it.
   # (A spelling unix_path cannot locate is left alone: sl_prefer_wrapper_bash
   # only promotes to a file it just stat-ed, so it is not an escape.)
-  if [ "$b" != "$_sl_pre" ] && _sl_canon=$(_sl_canon_file "$b"); then
-    if under_workspace "$(dirname "$_sl_canon")"; then b=$_sl_pre; else b=$_sl_canon; fi
+  # The promoted path is kept as spelled: it is built from the already
+  # canonical pre-promotion path, and re-canonicalising it could collapse the
+  # wrapper back onto usr/bin through Git Bash's /bin alias.
+  if [ "$b" != "$_sl_pre" ] && _sl_canon=$(_sl_canon_file "$b") \
+     && under_workspace "$(dirname "$_sl_canon")"; then
+    b=$_sl_pre
   fi
   # normalize the ACCEPTED value too, not just the fallback: an override may be
   # POSIX-spelled (/c/Program Files/Git/bin/bash.exe) and Claude Code executes
@@ -1287,7 +1313,7 @@ else
       # leaves everything else (a chained foreign command included) untouched.
       sl_good_bash=$(sl_bash_path)
       if [ "$FIX" -ne 1 ] && [ -z "$sl_good_bash" ]; then
-        say FAIL "statusLine runs through $sl_interp_missing but no such interpreter exists, and no Git for Windows bash was found outside this project to repoint it at — install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH to its bash.exe"
+        say FAIL "statusLine runs through $sl_interp_missing but no such interpreter exists, and $(sl_no_bash_reason) to repoint it at"
       elif [ "$FIX" -ne 1 ]; then
         say fixable "statusLine runs through $sl_interp_missing but no such interpreter exists — the badge cannot render; --fix repoints it at $sl_good_bash"
       elif [ ! -f "$sl_good_bash" ] && [ ! -f "$(unix_path "$sl_good_bash")" ]; then
@@ -1377,6 +1403,11 @@ else
     else
       say FAIL "statusLine points at $sl_custom_missing but no such file exists — restore it or re-wire settings.json (--fix will not guess a custom location)"
     fi
+  elif [ "$FIX" -eq 1 ] && is_windows && [ -z "$(sl_bash_path)" ]; then
+    # No Git for Windows bash outside the project: refuse to wire rather than
+    # persist a project file or a bare `bash` (resolved cwd-first on Windows)
+    # -- decided before ANY write: no backup, no seed, no lib, no chain script.
+    say FAIL "$(sl_no_bash_reason), then re-run --fix; settings.json left untouched"
   elif [ "$FIX" -eq 1 ]; then
     mkdir -p "$CLAUDE_DIR"
     [ -f "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
@@ -1451,15 +1482,9 @@ $sl_merge_tail"
       # $chain is "" on POSIX (and when there is nothing to chain), and the jq
       # program falls back to the inline chain whenever it is empty.
       sl_chain=""; sl_chain_ok=1
-      # No Git for Windows bash outside the project: refuse to wire rather than
-      # persist a project file or a bare `bash` (resolved cwd-first on Windows)
-      # -- and decide it BEFORE writing anything, so a refusal leaves no chain
-      # script behind either.
-      sl_no_bash=0
-      if is_windows && [ -z "$(sl_bash_path)" ]; then sl_no_bash=1; sl_chain_ok=0; fi
       sl_base_cmd=$(jq -r "$sl_base_sel
 | (\$base.command // \"\")" "$SETTINGS" 2>/dev/null) || sl_base_cmd=""
-      if [ "$sl_no_bash" -eq 0 ] && is_windows && [ -n "$sl_base_cmd" ]; then
+      if is_windows && [ -n "$sl_base_cmd" ]; then
         sl_chain_path="$CLAUDE_DIR/headroom-statusline-chain.sh"
         {
           cat <<'CHEOF'
@@ -1491,8 +1516,6 @@ CHEOF
         else
           say fixed "statusLine wired to $sl_disp (script copied, backup: settings.json.bak.*)"
         fi
-      elif [ "$sl_no_bash" -eq 1 ]; then
-        say FAIL "no Git for Windows bash was found outside this project (a bash inside the project is never wired) — install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH to its bash.exe, then re-run --fix; settings.json left untouched"
       elif [ "$sl_chain_ok" -eq 0 ]; then
         say FAIL "could not write the status-line chain script to $CLAUDE_DIR/headroom-statusline-chain.sh — settings.json left untouched"
       else
@@ -1500,7 +1523,7 @@ CHEOF
       fi
     fi
   elif is_windows && [ -z "$(sl_bash_path)" ]; then
-    say FAIL "statusLine is not wired to the headroom badge, and no Git for Windows bash was found outside this project (a bash inside the project is never wired) — install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH to its bash.exe, then run --fix"
+    say FAIL "statusLine is not wired to the headroom badge, and $(sl_no_bash_reason), then run --fix"
   elif [ -n "$sl" ]; then
     say fixable "statusLine present without the headroom badge — --fix appends it, preserving your command under _headroomStatusLineBackup"
   else
