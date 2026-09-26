@@ -73,9 +73,20 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # MSYS), walking <dir>'s ancestors -- a string prefix is case- and
   # 8.3-sensitive, and Windows paths are neither.
   local d=$1 a pwd_c home r1 r2 r3 root
+  # Only an absolute path can be walked; anything else is refused as "inside"
+  # (fail closed) rather than looping on a string that never reaches /.
+  case $d in /*) ;; *) return 0 ;; esac
   pwd_c=$(_dm_canon "$PWD") || pwd_c=$PWD
   home=$(_dm_canon "${HOME:-/}") || home=${HOME:-/}
-  r1=$pwd_c; r2=$(worktree_top "$pwd_c"); r3=$(workspace_root "$pwd_c")
+  # The roots depend only on the cwd: compute them (up to three bounded git
+  # spawns) once per cwd per run, not once per candidate, via the run's TMPD.
+  if [ -n "${TMPD:-}" ] && [ "$(sed -n 1p "$TMPD/ws-roots" 2>/dev/null)" = "$pwd_c" ]; then
+    r2=$(sed -n 2p "$TMPD/ws-roots"); r3=$(sed -n 3p "$TMPD/ws-roots")
+  else
+    r2=$(worktree_top "$pwd_c"); r3=$(workspace_root "$pwd_c")
+    [ -n "${TMPD:-}" ] && printf '%s\n%s\n%s\n' "$pwd_c" "$r2" "$r3" > "$TMPD/ws-roots" 2>/dev/null
+  fi
+  r1=$pwd_c
   a=$d
   while [ -n "$a" ]; do
     for root in "$r1" "$r2" "$r3"; do
@@ -107,13 +118,15 @@ mcp_local_cmd() {  # the command of a LOCAL-scoped `headroom` MCP for this proje
   local cj root k c ku
   cj=$(claude_json_path); root=$(mcp_project_root)
   [ -f "$cj" ] || return 0
-  while IFS="$(printf '\t')" read -r k c; do
+  # Raw key/command LINE PAIRS, not @tsv: @tsv escapes every backslash, which
+  # would double every separator in a native Windows command.
+  while IFS= read -r k && IFS= read -r c; do
     [ -n "$k" ] && [ -n "$c" ] || continue
     ku=$(unix_path "$k" 2>/dev/null) || ku=$k
     if [ "$ku" = "$root" ] || [ "$ku" -ef "$root" ]; then printf '%s\n' "$c"; return 0; fi
   done < <(jq -r '(.projects // {}) | to_entries[]
                   | select(.value.mcpServers.headroom.command? // empty | length > 0)
-                  | [.key, .value.mcpServers.headroom.command] | @tsv' "$cj" 2>/dev/null)
+                  | .key, .value.mcpServers.headroom.command' "$cj" 2>/dev/null)
   return 0
 }
 # The server NAME must precede -e: -e is variadic and swallows every following

@@ -3556,7 +3556,11 @@ else
   echo "FAIL - w13: the command-substitution fixture really is an existing file"; FAIL=$((FAIL+1))
 fi
 w13_inj() {  # w13_inj <settings> <claude-dir> <CLAUDE_CODE_GIT_BASH_PATH value>
+  # CYGPATH_UNIX_DIR: the fake cygpath re-roots -u onto this dir, so point it at
+  # the override's REAL directory -- the doctor canonicalises what it persists,
+  # and an override whose directory it cannot locate is refused.
   env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" \
+      CYGPATH_UNIX_DIR="${CYGPATH_UNIX_DIR:-$(dirname "$3")}" \
       CLAUDE_CODE_GIT_BASH_PATH="$3" PATH="$FENG:$STUB:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$1" DOCTOR_CLAUDE_DIR="$2" DOCTOR_VENV_DIR="$NOVENV" \
       DOCTOR_SHIM_DIR="$W13I/shim" bash "$DOCTOR" --fix >/dev/null 2>&1
@@ -5076,11 +5080,15 @@ check_eq "w27: a vacuous 'sum:' identity never matches" "1" \
 # --- w28. REGRESSION (PR #10 review round 9). One fixture per finding.
 W28="$W/w28"; mkdir -p "$W28"
 # the doctor's own sl_* functions, sourced with its libs, for direct probes
+# The doctor's sl_* functions, extracted HERE (with the full PATH): the probes
+# below run under restricted PATHs, and a sed that is not on them would make
+# every probe an empty, vacuously-passing string.
+SL_FUNCS=$(sed -n '/^_sl_same_native() {/,/^}/p;/^_sl_drive_posix() {/,/^}/p;/^sl_prefer_wrapper_bash() {/,/^}/p;/^sl_bash_path() {/,/^}/p;/^_sl_canon_file() {/,/^}/p;/^_sl_bash_path_compute() {/,/^}/p;/^sl_path_bash() {/,/^}/p' "$DOCTOR")
 sl_fn() {  # sl_fn <function> -- run a doctor.sh sl_* function with DOCTOR_OS=windows and a passthrough cygpath
   # absolute bash: these fixtures put a fake `bash` first on PATH
-  DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" "$BASHBIN" -c "
+  SL_FUNCS="$SL_FUNCS" DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" "$BASHBIN" -c "
     . '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'
-    eval \"\$(sed -n '/^_sl_same_native() {/,/^}/p;/^sl_prefer_wrapper_bash() {/,/^}/p;/^sl_bash_path() {/,/^}/p;/^sl_path_bash() {/,/^}/p' '$DOCTOR')\"
+    eval \"\$SL_FUNCS\"
     \"\$@\"" _ "$@"
 }
 printf '#!/bin/sh\nshift; printf "%%s\\n" "$1"\n' > "$W28/cyg"; chmod +x "$W28/cyg"   # identity cygpath
@@ -5090,11 +5098,14 @@ printf '#!/bin/sh\nshift; printf "%%s\\n" "$1"\n' > "$W28/cyg"; chmod +x "$W28/c
 W28P="$W28/proj"; mkdir -p "$W28P/.git" "$W28P/src" "$W28P/bin" "$W28/sys"
 printf '#!/bin/sh\nexit 0\n' > "$W28P/bin/bash"; chmod +x "$W28P/bin/bash"
 printf '#!/bin/sh\nexit 0\n' > "$W28/sys/bash";  chmod +x "$W28/sys/bash"
+# sentinel: the extracted functions really are defined under a restricted PATH
+got=$(cd "$W28P/src" && PATH="$W28P/bin" sl_fn type -t sl_path_bash)
+check_eq "w28: the sl_* probes run real doctor code (sentinel)" "function" "$got"
 got=$(cd "$W28P/src" && PATH="$W28P/bin:$W28/sys:/usr/bin:/bin" sl_fn sl_path_bash)
-check_eq "w28: the PATH fallback skips a bash inside the project" "$W28/sys/bash" "$got"
+check_eq "w28: the PATH fallback skips a bash inside the project (canonical spelling)" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
 got=$(cd "$W28P/src" && PATH="$W28P/bin" sl_fn sl_path_bash)
 check_eq "w28: ...and with none outside it returns nothing" "" "$got"
-got=$(cd "$W28P/src" && env -u CLAUDE_CODE_GIT_BASH_PATH PATH="$W28P/bin" sl_fn sl_bash_path)
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28P/bin" sl_fn sl_bash_path)
 check_eq "w28: sl_bash_path never falls back to a bare bash" "" "$got"
 
 # #B: the usr/bin -> bin promotion must pass the same provenance rule
@@ -5104,10 +5115,13 @@ ln -s "$W28G/usr" "$W28P/usr" 2>/dev/null
 printf '#!/bin/sh\nexit 0\n' > "$W28P/bin/bash.exe"; chmod +x "$W28P/bin/bash.exe"
 if [ -L "$W28P/usr" ]; then
   got=$(cd "$W28P/src" && CLAUDE_CODE_GIT_BASH_PATH="$W28P/usr/bin/bash.exe" PATH="$W28/sys:/usr/bin:/bin" sl_fn sl_bash_path)
+  w28p_c=$(cd "$W28P" && pwd -P)
   case $got in
-    "$W28P/bin/"*) echo "FAIL - w28: the promotion re-admitted a project bin/bash.exe ($got)"; FAIL=$((FAIL+1)) ;;
-    *)             echo "ok - w28: the promotion does not re-admit a project bin/bash.exe"; PASS=$((PASS+1)) ;;
+    "$W28P/"*|"$w28p_c/"*) echo "FAIL - w28: a project path was persisted ($got)"; FAIL=$((FAIL+1)) ;;
+    "")                    echo "FAIL - w28: the promotion probe returned nothing"; FAIL=$((FAIL+1)) ;;
+    *)                     echo "ok - w28: nothing under the project is persisted -- not the promoted bin/bash.exe, not the symlink spelling"; PASS=$((PASS+1)) ;;
   esac
+  check_eq "w28: ...the override is persisted by its canonical path" "$(cd "$W28G/usr/bin" && pwd -P)/bash.exe" "$got"
 else
   skip_note "w28 promotion bypass (no symlinks on this host)"
 fi
@@ -5126,6 +5140,8 @@ jq -n --arg k "$W28/alias" '{projects:{($k):{mcpServers:{headroom:{command:"/non
 if [ -L "$W28/alias" ]; then
   got=$(cd "$W28P" && HEADROOM_CLAUDE_JSON="$W28/alias.json" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; mcp_local_cmd")
   check_eq "w28: a local-scope key in another spelling of the root still matches" "/nonexistent/headroom" "$got"
+else
+  skip_note "w28 identity local-scope key (no symlinks on this host)"
 fi
 
 # #F: bytes-equality proves only a WORKING copy, never a dead verdict
@@ -5169,6 +5185,55 @@ cp "$ROOT/scripts/lib/engine-resolve.sh" "$ROOT/scripts/lib/headroom-state.sh" "
 out=$(bash "$W28/partial/scripts/doctor.sh" 2>&1); rc=$?
 check_eq "w28: a checkout missing doctor-mcp.sh exits 1" "1" "$rc"
 check "w28: ...saying the lib is missing or stale" "doctor-mcp.sh missing or stale" "$out"
+
+# --- w28b. REGRESSION (PR #10 review round 10).
+# a native-spelled key must go THROUGH unix_path: the stub rewrites NATIVE:<p> -> <p>
+printf '#!/bin/sh\nm=$1; shift; case "$m:$1" in -u:NATIVE:*) printf "%%s\\n" "${1#NATIVE:}" ;; *) printf "%%s\\n" "$1" ;; esac\n' > "$W28/nativecyg"; chmod +x "$W28/nativecyg"
+w28p_c=$(cd "$W28P" && pwd -P)
+jq -n --arg k "NATIVE:$w28p_c" '{projects:{($k):{mcpServers:{headroom:{command:"/nonexistent/headroom"}}}}}' > "$W28/native.json"
+got=$(cd "$W28P" && DOCTOR_CYGPATH="$W28/nativecyg" HEADROOM_CLAUDE_JSON="$W28/native.json" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; mcp_local_cmd")
+check_eq "w28b: a native-spelled local-scope key is converted before matching" "/nonexistent/headroom" "$got"
+# ...and a backslashed Windows command comes back byte-identical (no @tsv escaping)
+jq -n --arg k "$w28p_c" --rawfile c "$(jraw 'C:\Users\a\headroom.exe')" '{projects:{($k):{mcpServers:{headroom:{command:$c}}}}}' > "$W28/bs.json"
+got=$(cd "$W28P" && HEADROOM_CLAUDE_JSON="$W28/bs.json" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; mcp_local_cmd")
+check_eq "w28b: a backslashed command round-trips byte-identical" 'C:\Users\a\headroom.exe' "$got"
+# under_workspace on a non-absolute string ends (fail closed) instead of looping
+t0=$(date +%s)
+# bounded: a regression here LOOPS, and must fail the fixture, not hang the suite
+got=$(bash -c ". '$ER'; _er_bounded 5 bash -c \". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; under_workspace 'C:' && echo in || echo out\"")
+t1=$(date +%s)
+check_eq "w28b: a non-absolute path is refused as inside (fail closed)" "in" "$got"
+[ $((t1 - t0)) -lt 5 ]; pass_fail "w28b: ...without looping ($((t1 - t0))s)" $?
+# WSL's System32 bash is never picked by the PATH fallback
+mkdir -p "$W28/Windows/System32"; printf '#!/bin/sh\n' > "$W28/Windows/System32/bash.exe"; chmod +x "$W28/Windows/System32/bash.exe"
+got=$(cd "$W28P/src" && PATH="$W28/Windows/System32:$W28/sys" sl_fn sl_path_bash)
+check_eq "w28b: WSL's System32 bash is skipped for a real one" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+# doctor --fix end to end: no bash outside the project -> FAIL, settings untouched, no chain script
+W28N="$W28/nobash"; mkdir -p "$W28N/cd" "$W28N/tools"
+printf '{"statusLine":{"type":"command","command":"echo mine"}}\n' > "$W28N/s.json"; cp "$W28N/s.json" "$W28N/s.orig"
+for t in jq mkdir cp cat chmod dirname sed grep tr wc head tail sort mktemp rm date awk cut basename env sleep kill cmp ln uname readlink od printf; do
+  tp=$(command -v "$t" 2>/dev/null) && [ -x "$tp" ] && link_tool "$tp" "$W28N/tools/$t" 2>/dev/null
+done
+out=$(cd "$W28P/src" && env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" \
+      PATH="$W28N/tools:$W28P/bin" DOCTOR_SETTINGS="$W28N/s.json" DOCTOR_CLAUDE_DIR="$W28N/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W28N/shim" HEADROOM_STATE_DIR="$W28N/state" "$BASHBIN" "$DOCTOR" --fix 2>&1)
+check "w28b: --fix with no bash outside the project FAILs" "no Git for Windows bash was found outside this project" "$out"
+if cmp -s "$W28N/s.json" "$W28N/s.orig"; then echo "ok - w28b: ...and settings.json is untouched"; PASS=$((PASS+1))
+else echo "FAIL - w28b: settings.json was modified by a refused wiring"; FAIL=$((FAIL+1)); fi
+[ ! -e "$W28N/cd/headroom-statusline-chain.sh" ]; pass_fail "w28b: ...and no chain script is left behind" $?
+# the read-only preview says FAIL too, not a `fixable` that --fix cannot honour
+out=$(cd "$W28P/src" && env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" \
+      PATH="$W28N/tools:$W28P/bin" DOCTOR_SETTINGS="$W28N/s.json" DOCTOR_CLAUDE_DIR="$W28N/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W28N/shim" HEADROOM_STATE_DIR="$W28N/state" "$BASHBIN" "$DOCTOR" 2>&1)
+check "w28b: the read-only preview FAILs the same way" "no Git for Windows bash was found outside this project" "$out"
+check_absent "w28b: ...and never promises --fix will wire it" "fixable - statusLine present without the headroom badge" "$out"
+# the lib guard: a STALE engine-resolve.sh (no headroom_hijack_file) is refused
+mkdir -p "$W28/stale/scripts/lib"
+cp "$DOCTOR" "$W28/stale/scripts/doctor.sh"
+cp "$ROOT/scripts/lib/headroom-state.sh" "$ROOT/scripts/lib/doctor-mcp.sh" "$W28/stale/scripts/lib/"
+sed '/^headroom_hijack_file() {/,/^}/d' "$ROOT/scripts/lib/engine-resolve.sh" > "$W28/stale/scripts/lib/engine-resolve.sh"
+out=$(bash "$W28/stale/scripts/doctor.sh" 2>&1); rc=$?
+check_eq "w28b: a stale engine-resolve.sh without headroom_hijack_file exits 1" "1" "$rc"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
