@@ -70,8 +70,11 @@ done
 for _er in "$SELF_DIR/lib/engine-resolve.sh" "$SELF_DIR/engine-resolve.sh"; do
   [ -f "$_er" ] && { . "$_er"; break; }
 done
-if ! type engine_python_candidates >/dev/null 2>&1; then
-  echo "doctor: scripts/lib/engine-resolve.sh missing — partial plugin checkout; reinstall the plugin" >&2
+# shellcheck disable=SC1090,SC1091
+[ -f "$SELF_DIR/lib/doctor-mcp.sh" ] && . "$SELF_DIR/lib/doctor-mcp.sh"
+if ! type engine_python_candidates >/dev/null 2>&1 || ! type under_workspace >/dev/null 2>&1 \
+   || ! type resolve_engine_python_validated >/dev/null 2>&1 || ! type claude_json_path >/dev/null 2>&1; then
+  echo "doctor: scripts/lib/engine-resolve.sh or doctor-mcp.sh missing or stale — partial plugin checkout; reinstall the plugin" >&2
   exit 1
 fi
 HEALTH_STATE_DIR="${STATE_DIR:-${HEADROOM_STATE_DIR:-${HOME:-${TMPDIR:-/tmp}}/.claude/headroom-indicator}}"
@@ -171,13 +174,13 @@ else
   # Status 2 is a resolved-but-broken engine: keep it apart from "not found" so
   # the report names the interpreter instead of offering to create a venv as if
   # nothing were installed.
-  PY=$(ER_SLOW_NOTE="$TMPD/er-slow" ER_PY_TIMEOUT="${DOCTOR_PY_TIMEOUT:-60}" resolve_engine_python_validated); case $? in
+  PY=$(ER_REPORT_SLOW=1 ER_PY_TIMEOUT="${DOCTOR_PY_TIMEOUT:-60}" resolve_engine_python_validated 2>"$TMPD/er.err"); case $? in
     0) ;;
     2) ENGINE_BROKEN_AT=$PY; PY="" ;;
     *) PY="" ;;
   esac
 fi
-if [ -n "$PY" ] && [ -f "$TMPD/er-slow" ]; then
+if [ -n "$PY" ] && grep -q '^engine-resolve: accepted-on-timeout ' "$TMPD/er.err" 2>/dev/null; then
   say ok "engine python: $PY (the import probe outran ${DOCTOR_PY_TIMEOUT:-60}s and was accepted as a slow cold start — not verified)"
 elif [ -n "$PY" ]; then
   say ok "engine python: $PY (import headroom.compress works)"
@@ -281,6 +284,10 @@ _shim_record() {  # _shim_record <shim> <source> — remember that WE wrote this
   local id
   if [ -L "$1" ]; then id="link:$(readlink "$1" 2>/dev/null)"
   else id="sum:$(cksum < "$1" 2>/dev/null)"; fi
+  # An EMPTY identity (cksum missing or failing) would match any other file
+  # hashed the same failing way -- "sum:" == "sum:" -- and hand a foreign binary
+  # to the deleter. Record no identity rather than a vacuous one.
+  case $id in link:|sum:) id="" ;; esac
   { mkdir -p "$HEALTH_STATE_DIR" \
     && printf '%s\n%s\n%s\n' "$1" "$2" "$id" > "$HEALTH_STATE_DIR/shim-provenance"; } 2>/dev/null || true
 }
@@ -297,6 +304,7 @@ _shim_recorded() {  # _shim_recorded <path> — did we write it, and is it still
   if [ -n "$id" ]; then
     if [ -L "$1" ]; then now="link:$(readlink "$1" 2>/dev/null)"
     else now="sum:$(cksum < "$1" 2>/dev/null)"; fi
+    case $now in link:|sum:) return 1 ;; esac   # cannot identify it now: not provably ours
     [ "$now" = "$id" ]
     return $?
   fi
@@ -520,7 +528,7 @@ sl_prefer_wrapper_bash() {  # <bash path, native or POSIX spelling> → possibly
   printf '%s\n' "$p"
 }
 sl_bash_path() {  # → the bash a Windows statusLine.command should run through
-  local b nl cr bdir _sl_pwd _sl_ov _sl_ovdir
+  local b nl cr bdir _sl_ov _sl_ovdir _sl_bdir
   # CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT-scoped
   # settings.json — i.e. from repo config. `--fix` persists what we print here
   # into ~/.claude/settings.json as statusLine.command, which Claude Code then
@@ -589,26 +597,26 @@ sl_bash_path() {  # → the bash a Windows statusLine.command should run through
     #     redirect this check with one more key and re-open the hole it closes.
     #     DOCTOR_PROJECT_DIR stays a test/scan seam elsewhere; it must not be able
     #     to weaken a security decision. $PWD is set by the shell, not by config.
-    _sl_pwd=$(cd "$PWD" 2>/dev/null && pwd -P) || _sl_pwd=$PWD
-    # ...and widen $PWD to the WORKSPACE root. Compared against $PWD alone, a
-    # doctor run from repo/src accepted a bash.exe at repo/tools, which is the
-    # same project the settings.json came from. The root comes from the
-    # filesystem (workspace_root: git, else the nearest .git), never from an env var.
-    _sl_root=$(workspace_root "$_sl_pwd")
-    # A dotfiles repo at $HOME is not a workspace: widening to it would refuse
-    # every legitimate Git-for-Windows install under the user profile.
-    _sl_home=$(cd "${HOME:-/}" 2>/dev/null && pwd -P) || _sl_home=${HOME:-/}
-    { [ -z "$_sl_root" ] || [ "$_sl_root" = / ] || [ "$_sl_root" = "$_sl_home" ]; } || _sl_pwd=$_sl_root
+    #     ...and not $PWD alone: under_workspace (lib/doctor-mcp.sh) refuses the
+    #     override under ANY of the cwd, its checkout and that checkout's main
+    #     repository -- a union, so neither a subdirectory invocation nor a
+    #     sibling worktree nor redirected git discovery can move the boundary.
+    #     Canonicalise the override's directory so `..` or a symlink cannot
+    #     spell a path that slips past the prefix compare.
     _sl_ov=$(unix_path "$b")
     _sl_ovdir=$(cd "$(dirname "$_sl_ov")" 2>/dev/null && pwd -P) || _sl_ovdir=$(dirname "$_sl_ov")
-    # Canonicalise both sides so `..`, a symlinked workspace or a subdirectory
-    # invocation cannot spell a path that slips past a literal prefix compare.
-    case "$_sl_ovdir/" in
-      "$_sl_pwd"/*) b="" ;;
-    esac
-    [ "$_sl_ovdir" = "$_sl_pwd" ] && b=""
+    under_workspace "$_sl_ovdir" && b=""
   fi
-  if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(command -v bash); fi
+  if [ -z "$b" ] || [ ! -f "$b" ]; then
+    b=$(command -v bash)
+    # The PATH fallback gets the same provenance rule: a bash resolved from
+    # inside the project is not a Git for Windows install. Name it bare and let
+    # Claude Code resolve `bash` itself rather than persist a project file.
+    if [ -n "$b" ]; then
+      _sl_bdir=$(cd "$(dirname "$b")" 2>/dev/null && pwd -P) || _sl_bdir=$(dirname "$b")
+      under_workspace "$_sl_bdir" && b=bash
+    fi
+  fi
   b=$(sl_prefer_wrapper_bash "$b")
   # normalize the ACCEPTED value too, not just the fallback: an override may be
   # POSIX-spelled (/c/Program Files/Git/bin/bash.exe) and Claude Code executes
@@ -636,73 +644,12 @@ path_hint() {  # the one line the user must run/do to put SHIM_DIR on PATH
     printf "run: echo 'export PATH=\"%s:\$PATH\"' >> %s — then restart Claude Code" "$SHIM_DIR" "$rc"
   fi
 }
-real_file() {  # real_file <path> — follow symlinks to the file itself (bash-3.2 safe, no readlink -f)
-  local p=$1 l n=0
-  while [ -L "$p" ] && [ "$n" -lt 20 ]; do
-    l=$(readlink "$p") || break
-    case $l in /*) p=$l ;; *) p=$(dirname "$p")/$l ;; esac
-    n=$((n+1))
-  done
-  printf '%s\n' "$(cd "$(dirname "$p")" 2>/dev/null && pwd -P || dirname "$p")/$(basename "$p")"
-}
-# MCP registration state is read from the config FILE, not `claude mcp get`:
-# `get` reports only the winning scope (local > project > user), so a local entry
-# hid the user one and 2c re-added into a refusal forever; and `get` health-checks
-# by spawning the server, which a cold engine can outrun.
-mcp_user_cmd() {  # the command of the USER-scoped `headroom` MCP, empty if none
-  local cj; cj=$(claude_json_path)
-  [ -f "$cj" ] || return 0
-  jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null
-}
-workspace_root() {  # workspace_root <dir> — the project root <dir> belongs to, empty if none
-  # ONE definition for both callers (the Git Bash override containment and the
-  # local-scope MCP key), so they cannot drift. A git WORKTREE belongs to its
-  # MAIN repository: the CLI files local-scoped servers under the main root
-  # (verified against Claude Code 2.1.280), and a nearest-.git walk stopped at
-  # the worktree's own .git file. git answers that; the walk is the fallback
-  # for hosts without git or a git older than --path-format (2.31).
-  local d=$1 c r
-  if command -v git >/dev/null 2>&1 \
-     && c=$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-    case $c in
-      */.git) r=$(cd "$(dirname "$c")" 2>/dev/null && pwd -P) && { printf '%s\n' "$r"; return 0; } ;;
-    esac
-    r=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) && r=$(cd "$r" 2>/dev/null && pwd -P) \
-      && { printf '%s\n' "$r"; return 0; }
-  fi
-  r=$d
-  while [ -n "$r" ] && [ "$r" != / ]; do [ -e "$r/.git" ] && { printf '%s\n' "$r"; return 0; }; r=$(dirname "$r"); done
-  return 0
-}
-mcp_project_root() {  # the key the CLI files local-scoped servers under: the workspace root, else $PWD
-  local d r; d=$(cd "$PWD" 2>/dev/null && pwd -P) || d=$PWD
-  r=$(workspace_root "$d"); printf '%s\n' "${r:-$d}"
-}
-mcp_local_cmd() {  # the command of a LOCAL-scoped `headroom` MCP for this project, empty if none
-  local cj root; cj=$(claude_json_path); root=$(mcp_project_root)
-  [ -f "$cj" ] || return 0
-  jq -r --arg r "$root" '.projects[$r].mcpServers.headroom.command // empty' "$cj" 2>/dev/null
-}
-# The server NAME must precede -e: -e is variadic and swallows every following
-# bare token, so `-e A=1 headroom` is rejected by the real CLI with "Invalid
-# environment variable format: headroom". One array feeds both the call and the
-# hint printed for the user, so the two cannot disagree again.
-MCP_ADD_ARGV=(mcp add -s user headroom -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 --)
-mcp_add() {  # mcp_add <engine path>
-  ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-    run_bounded 20 claude "${MCP_ADD_ARGV[@]}" "$1" mcp serve ) >"$TMPD/mcp-add.out" 2>&1
-}
-mcp_add_hint() {  # the same command, for the user to run by hand
-  printf 'claude %s "%s" mcp serve' "${MCP_ADD_ARGV[*]}" "$1"
-}
-same_file() {  # same_file <a> <b> — both name one file (through symlinks, and MSYS spellings)
-  [ -n "$1" ] && [ -n "$2" ] && [ "$(real_file "$(unix_path "$1")")" = "$(real_file "$(unix_path "$2")")" ]
-}
 # cli_healed guards the one self-repair retry below: a dead shim the doctor
 # itself wrote is removed under --fix and the whole check re-runs once, so the
 # same run can rewrite it instead of telling the user to reinstall a healthy
 # engine. Never more than once — a second dead file is a real diagnosis.
 cli_healed=0; cli_retry=1
+CLI_OK_PATH=""; CLI_DEAD_PATH=""   # 2b's verdict, reused by 2c; never inherited from the environment
 while [ "$cli_retry" -eq 1 ]; do
   cli_retry=0
 native_sees_headroom() {  # can a NATIVE process resolve the bare name? CONFIDENCE ONLY.
@@ -845,7 +792,7 @@ elif cli_res=$(resolve_headroom_cli); then
         if [ -f "$TMPD/shim-written" ]; then
           rm -f "$shim" && shim_gone=" (the broken shim was removed)"
         fi
-        CLI_DEAD_PATH=$shim
+        CLI_DEAD_PATH=$cli_res   # the ENGINE it stands for: the shim is deleted just above
         say FAIL "headroom shimmed to $shim but it does not run (\`$shim --help\` failed)$shim_gone — reinstall the engine: $(reinstall_hint)"
       else
         # Say the restart part too. Reaching check 2b at all means the bundled
@@ -875,23 +822,7 @@ done   # end of the one-shot self-repair retry that begins at `while [ "$cli_ret
 # spawned instead of the installed engine. Nothing in .mcp.json can prevent that;
 # the doctor can at least see it and say so.
 if is_windows; then
-  # Scan the real cwd AND the test/scan seam -- never only the seam. Making
-  # DOCTOR_PROJECT_DIR a REPLACEMENT meant the same project-scoped settings.json
-  # `env` channel this check defends against could point it at an empty
-  # directory and switch the detector off with one key.
-  hj_found=""
-  for hj_dir in "$PWD" ${DOCTOR_PROJECT_DIR:+"$DOCTOR_PROJECT_DIR"}; do
-    # the spellings come from scripts/lib/engine-resolve.sh (PATHEXT order, .com
-    # FIRST) so this list and session-probe.sh's cannot drift apart again
-    for hj in $(headroom_name_variants); do
-      [ -f "$hj_dir/$hj" ] || continue
-      # .exe/.cmd/.bat are executable to Windows by extension; the extensionless
-      # name only matters when Git Bash would run it
-      case $hj in headroom) [ -x "$hj_dir/$hj" ] || continue ;; esac
-      hj_found="$hj_dir/$hj"; break
-    done
-    [ -n "$hj_found" ] && break
-  done
+  hj_found=$(headroom_hijack_file)   # scans the cwd AND DOCTOR_PROJECT_DIR (lib/engine-resolve.sh)
   if [ -n "$hj_found" ]; then
     say FAIL "an executable $hj_found sits in the project directory — on Windows a bare command name resolves from the project directory BEFORE PATH, so the bundled MCP would spawn that file instead of the installed headroom engine; remove or rename it"
   fi

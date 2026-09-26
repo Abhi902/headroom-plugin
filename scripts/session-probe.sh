@@ -114,28 +114,27 @@ user_mcp_by_path() {  # a user-scoped `headroom` MCP registered by an absolute p
   # contradicted the doctor and could never clear. Only reached on the rare
   # off-PATH branch, so the jq read of ~/.claude.json costs nothing normally.
   local cj cmd f
-  # Same file the CLI writes: $CLAUDE_CONFIG_DIR/.claude.json when that is set.
-  # Reading only ~/.claude.json flagged a doctor-ok install broken every session.
-  if type claude_json_path >/dev/null 2>&1; then cj=$(claude_json_path)
-  else  # legacy flat install without the lib: same precedence as claude_json_path
-    cj=${HEADROOM_CLAUDE_JSON:-}
-    [ -z "$cj" ] && [ -f "${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}/.config.json" ] && cj="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}/.config.json"
-    cj=${cj:-${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}}; cj=${cj:-${HOME:-}/.claude.json}
-  fi
+  # The one definition of "which file" lives in scripts/lib/engine-resolve.sh
+  # (legacy flat installs get a copy provisioned by the doctor). No inline
+  # second copy here: it could only drift from the file the CLI really writes.
+  type claude_json_path >/dev/null 2>&1 || return 1
+  cj=$(claude_json_path)
   [ -f "$cj" ] && command -v jq >/dev/null 2>&1 || return 1
   # Bounded: this runs at SessionStart, and ~/.claude.json can be several MB.
-  if type _er_bounded >/dev/null 2>&1; then
-    cmd=$(_er_bounded 2 jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null) || return 1
-  else
-    cmd=$(jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null) || return 1
-  fi
+  # A timeout is NOT evidence of absence (the repo's rule: 124 is not proof of
+  # failure) -- return 2, "unknown", so the caller does not light the badge.
+  # (_er_bounded comes from the same lib claude_json_path does.)
+  cmd=$(_er_bounded 2 jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null)
+  case $? in 0) ;; 124) return 2 ;; *) return 1 ;; esac
   case $cmd in /*|[A-Za-z]:[\\/]*) ;; *) return 1 ;; esac
   f=$(unix_path "$cmd" 2>/dev/null) || f=$cmd
   [ -f "$f" ] && [ -x "$f" ]
 }
 engine_off_path() {
+  local byp
   command -v headroom >/dev/null 2>&1 && return 0
-  user_mcp_by_path && return 0
+  user_mcp_by_path; byp=$?
+  [ "$byp" -eq 0 ] && return 0
   add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /headroom-usage-indicator:doctor --fix to repair it"
   # The engine WORKS and the MCP still cannot start: that is a live feature
   # outage, not a setup gap, and the badge has to say so. Leaving it at a nudge
@@ -152,6 +151,9 @@ engine_off_path() {
   # forever, for a condition that never changed -- which is the fastest way to
   # teach someone to ignore the one always-visible health signal. Under `mcp` it
   # persists until /doctor actually resolves it and clears the file.
+  # byp=2: the registration lookup timed out -- unknown, so nudge but do not
+  # light the sticky badge on a guess.
+  [ "$byp" -eq 2 ] && return 0
   is_windows || note_error mcp "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /headroom-usage-indicator:doctor --fix"
 }
 # ...and the other half of "spawned by name": on Windows a bare command name is
@@ -161,23 +163,14 @@ engine_off_path() {
 # per-platform command, so detection is the mitigation.
 engine_name_hijack() {
   is_windows || return 0
-  local d f
-  # Scan the real cwd AND the test/scan seam -- never only the seam. As a
-  # REPLACEMENT, DOCTOR_PROJECT_DIR let the same project-scoped settings.json
-  # `env` channel this detector exists to catch point it at an empty directory
-  # and switch the detector off with one extra key.
-  for d in "$PWD" ${DOCTOR_PROJECT_DIR:+"$DOCTOR_PROJECT_DIR"}; do
-  # the spellings come from scripts/lib/engine-resolve.sh (PATHEXT order, .com
-  # FIRST -- Windows resolves it before .exe), with the same inline fallback the
-  # rest of this file keeps for a partial/legacy copy with no lib beside it
-  for f in $(headroom_name_variants 2>/dev/null \
-             || printf '%s\n' headroom.com headroom.exe headroom.bat headroom.cmd headroom); do
-    [ -f "$d/$f" ] || continue
-    case $f in headroom) [ -x "$d/$f" ] || continue ;; esac
-    add_problem "an executable $d/$f sits in this project — on Windows a bare command name resolves from the project directory before PATH, so the bundled MCP would spawn it instead of the headroom engine; remove or rename it"
-    return 0
-  done
-  done
+  local f
+  # the scan itself lives in scripts/lib/engine-resolve.sh (shared with doctor.sh
+  # check 2b-win); a partial legacy copy without the lib skips it rather than
+  # carry a second copy that can drift
+  type headroom_hijack_file >/dev/null 2>&1 || return 0
+  f=$(headroom_hijack_file)
+  [ -n "$f" ] && add_problem "an executable $f sits in this project — on Windows a bare command name resolves from the project directory before PATH, so the bundled MCP would spawn it instead of the headroom engine; remove or rename it"
+  return 0
 }
 engine_name_hijack
 if [ -n "${HCAT_PYTHON:-}" ]; then

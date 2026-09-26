@@ -9,10 +9,11 @@ TMP=$(mktemp -d)
 # config file. Point every run at a private, absent one so no fixture can read
 # (or, through the claude stub, write) the developer's real ~/.claude.json.
 export HEADROOM_CLAUDE_JSON="$TMP/claude.json.absent"
-# jstr <value> -- a JSON string literal. Seed config values with `--argjson c
-# "$(jstr ...)"`, never `--arg`: on Windows, Git Bash rewrites a /tmp argument to
-# C:/... for the native jq, so the stored path would never match the doctor's.
-jstr() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+# jraw <value> -- a temp FILE holding <value> verbatim. Seed config values with
+# `--rawfile c "$(jraw ...)"`, never `--arg`/`--argjson`: on Windows, Git Bash
+# rewrites path-looking ARGUMENTS for the native jq (/c/x -> C:/x, even inside a
+# quoted JSON literal), but it never touches a file's contents.
+jraw() { local f; f=$(mktemp "$TMP/jraw.XXXXXX") && printf '%s' "$1" > "$f" && printf '%s\n' "$f"; }
 trap 'rm -rf "$TMP"' EXIT
 export HEADROOM_STATE_DIR="$TMP/state"
 # The Windows fixtures below fake the OS (DOCTOR_OS=windows) while their fake
@@ -4069,16 +4070,13 @@ check "w13: a stale flat resolver is reported fixable" \
 # call sites cannot drift apart again.
 check_eq "w13: .com leads the shared name list" "headroom.com" "$(er headroom_name_variants | head -1)"
 check_eq "w13: the shared list carries all five spellings" "5" "$(er headroom_name_variants | grep -c .)"
-check    "w13: doctor uses the shared list"        "headroom_name_variants" "$(cat "$DOCTOR")"
-check    "w13: session-probe uses the shared list" "headroom_name_variants" "$(cat "$PROBE")"
-# ...and MENTIONING the shared function is not the same as agreeing with it:
-# session-probe keeps an inline literal fallback for a partial/legacy copy with
-# no lib beside it, which is a second copy of the list the shared function's own
-# comment claims "cannot drift apart again". Compare them for real.
-probe_list=$(grep -o "printf '%s\\\\n' headroom\.com[^)]*" "$PROBE" | sed "s/printf '%s\\\\n' //" | tr -s ' ')
-shared_list=$(er headroom_name_variants | tr '\n' ' ' | sed 's/ *$//')
-check_eq "w13: session-probe's inline list matches the shared one exactly" \
-         "$shared_list" "$probe_list"
+check    "w13: doctor uses the shared hijack scan"        "headroom_hijack_file" "$(cat "$DOCTOR")"
+check    "w13: session-probe uses the shared hijack scan" "headroom_hijack_file" "$(cat "$PROBE")"
+# ...and no second, inline copy of the name list survives in the probe to drift
+check_absent "w13: session-probe carries no inline copy of the name list" "headroom.com headroom.exe" "$(cat "$PROBE")"
+# the shared scan itself: .com wins, as Windows' PATHEXT order does
+W13HJ="$W/w13hj"; mkdir -p "$W13HJ"; : > "$W13HJ/headroom.exe"; : > "$W13HJ/headroom.com"
+check_eq "w13: the shared scan reports .com before .exe" "$W13HJ/headroom.com" "$(cd "$W13HJ" && er headroom_hijack_file)"
 W13X="$W/w13com"; mkdir -p "$W13X/cd" "$W13X/proj" "$W13X/home"
 printf 'MZ() { :; }\nexit 0\n' > "$W13X/proj/headroom.com"    # no +x: Windows needs none
 S13X="$W13X/s.json"; doc_settings_wired "$W13X/cd" > "$S13X"
@@ -4459,10 +4457,10 @@ cat > "$W21/stub/claude" <<'W21CLAUDE'
 #!/bin/sh
 # The doctor exports MSYS_NO_PATHCONV around `claude`; inherited here it stops Git
 # Bash converting the /tmp config path for the native jq on Windows. Undo it for
-# FILE arguments, and pass stored VALUES as pre-quoted JSON (--argjson "\"...\""),
-# which MSYS never rewrites -- the real CLI stores the command verbatim.
+# FILE arguments, and hand stored VALUES to jq through a file (--rawfile): Git
+# Bash rewrites path-looking arguments, never file contents, and the real CLI
+# stores the command verbatim.
 unset MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
-jstr() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 cj="$HEADROOM_CLAUDE_JSON"
 [ -f "$cj" ] || printf '{}\n' > "$cj"
 [ "$1" = "mcp" ] || exit 0
@@ -4499,7 +4497,8 @@ case $sub in
       echo "MCP server $name already exists in user config" >&2; exit 1
     fi
     c=$1; shift
-    jq --arg n "$name" --argjson c "$(jstr "$c")" '.mcpServers[$n] = {type:"stdio", command:$c, args:$ARGS.positional}' "$cj" --args "$@" > "$cj.tmp" && mv "$cj.tmp" "$cj"
+    printf '%s' "$c" > "$cj.val"
+    jq --arg n "$name" --rawfile c "$cj.val" '.mcpServers[$n] = {type:"stdio", command:$c, args:$ARGS.positional}' "$cj" --args "$@" > "$cj.tmp" && mv "$cj.tmp" "$cj"
     printf '%s --%s -- %s %s\n' "$name" "$envs" "$c" "$*" > "$cj.args"
     exit 0 ;;
   remove)
@@ -4705,7 +4704,7 @@ printf '#!/bin/sh\nexit 0\n'  > "$W24P/venv/bin/python";   chmod +x "$W24P/venv/
 printf '#!/bin/sh\necho hr\n' > "$W24P/venv/bin/headroom"; chmod +x "$W24P/venv/bin/headroom"
 doc_settings_wired "$W24P/cd" > "$W24P/s.json"
 w24p_cmd()  { jq -r '.mcpServers.headroom.command // empty' "$W24P/cj.json" 2>/dev/null; }
-w24p_seed() { jq -n --argjson c "$(jstr "$1")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W24P/cj.json"; }
+w24p_seed() { jq -n --rawfile c "$(jraw "$1")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W24P/cj.json"; }
 w24p_run() {  # w24p_run <PATH> [--fix]
   env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W24P/cj.json" PATH="$1" \
       DOCTOR_SETTINGS="$W24P/s.json" DOCTOR_CLAUDE_DIR="$W24P/cd" DOCTOR_VENV_DIR="$W24P/venv" \
@@ -4792,7 +4791,7 @@ check "w25: POSIX --fix with the MCP still down FAILs" "FAIL    - \`headroom\` i
 W25L="$W25/local"; mkdir -p "$W25L/proj/.git" "$W25L/proj/sub"
 proot=$(cd "$W25L/proj" && pwd -P)
 w25l_seed() {  # w25l_seed <local command> -- a working user entry plus a local one for proj
-  jq -n --argjson u "$(jstr "$(cd "$W25F/venv/bin" && pwd -P)/headroom")" --arg r "$proot" --argjson l "$(jstr "$1")" \
+  jq -n --rawfile u "$(jraw "$(cd "$W25F/venv/bin" && pwd -P)/headroom")" --arg r "$proot" --rawfile l "$(jraw "$1")" \
     '{mcpServers:{headroom:{type:"stdio",command:$u,args:["mcp","serve"]}}, projects:{($r):{mcpServers:{headroom:{type:"stdio",command:$l,args:[]}}}}}' > "$W25L/cj.json"
 }
 w25l_run() {
@@ -4896,7 +4895,7 @@ w26_doc() {  # w26_doc <config json> <extra env...> -- POSIX --fix, engine only 
 W25F_CLI="$(cd "$W25F/venv/bin" && pwd -P)/headroom"
 
 # #5: a remove that does not land must not be followed by a doomed add + add hint.
-jq -n --argjson c "$(jstr "$W26/moved/headroom")" '{mcpServers:{headroom:{type:"stdio",command:$c}}}' > "$W26/rm.json"
+jq -n --rawfile c "$(jraw "$W26/moved/headroom")" '{mcpServers:{headroom:{type:"stdio",command:$c}}}' > "$W26/rm.json"
 out=$(w26_doc "$W26/rm.json" CLAUDE_STUB_FAIL_REMOVE=1)
 check "w26: a failed remove is reported with the remove command" \
       "could not remove the dead user-scoped headroom MCP ($W26/moved/headroom) — run: claude mcp remove headroom -s user" "$out"
@@ -4924,7 +4923,7 @@ got=$(env -u HEADROOM_CLAUDE_JSON -u CLAUDE_CONFIG_DIR HOME="$W26/home" bash -c 
 check_eq "w26: ...and defaults to ~/.claude.json" "$W26/home/.claude.json" "$got"
 # the default path end to end: the probe reads ~/.claude.json with no override set
 mkdir -p "$W26/home" "$W26/pstate"
-jq -n --argjson c "$(jstr "$W25F_CLI")" '{mcpServers:{headroom:{type:"stdio",command:$c}}}' > "$W26/home/.claude.json"
+jq -n --rawfile c "$(jraw "$W25F_CLI")" '{mcpServers:{headroom:{type:"stdio",command:$c}}}' > "$W26/home/.claude.json"
 printf '{"session_id":"w26p"}' | env -u HCAT_PYTHON -u HEADROOM_CLAUDE_JSON -u CLAUDE_CONFIG_DIR DOCTOR_OS=unix HOME="$W26/home" \
   DOCTOR_VENV_DIR="$W25F/venv" PATH="$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W26/pstate" bash "$PROBE" >/dev/null
 [ ! -s "$W26/pstate/last-error" ]; pass_fail "w26: the probe reads the default ~/.claude.json" $?
@@ -4936,7 +4935,7 @@ if command -v git >/dev/null 2>&1; then
     && git worktree add -q "$W26G/wt" 2>/dev/null ) >/dev/null 2>&1
   mroot=$(cd "$W26G/main" && pwd -P)
   if [ -d "$W26G/wt" ] && git -C "$W26G/wt" rev-parse --path-format=absolute --git-common-dir >/dev/null 2>&1; then
-    jq -n --argjson u "$(jstr "$W25F_CLI")" --arg r "$mroot" \
+    jq -n --rawfile u "$(jraw "$W25F_CLI")" --arg r "$mroot" \
       '{mcpServers:{headroom:{type:"stdio",command:$u}}, projects:{($r):{mcpServers:{headroom:{type:"stdio",command:"/nonexistent/headroom"}}}}}' > "$W26/wt.json"
     out=$(cd "$W26G/wt" && w26_doc "$W26/wt.json")
     check "w26: from a git worktree, the main repo's dead local entry is found" \
@@ -4949,7 +4948,7 @@ else
 fi
 # outside any repository the key is the directory itself
 W26N="$W26/plain"; mkdir -p "$W26N"; nroot=$(cd "$W26N" && pwd -P)
-jq -n --argjson u "$(jstr "$W25F_CLI")" --arg r "$nroot" \
+jq -n --rawfile u "$(jraw "$W25F_CLI")" --arg r "$nroot" \
   '{mcpServers:{headroom:{type:"stdio",command:$u}}, projects:{($r):{mcpServers:{headroom:{type:"stdio",command:"/nonexistent/headroom"}}}}}' > "$W26/plain.json"
 out=$(cd "$W26N" && w26_doc "$W26/plain.json")
 check "w26: outside a repo the local entry is keyed by the directory" \
@@ -4967,10 +4966,108 @@ check "w26: 2b FAILs the dead CLI" "does not run" "$out"
 check "w26: ...and 2c defers to that verdict" "check 2b above already FAILed it" "$out"
 check_absent "w26: ...instead of reporting the same dead file again" "the resolved headroom CLI does not start" "$out"
 
-# #12: ER_SLOW_NOTE never truncates an existing file
-printf 'keep\n' > "$W26/keep.txt"
-( unset HCAT_PYTHON; export PATH=/usr/bin:/bin DOCTOR_VENV_DIR="$W23/venv" ER_PY_TIMEOUT=1 ER_SLOW_NOTE="$W26/keep.txt"; er resolve_engine_python_validated ) >/dev/null 2>&1
-check_eq "w26: ER_SLOW_NOTE does not truncate an existing file" "keep" "$(cat "$W26/keep.txt")"
+# #12: a slow accept is REPORTED (stderr marker), never silently called verified
+slow_err=$( ( unset HCAT_PYTHON; export PATH=/usr/bin:/bin DOCTOR_VENV_DIR="$W23/venv" ER_PY_TIMEOUT=1 ER_REPORT_SLOW=1; er resolve_engine_python_validated ) 2>&1 >/dev/null)
+check "w26: a timeout-accepted engine is reported on stderr" "engine-resolve: accepted-on-timeout $W23/venv/bin/python" "$slow_err"
+slow_err=$( ( unset HCAT_PYTHON ER_REPORT_SLOW; export PATH=/usr/bin:/bin DOCTOR_VENV_DIR="$W23/venv" ER_PY_TIMEOUT=1; er resolve_engine_python_validated ) 2>&1 >/dev/null)
+check_absent "w26: ...and only when asked (hooks stay silent)" "accepted-on-timeout" "$slow_err"
+
+# --- w27. REGRESSION (PR #10 review round 8). One fixture per finding.
+W27="$W/w27"; mkdir -p "$W27"
+w27_inj() {  # w27_inj <run dir> <override> [env...] -- sl_bash_path via --fix; prints statusLine.command
+  local dir=$1 ov=$2; shift 2
+  printf '{}\n' > "$W27/s.json"
+  (cd "$dir" && env "$@" CYGPATH_UNIX_DIR="$(dirname "$ov")" bash -c '
+     env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$0" CLAUDE_CODE_GIT_BASH_PATH="$1" \
+       PATH="$2" DOCTOR_SETTINGS="$3" DOCTOR_CLAUDE_DIR="$4" DOCTOR_VENV_DIR="$5" \
+       DOCTOR_SHIM_DIR="$6" bash "$7" --fix >/dev/null 2>&1' \
+     "$W/cygpath" "$ov" "$FENG:$STUB:/usr/bin:/bin" "$W27/s.json" "$W27/cd" "$NOVENV" "$W27/shim" "$DOCTOR")
+  jq -r '.statusLine.command' "$W27/s.json"
+}
+REFUSED='"C:\fake\bash" "C:\fake\headroom-statusline.sh"'
+ACCEPTED='"C:\fake\bash.exe" "C:\fake\headroom-statusline.sh"'
+if command -v git >/dev/null 2>&1; then
+  W27G="$W27/git"; mkdir -p "$W27G/main"
+  ( cd "$W27G/main" && git init -q . && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init \
+    && git worktree add -q "$W27G/feature" ) >/dev/null 2>&1
+  if [ -d "$W27G/feature" ]; then
+    # #1: a SIBLING worktree (outside the main repo) must not escape containment
+    mkdir -p "$W27G/feature/src" "$W27G/feature/tools"
+    printf '#!/bin/sh\nexit 0\n' > "$W27G/feature/tools/bash.exe"; chmod +x "$W27G/feature/tools/bash.exe"; : > "$W27G/feature/tools/git.exe"
+    check_eq "w27: a bash.exe planted in a sibling worktree is refused" "$REFUSED" \
+             "$(w27_inj "$W27G/feature/src" "$W27G/feature/tools/bash.exe")"
+    # ...nor can GIT_DIR/GIT_WORK_TREE from the environment move the boundary
+    mkdir -p "$W27G/other"; ( cd "$W27G/other" && git init -q . ) >/dev/null 2>&1
+    mkdir -p "$W27G/main/src" "$W27G/main/tools"
+    printf '#!/bin/sh\nexit 0\n' > "$W27G/main/tools/bash.exe"; chmod +x "$W27G/main/tools/bash.exe"; : > "$W27G/main/tools/git.exe"
+    check_eq "w27: GIT_DIR/GIT_WORK_TREE in the env cannot move the root off the repo" "$REFUSED" \
+             "$(w27_inj "$W27G/main/src" "$W27G/main/tools/bash.exe" GIT_DIR="$W27G/other/.git" GIT_WORK_TREE="$W27G/other")"
+    # a bare repository's worktree: the CLI keys local servers under the bare dir
+    ( git clone -q --bare "$W27G/main" "$W27G/b.git" && git -C "$W27G/b.git" worktree add -q "$W27G/bwt" ) >/dev/null 2>&1
+    if [ -d "$W27G/bwt" ]; then
+      check_eq "w27: a bare repo's worktree keys under the bare dir" "$(cd "$W27G/b.git" && pwd -P)" \
+               "$(cd "$W27G/bwt" && bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; workspace_root \"\$(pwd -P)\"")"
+    else skip_note "w27 bare-repo worktree (git worktree on a bare clone unavailable)"; fi
+    # a submodule is its own repository (the --show-toplevel branch)
+    ( cd "$W27G/main" && git -c protocol.file.allow=always submodule add -q "$W27G/other" sub \
+      && git -c user.email=t@t -c user.name=t commit -q -m sub ) >/dev/null 2>&1
+    if [ -d "$W27G/main/sub" ] && [ -e "$W27G/main/sub/.git" ]; then
+      check_eq "w27: a submodule is its own root" "$(cd "$W27G/main/sub" && pwd -P)" \
+               "$(cd "$W27G/main/sub" && bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; workspace_root \"\$(pwd -P)\"")"
+    else skip_note "w27 submodule root (git submodule add unavailable)"; fi
+  else
+    skip_note "w27 worktree containment (git worktree unavailable)"
+  fi
+else
+  skip_note "w27 git-derived roots (no git)"
+fi
+# no git at all: the .git walk still finds the root
+mkdir -p "$W27/nogit/bin" "$W27/walk/.git" "$W27/walk/a/b"
+link_tool "$(command -v dirname)" "$W27/nogit/bin/dirname"
+check_eq "w27: without git the .git walk finds the root" "$(cd "$W27/walk" && pwd -P)" \
+         "$(cd "$W27/walk/a/b" && PATH="$W27/nogit/bin" /bin/bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; workspace_root \"\$(pwd -P)\"")"
+
+# #4: a dead engine behind the doctor's own shim is reported ONCE (2b), not again by 2c
+W27D="$W27/deadshim"; mkdir -p "$W27D/venv/bin" "$W27D/shim" "$W27D/cd"
+printf '#!/bin/sh\nexit 0\n' > "$W27D/venv/bin/python";   chmod +x "$W27D/venv/bin/python"
+printf '#!/bin/sh\nexit 9\n' > "$W27D/venv/bin/headroom"; chmod +x "$W27D/venv/bin/headroom"
+doc_settings_wired "$W27D/cd" > "$W27D/s.json"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W27D/cj.json" \
+      PATH="$W27D/shim:$W21/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$W27D/s.json" DOCTOR_CLAUDE_DIR="$W27D/cd" \
+      DOCTOR_VENV_DIR="$W27D/venv" DOCTOR_SHIM_DIR="$W27D/shim" HEADROOM_STATE_DIR="$W27D/state" \
+      bash "$DOCTOR" --fix 2>&1)
+check "w27: 2b FAILs the dead engine behind the shim" "but it does not run" "$out"
+check "w27: ...and 2c defers to it" "check 2b above already FAILed it" "$out"
+check_absent "w27: ...no second 'does not start' report" "the resolved headroom CLI does not start" "$out"
+
+# #5: a registration lookup that TIMES OUT is unknown -- nudge, but no sticky badge
+mkdir -p "$W27/slowjq" "$W27/pstate" "$W27/phome"
+cat > "$W27/slowjq/jq" <<SLOWJQ
+#!/bin/sh
+case "\$*" in *mcpServers.headroom.command*) sleep 5 ;; esac
+exec "$(command -v jq)" "\$@"
+SLOWJQ
+chmod +x "$W27/slowjq/jq"
+jq -n --rawfile c "$(jraw "$W25F_CLI")" '{mcpServers:{headroom:{type:"stdio",command:$c}}}' > "$W27/phome/.claude.json"
+t0=$(date +%s)
+printf '{"session_id":"w27p"}' | env -u HCAT_PYTHON -u HEADROOM_CLAUDE_JSON -u CLAUDE_CONFIG_DIR DOCTOR_OS=unix HOME="$W27/phome" \
+  DOCTOR_VENV_DIR="$W25F/venv" PATH="$W27/slowjq:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W27/pstate" bash "$PROBE" >/dev/null
+t1=$(date +%s)
+[ $((t1 - t0)) -lt 5 ]; pass_fail "w27: the SessionStart registration lookup is bounded ($((t1 - t0))s)" $?
+[ ! -s "$W27/pstate/last-error" ]; pass_fail "w27: ...and a timeout does not light the broken badge" $?
+
+# claude_json_path: the legacy file under ~/.claude, with no CLAUDE_CONFIG_DIR
+mkdir -p "$W27/lhome/.claude"; printf '{}\n' > "$W27/lhome/.claude/.config.json"
+check_eq "w27: a legacy ~/.claude/.config.json is preferred without CLAUDE_CONFIG_DIR" "$W27/lhome/.claude/.config.json" \
+         "$(env -u HEADROOM_CLAUDE_JSON -u CLAUDE_CONFIG_DIR HOME="$W27/lhome" bash -c ". '$ER'; claude_json_path")"
+
+# cksum unavailable: an empty identity must never prove a shim is ours
+mkdir -p "$W27/ck/state" "$W27/ck/bin"; printf 'foreign\n' > "$W27/ck/headroom.exe"
+printf '%s\n%s\n%s\n' "$W27/ck/headroom.exe" "/src/headroom" "sum:" > "$W27/ck/state/shim-provenance"
+check_eq "w27: a vacuous 'sum:' identity never matches" "1" \
+  "$(PATH="$W27/ck/bin:/usr/bin:/bin" HEALTH_STATE_DIR="$W27/ck/state" bash -c "
+      eval \"\$(sed -n '/^_shim_recorded() {/,/^}/p' '$DOCTOR')\"
+      cksum() { return 1; }; _shim_recorded '$W27/ck/headroom.exe'; echo \$?")"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

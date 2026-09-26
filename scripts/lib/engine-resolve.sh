@@ -59,7 +59,7 @@ _er_bounded() {  # _er_bounded <secs> <cmd...> — coreutils timeout, else a wat
   # nothing here may hang unboundedly. doctor.sh's run_bounded is the same idea,
   # but it lives in doctor.sh and never reached these entry points. Keep it
   # bash-3.2 safe: no `wait -n`, no arrays.
-  local t secs pid waited ticks unit
+  local t secs pid waited ticks unit mon
   t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
   secs=$1; shift
   # secs arrives from the environment (ER_PY_TIMEOUT / ER_UV_TIMEOUT), and bash
@@ -94,12 +94,19 @@ _er_bounded() {  # _er_bounded <secs> <cmd...> — coreutils timeout, else a wat
   # shape that made doctor.sh's native probe unreachable (see run_bounded).
   if [ "$_ER_SLEEP_UNIT" = none ]; then "$@"; return $?; fi
   unit=$_ER_SLEEP_UNIT; ticks=$(( secs * _ER_SLEEP_TICKS ))
+  # Job control gives the child its OWN process group, so the kill below takes
+  # its children too: `python -c` or a console-script launcher can fork, and a
+  # kill of the direct child alone orphaned the rest, still running.
+  case $- in *m*) mon=1 ;; *) mon=0 ;; esac
+  set -m
   "$@" &
   pid=$!
+  [ "$mon" -eq 1 ] || set +m
   waited=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$ticks" ]; then
-      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 124
+      kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null; return 124
     fi
     sleep "$unit"; waited=$((waited+1))
   done
@@ -139,17 +146,12 @@ resolve_engine_python_validated() {  # first IMPORTABLE candidate, not first exe
     if [ "$st" -eq 0 ]; then printf '%s\n' "$c"; return 0; fi
     [ "$st" -eq 124 ] && [ -z "$slow" ] && slow=$c
   done < <(engine_python_candidates)
-  # ER_SLOW_NOTE lets an interactive caller (doctor.sh) say "accepted on a
-  # timeout" instead of claiming the import was verified; the status stays 0 so
-  # the hooks' 0/1/2 contract is unchanged.
   if [ -n "$slow" ]; then
-    # Never truncate an existing file (the path comes from the environment), and
-    # never fail silently: a lost note would let the doctor call a timed-out
-    # import "verified".
-    if [ -n "${ER_SLOW_NOTE:-}" ] && [ ! -e "$ER_SLOW_NOTE" ]; then
-      : > "$ER_SLOW_NOTE" 2>/dev/null \
-        || printf 'engine-resolve: could not record the slow accept in %s — the engine import was NOT verified\n' "$ER_SLOW_NOTE" >&2
-    fi
+    # ER_REPORT_SLOW lets an interactive caller (doctor.sh) say "accepted on a
+    # timeout" instead of claiming the import was verified. The marker goes to
+    # stderr, which the caller captures -- no file at an environment-chosen
+    # path, and the status stays 0 so the hooks' 0/1/2 contract is unchanged.
+    [ -n "${ER_REPORT_SLOW:-}" ] && printf 'engine-resolve: accepted-on-timeout %s\n' "$slow" >&2
     printf '%s\n' "$slow"; return 0
   fi
   [ -n "$seen" ] && { printf '%s\n' "$seen"; return 2; }
@@ -226,6 +228,22 @@ _er_cygpath() {
   if [ -n "${DOCTOR_CYGPATH:-}" ]; then "$DOCTOR_CYGPATH" "$@"
   elif command -v cygpath >/dev/null 2>&1; then cygpath "$@"
   else return 1; fi
+}
+headroom_hijack_file() {  # the first headroom.* a bare-name spawn would pick up from the project dir, empty if none
+  # Scans the real cwd AND the test/scan seam -- never only the seam: as a
+  # REPLACEMENT, DOCTOR_PROJECT_DIR let the same project-scoped settings.json env
+  # channel this detector exists to catch point it at an empty directory. ONE
+  # definition for doctor.sh (check 2b-win) and session-probe.sh.
+  local d f
+  for d in "$PWD" ${DOCTOR_PROJECT_DIR:+"$DOCTOR_PROJECT_DIR"}; do
+    for f in $(headroom_name_variants); do
+      [ -f "$d/$f" ] || continue
+      # .exe/.cmd/.bat run by extension; the extensionless name only when Git Bash would run it
+      case $f in headroom) [ -x "$d/$f" ] || continue ;; esac
+      printf '%s\n' "$d/$f"; return 0
+    done
+  done
+  return 0
 }
 claude_json_path() {  # the Claude Code config that holds user- and local-scoped MCP servers
   # The same file the CLI writes: a legacy <config dir>/.config.json when it
