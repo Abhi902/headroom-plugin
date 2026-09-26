@@ -111,3 +111,9 @@ w12: hcat engine tier exit 0 after the fcntl refactor
 w12: the engine tier still prints its receipt
 w12: the event carries the token counts
 w12: the stats event still lands via the POSIX flock path
+
+# --- [POSIX-ONLY] added in review round 7. Git Bash reports any file with a
+# shebang as executable whatever its mode bits, so `chmod -x` cannot produce a
+# non-executable registered command on Windows; the probe's `[ -x ]` guard is
+# exercised on ubuntu/macos, where the mode bit is real.
+w25: a non-executable registered command still records the outage

@@ -197,6 +197,14 @@ directory still runs — never tell the user this registration closes that. When
 the `claude` CLI is not on PATH it is skipped with a `note` (Windows) or reported
 with the PATH alternative (macOS/Linux).
 
+**If `--fix` still ends in a registration `FAIL` on macOS/Linux** (`headroom` is
+off PATH and no working MCP registration landed, or a dead local-scoped entry is
+spawned instead), the MCP is down: do not report the run as fixed. Relay the
+specific remedy printed on the `fixable`/`FAIL` line above it — the by-hand
+`claude mcp add ...` command it prints, `claude mcp remove headroom -s user` /
+`-s local` for a dead entry, or the one-line PATH edit — then offer to re-run
+`--fix` once the user has done it.
+
 All fixes are idempotent — a second `--fix` run changes nothing. After fixing,
 report the `fixed` lines back, and suggest one more plain doctor run if the
 engine was just bootstrapped (the hcat smoke test is skipped in the same run).

@@ -160,7 +160,7 @@ fi
 if [ -n "$py_seen" ]; then
   # Fail OPEN and light the badge. Denying here would be worse than the decoy bug
   # this resolution fixes: the user loses Reads with no idea why.
-  note_error engine "engine import failed ($py_seen) — gate failing open; run /doctor"
+  note_error engine "engine import failed ($py_seen) — gate failing open; run /headroom-usage-indicator:doctor"
   exit 0
 fi
 if [ -n "$py" ]; then
@@ -169,7 +169,7 @@ if [ -n "$py" ]; then
   # (An engine that was never installed is NOT recorded: that is the ordinary
   # red-idle state, not a breakage.)
   if [ ! -x "$py" ]; then
-    note_error engine "engine python not executable ($py) — gate failing open; run /doctor"
+    note_error engine "engine python not executable ($py) — gate failing open; run /headroom-usage-indicator:doctor"
     exit 0
   fi
   # A half-created venv passes -x yet cannot `import headroom.compress` (hcat
@@ -192,7 +192,7 @@ if [ -n "$py" ]; then
     # 124 = the probe outran its bound, not proof of a broken engine; treat it
     # the way the resolver does and let the Read through on the engine we have.
     if [ "$_gate_st" -ne 0 ] && [ "$_gate_st" -ne 124 ]; then
-      note_error engine "engine import failed ($py) — gate failing open; run /doctor"
+      note_error engine "engine import failed ($py) — gate failing open; run /headroom-usage-indicator:doctor"
       exit 0
     fi
   fi

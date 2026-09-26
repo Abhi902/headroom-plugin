@@ -9,6 +9,10 @@ TMP=$(mktemp -d)
 # config file. Point every run at a private, absent one so no fixture can read
 # (or, through the claude stub, write) the developer's real ~/.claude.json.
 export HEADROOM_CLAUDE_JSON="$TMP/claude.json.absent"
+# jstr <value> -- a JSON string literal. Seed config values with `--argjson c
+# "$(jstr ...)"`, never `--arg`: on Windows, Git Bash rewrites a /tmp argument to
+# C:/... for the native jq, so the stored path would never match the doctor's.
+jstr() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 trap 'rm -rf "$TMP"' EXIT
 export HEADROOM_STATE_DIR="$TMP/state"
 # The Windows fixtures below fake the OS (DOCTOR_OS=windows) while their fake
@@ -3737,7 +3741,7 @@ w13_dead() {
 }
 out=$(w13_dead)
 check "w13: a dead OWN shim is diagnosed as the doctor's own file" \
-      "this file is the doctor's own shim from an earlier run: delete it and re-run /doctor --fix" "$out"
+      "this file is the doctor's own shim from an earlier run: delete it and re-run /headroom-usage-indicator:doctor --fix" "$out"
 if [ -f "$W13R/shim/headroom" ]; then
   echo "ok - w13: a read-only run never deletes it"; PASS=$((PASS+1))
 else
@@ -4453,6 +4457,12 @@ printf '#!/bin/sh\necho hr\n' > "$W21/venv/bin/headroom"; chmod +x "$W21/venv/bi
 # CLAUDE_STUB_FAIL_ADD for the add-failed path.
 cat > "$W21/stub/claude" <<'W21CLAUDE'
 #!/bin/sh
+# The doctor exports MSYS_NO_PATHCONV around `claude`; inherited here it stops Git
+# Bash converting the /tmp config path for the native jq on Windows. Undo it for
+# FILE arguments, and pass stored VALUES as pre-quoted JSON (--argjson "\"...\""),
+# which MSYS never rewrites -- the real CLI stores the command verbatim.
+unset MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
+jstr() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 cj="$HEADROOM_CLAUDE_JSON"
 [ -f "$cj" ] || printf '{}\n' > "$cj"
 [ "$1" = "mcp" ] || exit 0
@@ -4483,15 +4493,17 @@ case $sub in
     done
     [ -n "$name" ] && [ $# -gt 0 ] || { echo "error: missing required argument" >&2; exit 1; }
     [ -n "${CLAUDE_STUB_FAIL_ADD:-}" ] && { echo "stub: add failed on purpose" >&2; exit 1; }
+    [ -n "${CLAUDE_STUB_ADD_NOOP:-}" ] && { echo "Added stdio MCP server $name to user config"; exit 0; }
     [ "$scope" = user ] || { echo "stub models user scope only" >&2; exit 1; }
     if jq -e --arg n "$name" '.mcpServers[$n]' "$cj" >/dev/null 2>&1; then
       echo "MCP server $name already exists in user config" >&2; exit 1
     fi
     c=$1; shift
-    jq --arg n "$name" --arg c "$c" '.mcpServers[$n] = {type:"stdio", command:$c, args:$ARGS.positional}' "$cj" --args "$@" > "$cj.tmp" && mv "$cj.tmp" "$cj"
+    jq --arg n "$name" --argjson c "$(jstr "$c")" '.mcpServers[$n] = {type:"stdio", command:$c, args:$ARGS.positional}' "$cj" --args "$@" > "$cj.tmp" && mv "$cj.tmp" "$cj"
     printf '%s --%s -- %s %s\n' "$name" "$envs" "$c" "$*" > "$cj.args"
     exit 0 ;;
   remove)
+    [ -n "${CLAUDE_STUB_FAIL_REMOVE:-}" ] && { echo "stub: remove failed on purpose" >&2; exit 1; }
     jq 'del(.mcpServers.headroom)' "$cj" > "$cj.tmp" && mv "$cj.tmp" "$cj"; exit 0 ;;
 esac
 exit 0
@@ -4508,7 +4520,8 @@ w21_run() {
 out=$(w21_run)
 check "w21: --fix registers the MCP by absolute path" "registered the headroom MCP by absolute path" "$out"
 check "w21: ...and says the bundled bare-name entry still spawns (no false \"closed\" claim)" "bundled bare-name entry still spawns" "$out"
-check "w21: the registration names the resolved CLI, not a bare name" "$W21/venv/bin/headroom" "$(jq -r '.mcpServers.headroom.command' "$W21/cj.json" 2>/dev/null)"
+check_eq "w21: the registration names the resolved CLI (native spelling), not a bare name" \
+         "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command' "$W21/cj.json" 2>/dev/null)"
 check "w21: ...and carries the bundled env" "HEADROOM_UPDATE_CHECK=off" "$(cat "$W21/cj.json.args" 2>/dev/null)"
 out=$(w21_run)
 check        "w21: a second --fix sees it already registered" "MCP registered by absolute path" "$out"
@@ -4692,7 +4705,7 @@ printf '#!/bin/sh\nexit 0\n'  > "$W24P/venv/bin/python";   chmod +x "$W24P/venv/
 printf '#!/bin/sh\necho hr\n' > "$W24P/venv/bin/headroom"; chmod +x "$W24P/venv/bin/headroom"
 doc_settings_wired "$W24P/cd" > "$W24P/s.json"
 w24p_cmd()  { jq -r '.mcpServers.headroom.command // empty' "$W24P/cj.json" 2>/dev/null; }
-w24p_seed() { jq -n --arg c "$1" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W24P/cj.json"; }
+w24p_seed() { jq -n --argjson c "$(jstr "$1")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W24P/cj.json"; }
 w24p_run() {  # w24p_run <PATH> [--fix]
   env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W24P/cj.json" PATH="$1" \
       DOCTOR_SETTINGS="$W24P/s.json" DOCTOR_CLAUDE_DIR="$W24P/cd" DOCTOR_VENV_DIR="$W24P/venv" \
@@ -4773,24 +4786,36 @@ out=$(env -u HCAT_PYTHON DOCTOR_OS=unix CLAUDE_STUB_FAIL_ADD=1 HEADROOM_CLAUDE_J
       DOCTOR_VENV_DIR="$W25F/venv" DOCTOR_SHIM_DIR="$W25F/shim" HEADROOM_STATE_DIR="$W25F/state" \
       bash "$DOCTOR" --fix 2>&1); rc=$?
 check "w25: a failed add names the CLI's own error" "stub: add failed on purpose" "$out"
-check "w25: POSIX --fix with the MCP still down FAILs" "no working MCP registration landed" "$out"
-check_eq "w25: ...and exits nonzero" "1" "$rc"
+check "w25: POSIX --fix with the MCP still down FAILs" "FAIL    - \`headroom\` is not on PATH and no working MCP registration landed" "$out"
 
-# #6: a DEAD local-scoped entry for this project shadows the user-scoped one.
+# #6: a DEAD local-scoped entry for this project shadows a WORKING user-scoped one.
 W25L="$W25/local"; mkdir -p "$W25L/proj/.git" "$W25L/proj/sub"
 proot=$(cd "$W25L/proj" && pwd -P)
-jq -n --arg r "$proot" '{projects:{($r):{mcpServers:{headroom:{type:"stdio",command:"/nonexistent/headroom",args:[]}}}}}' > "$W25L/cj.json"
-out=$(cd "$W25L/proj/sub" && env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W25L/cj.json" \
+w25l_seed() {  # w25l_seed <local command> -- a working user entry plus a local one for proj
+  jq -n --argjson u "$(jstr "$(cd "$W25F/venv/bin" && pwd -P)/headroom")" --arg r "$proot" --argjson l "$(jstr "$1")" \
+    '{mcpServers:{headroom:{type:"stdio",command:$u,args:["mcp","serve"]}}, projects:{($r):{mcpServers:{headroom:{type:"stdio",command:$l,args:[]}}}}}' > "$W25L/cj.json"
+}
+w25l_run() {
+  (cd "$W25L/proj/sub" && env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W25L/cj.json" \
       PATH="$W21/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$W25F/s.json" DOCTOR_CLAUDE_DIR="$W25F/cd" \
       DOCTOR_VENV_DIR="$W25F/venv" DOCTOR_SHIM_DIR="$W25L/shim" HEADROOM_STATE_DIR="$W25L/state" \
       bash "$DOCTOR" --fix 2>&1)
-check "w25: a dead local-scoped entry is reported, keyed by the git root" \
+}
+w25l_seed /nonexistent/headroom
+out=$(w25l_run)
+check "w25: the working user-scoped registration is recognised" "MCP registered by absolute path" "$out"
+check "w25: a dead local-scoped entry is reported, keyed by the workspace root" \
       "local-scoped headroom MCP for this project (/nonexistent/headroom)" "$out"
-check "w25: ...with the command to remove it" "claude mcp remove headroom -s local" "$out"
-check_eq "w25: ...and it is never removed for the user" "/nonexistent/headroom" \
+check "w25: ...and --fix FAILs naming the local entry, not a PATH edit" \
+      "the dead local-scoped headroom MCP (/nonexistent/headroom) is spawned instead — remove it: claude mcp remove headroom -s local" "$out"
+check_absent "w25: ...never the misleading 'no registration landed'" "no working MCP registration landed" "$out"
+check_eq "w25: ...and the local entry is never removed for the user" "/nonexistent/headroom" \
          "$(jq -r --arg r "$proot" '.projects[$r].mcpServers.headroom.command' "$W25L/cj.json")"
-check_absent "w25: ...and the user-scoped registration is not reported as working" \
-             "MCP registered by absolute path" "$out"
+# a LIVE but different local entry is a note, not a failure
+w25l_seed "$W24P/other/headroom"
+out=$(w25l_run)
+check "w25: a live local entry is noted" "local-scoped headroom MCP for this project ($W24P/other/headroom) takes precedence" "$out"
+check_absent "w25: ...and is not a FAIL" "is spawned instead" "$out"
 
 # #5: CLAUDE_CONFIG_DIR relocates the config file; the probe must read it there.
 W25C="$W25/ccd"; mkdir -p "$W25C/cfg" "$W25C/home" "$W25C/state"
@@ -4858,6 +4883,94 @@ for f in flat nested mixed object arrays; do
   hr=no; [ "$h" -eq 0 ] && hr=yes
   check_eq "w25: gate and hcat agree on the $f shape (gate denies <=> hcat renders)" "$hr" "$gd"
 done
+
+# --- w26. REGRESSION (PR #10 review round 7). One fixture per finding.
+W26="$W/w26"; mkdir -p "$W26"
+w26_doc() {  # w26_doc <config json> <extra env...> -- POSIX --fix, engine only in the W25F venv
+  local cj=$1; shift
+  env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$cj" "$@" \
+      PATH="$W21/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$W25F/s.json" DOCTOR_CLAUDE_DIR="$W25F/cd" \
+      DOCTOR_VENV_DIR="$W25F/venv" DOCTOR_SHIM_DIR="$W26/shim" HEADROOM_STATE_DIR="$W26/state" \
+      bash "$DOCTOR" --fix 2>&1
+}
+W25F_CLI="$(cd "$W25F/venv/bin" && pwd -P)/headroom"
+
+# #5: a remove that does not land must not be followed by a doomed add + add hint.
+jq -n --argjson c "$(jstr "$W26/moved/headroom")" '{mcpServers:{headroom:{type:"stdio",command:$c}}}' > "$W26/rm.json"
+out=$(w26_doc "$W26/rm.json" CLAUDE_STUB_FAIL_REMOVE=1)
+check "w26: a failed remove is reported with the remove command" \
+      "could not remove the dead user-scoped headroom MCP ($W26/moved/headroom) — run: claude mcp remove headroom -s user" "$out"
+check_absent "w26: ...and no add is attempted into the refusal" "claude mcp add\` failed" "$out"
+
+# add exits 0 but writes nothing: the config file, not the exit status, decides.
+out=$(w26_doc "$W26/noop.json" CLAUDE_STUB_ADD_NOOP=1)
+check "w26: an add that exits 0 without registering is not reported fixed" "could not register the MCP by absolute path" "$out"
+check_absent "w26: ...never 'registered'" "registered the headroom MCP" "$out"
+
+# #9: the printed by-hand command is the argv the doctor runs -- executing it
+# through the argv-strict stub must succeed.
+hint=$(printf '%s\n' "$out" | sed -n 's/.*run it by hand: \(claude mcp add .*\)$/\1/p' | head -1)
+check "w26: the add-failure message carries a by-hand command" "claude mcp add -s user headroom" "$hint"
+rm -f "$W26/hint.json"
+( PATH="$W21/stub:/usr/bin:/bin"; HEADROOM_CLAUDE_JSON="$W26/hint.json"; export PATH HEADROOM_CLAUDE_JSON; eval "$hint" ) >/dev/null 2>&1
+check_eq "w26: ...and that exact command registers the engine" "$W25F_CLI" \
+         "$(jq -r '.mcpServers.headroom.command // empty' "$W26/hint.json" 2>/dev/null)"
+
+# #7: a legacy <config dir>/.config.json is the file the CLI writes -- read it.
+mkdir -p "$W26/cfg"; printf '{}\n' > "$W26/cfg/.config.json"
+got=$(env -u HEADROOM_CLAUDE_JSON CLAUDE_CONFIG_DIR="$W26/cfg" bash -c ". '$ER'; claude_json_path")
+check_eq "w26: claude_json_path prefers a legacy .config.json" "$W26/cfg/.config.json" "$got"
+got=$(env -u HEADROOM_CLAUDE_JSON -u CLAUDE_CONFIG_DIR HOME="$W26/home" bash -c ". '$ER'; claude_json_path")
+check_eq "w26: ...and defaults to ~/.claude.json" "$W26/home/.claude.json" "$got"
+# the default path end to end: the probe reads ~/.claude.json with no override set
+mkdir -p "$W26/home" "$W26/pstate"
+jq -n --argjson c "$(jstr "$W25F_CLI")" '{mcpServers:{headroom:{type:"stdio",command:$c}}}' > "$W26/home/.claude.json"
+printf '{"session_id":"w26p"}' | env -u HCAT_PYTHON -u HEADROOM_CLAUDE_JSON -u CLAUDE_CONFIG_DIR DOCTOR_OS=unix HOME="$W26/home" \
+  DOCTOR_VENV_DIR="$W25F/venv" PATH="$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W26/pstate" bash "$PROBE" >/dev/null
+[ ! -s "$W26/pstate/last-error" ]; pass_fail "w26: the probe reads the default ~/.claude.json" $?
+
+# #2: a git WORKTREE's local-scoped servers are keyed under the MAIN repo root.
+if command -v git >/dev/null 2>&1; then
+  W26G="$W26/git"; mkdir -p "$W26G/main"
+  ( cd "$W26G/main" && git init -q . && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init \
+    && git worktree add -q "$W26G/wt" 2>/dev/null ) >/dev/null 2>&1
+  mroot=$(cd "$W26G/main" && pwd -P)
+  if [ -d "$W26G/wt" ] && git -C "$W26G/wt" rev-parse --path-format=absolute --git-common-dir >/dev/null 2>&1; then
+    jq -n --argjson u "$(jstr "$W25F_CLI")" --arg r "$mroot" \
+      '{mcpServers:{headroom:{type:"stdio",command:$u}}, projects:{($r):{mcpServers:{headroom:{type:"stdio",command:"/nonexistent/headroom"}}}}}' > "$W26/wt.json"
+    out=$(cd "$W26G/wt" && w26_doc "$W26/wt.json")
+    check "w26: from a git worktree, the main repo's dead local entry is found" \
+          "local-scoped headroom MCP for this project (/nonexistent/headroom)" "$out"
+  else
+    skip_note "w26 worktree keying (git worktree / --path-format unavailable)"
+  fi
+else
+  skip_note "w26 worktree keying (no git)"
+fi
+# outside any repository the key is the directory itself
+W26N="$W26/plain"; mkdir -p "$W26N"; nroot=$(cd "$W26N" && pwd -P)
+jq -n --argjson u "$(jstr "$W25F_CLI")" --arg r "$nroot" \
+  '{mcpServers:{headroom:{type:"stdio",command:$u}}, projects:{($r):{mcpServers:{headroom:{type:"stdio",command:"/nonexistent/headroom"}}}}}' > "$W26/plain.json"
+out=$(cd "$W26N" && w26_doc "$W26/plain.json")
+check "w26: outside a repo the local entry is keyed by the directory" \
+      "local-scoped headroom MCP for this project (/nonexistent/headroom)" "$out"
+
+# #10: a CLI that 2b already FAILed as dead is not re-probed and re-reported by 2c.
+W26D="$W26/dead"; mkdir -p "$W26D/bin" "$W26D/venv/bin"
+printf '#!/bin/sh\nexit 0\n' > "$W26D/venv/bin/python"; chmod +x "$W26D/venv/bin/python"
+printf '#!/bin/sh\nexit 9\n' > "$W26D/bin/headroom";     chmod +x "$W26D/bin/headroom"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows HEADROOM_CLAUDE_JSON="$W26/dead.json" \
+      PATH="$W21/stub:$W26D/bin:/usr/bin:/bin" DOCTOR_SETTINGS="$W25F/s.json" DOCTOR_CLAUDE_DIR="$W25F/cd" \
+      DOCTOR_VENV_DIR="$W26D/venv" DOCTOR_SHIM_DIR="$W26D/shim" HEADROOM_STATE_DIR="$W26D/state" \
+      bash "$DOCTOR" 2>&1)
+check "w26: 2b FAILs the dead CLI" "does not run" "$out"
+check "w26: ...and 2c defers to that verdict" "check 2b above already FAILed it" "$out"
+check_absent "w26: ...instead of reporting the same dead file again" "the resolved headroom CLI does not start" "$out"
+
+# #12: ER_SLOW_NOTE never truncates an existing file
+printf 'keep\n' > "$W26/keep.txt"
+( unset HCAT_PYTHON; export PATH=/usr/bin:/bin DOCTOR_VENV_DIR="$W23/venv" ER_PY_TIMEOUT=1 ER_SLOW_NOTE="$W26/keep.txt"; er resolve_engine_python_validated ) >/dev/null 2>&1
+check_eq "w26: ER_SLOW_NOTE does not truncate an existing file" "keep" "$(cat "$W26/keep.txt")"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

@@ -65,7 +65,7 @@ HCAT="$here/../bin/hcat"
 [ -x "$HCAT" ] || HCAT="$here/hcat"
 if [ ! -x "$HCAT" ]; then
   note_error install "hcat missing or not executable"
-  add_problem "hcat is missing or not executable — reinstall the plugin or run /doctor"
+  add_problem "hcat is missing or not executable — reinstall the plugin or run /headroom-usage-indicator:doctor"
 fi
 
 # --- 2b. shared libs — the badge/ledger read attribution.jq; the hooks source
@@ -117,9 +117,18 @@ user_mcp_by_path() {  # a user-scoped `headroom` MCP registered by an absolute p
   # Same file the CLI writes: $CLAUDE_CONFIG_DIR/.claude.json when that is set.
   # Reading only ~/.claude.json flagged a doctor-ok install broken every session.
   if type claude_json_path >/dev/null 2>&1; then cj=$(claude_json_path)
-  else cj=${HEADROOM_CLAUDE_JSON:-${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}}; cj=${cj:-${HOME:-}/.claude.json}; fi
+  else  # legacy flat install without the lib: same precedence as claude_json_path
+    cj=${HEADROOM_CLAUDE_JSON:-}
+    [ -z "$cj" ] && [ -f "${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}/.config.json" ] && cj="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}/.config.json"
+    cj=${cj:-${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}}; cj=${cj:-${HOME:-}/.claude.json}
+  fi
   [ -f "$cj" ] && command -v jq >/dev/null 2>&1 || return 1
-  cmd=$(jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null) || return 1
+  # Bounded: this runs at SessionStart, and ~/.claude.json can be several MB.
+  if type _er_bounded >/dev/null 2>&1; then
+    cmd=$(_er_bounded 2 jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null) || return 1
+  else
+    cmd=$(jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null) || return 1
+  fi
   case $cmd in /*|[A-Za-z]:[\\/]*) ;; *) return 1 ;; esac
   f=$(unix_path "$cmd" 2>/dev/null) || f=$cmd
   [ -f "$f" ] && [ -x "$f" ]
@@ -185,7 +194,7 @@ elif ! command -v headroom >/dev/null 2>&1; then
   # Never-installed engine is the ordinary red-idle state, not a breakage:
   # say it once at session start, but do not flip the badge to broken. Same
   # reasoning for the off-PATH nudge above: add_problem, never note_error.
-  add_problem "headroom engine not installed — run /doctor --fix to bootstrap it"
+  add_problem "headroom engine not installed — run /headroom-usage-indicator:doctor --fix to bootstrap it"
 fi
 
 # --- 4. bundled price table parses (when jq is available to check)
@@ -203,7 +212,7 @@ if [ -z "$problems" ] && [ -f "$STATE_DIR/last-error" ]; then
   case "${le_ts:-}" in (*[!0-9]*|"") le_ts=0 ;; esac
   le_age=$(( $(date +%s) - le_ts ))
   if [ "$le_age" -ge 0 ] 2>/dev/null && [ "$le_age" -le 86400 ] 2>/dev/null; then
-    add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /doctor (doctor clears this once healthy)"
+    add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /headroom-usage-indicator:doctor (doctor clears this once healthy)"
   fi
 fi
 
