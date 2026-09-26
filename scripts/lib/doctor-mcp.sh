@@ -18,9 +18,12 @@ _dm_git() {  # _dm_git <dir> <rev-parse args...> — git, answering for <dir> ON
   # The GIT_* discovery variables are environment, and environment can come from
   # a project-scoped settings.json: left in place they make git answer for some
   # other repository and move every root computed here. Scrub them.
+  # Bounded like every other external spawn here (_er_uv_root, shim_runs): a
+  # stalled git -- network mount, AV scan, a locked repo -- must not hang the
+  # doctor; a timeout reads as "no answer" and the .git walk takes over.
   local d=$1; shift
   command -v git >/dev/null 2>&1 || return 1
-  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_CEILING_DIRECTORIES \
+  _er_bounded "${ER_GIT_TIMEOUT:-3}" env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_CEILING_DIRECTORIES \
       -u GIT_DISCOVERY_ACROSS_FILESYSTEM -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
       -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT \
       git -C "$d" rev-parse "$@" 2>/dev/null
@@ -28,8 +31,10 @@ _dm_git() {  # _dm_git <dir> <rev-parse args...> — git, answering for <dir> ON
 _dm_canon() { (cd "$1" 2>/dev/null && pwd -P); }
 
 _dm_dotgit_walk() {  # nearest ancestor of <dir> holding .git (dir or file), empty if none
+  # Pure parameter expansion: this is the no-git fallback, so it must not lean
+  # on any other external tool either.
   local r=$1
-  while [ -n "$r" ] && [ "$r" != / ]; do [ -e "$r/.git" ] && { printf '%s\n' "$r"; return 0; }; r=$(dirname "$r"); done
+  while [ -n "$r" ] && [ "$r" != / ]; do [ -e "$r/.git" ] && { printf '%s\n' "$r"; return 0; }; r=${r%/*}; done
   return 0
 }
 
@@ -64,13 +69,21 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # discovery) move the boundary off the directory holding a planted file.
   # $HOME and / are never a root: a dotfiles repo at $HOME is not a workspace,
   # and widening to it would refuse every Git for Windows under the profile.
-  local d=$1 pwd_c home root
+  # Compared by IDENTITY (-ef: same device and inode, the NTFS file id under
+  # MSYS), walking <dir>'s ancestors -- a string prefix is case- and
+  # 8.3-sensitive, and Windows paths are neither.
+  local d=$1 a pwd_c home r1 r2 r3 root
   pwd_c=$(_dm_canon "$PWD") || pwd_c=$PWD
   home=$(_dm_canon "${HOME:-/}") || home=${HOME:-/}
-  for root in "$pwd_c" "$(worktree_top "$pwd_c")" "$(workspace_root "$pwd_c")"; do
-    { [ -z "$root" ] || [ "$root" = / ] || [ "$root" = "$home" ]; } && continue
-    [ "$d" = "$root" ] && return 0
-    case "$d/" in "$root"/*) return 0 ;; esac
+  r1=$pwd_c; r2=$(worktree_top "$pwd_c"); r3=$(workspace_root "$pwd_c")
+  a=$d
+  while [ -n "$a" ]; do
+    for root in "$r1" "$r2" "$r3"; do
+      { [ -z "$root" ] || [ "$root" = / ] || [ "$root" -ef "$home" ]; } && continue
+      [ "$a" -ef "$root" ] && return 0
+    done
+    [ "$a" = / ] && break
+    a=${a%/*}; [ -n "$a" ] || a=/
   done
   return 1
 }
@@ -88,9 +101,20 @@ mcp_project_root() {  # the key the CLI files local-scoped servers under: the re
   r=$(workspace_root "$d"); printf '%s\n' "${r:-$d}"
 }
 mcp_local_cmd() {  # the command of a LOCAL-scoped `headroom` MCP for this project, empty if none
-  local cj root; cj=$(claude_json_path); root=$(mcp_project_root)
+  # Matched by IDENTITY, not by key spelling: the CLI keys projects by its own
+  # native path (C:/Users/... on Windows, possibly another case or an 8.3
+  # name), while the root here is an MSYS path. unix_path + -ef matches both.
+  local cj root k c ku
+  cj=$(claude_json_path); root=$(mcp_project_root)
   [ -f "$cj" ] || return 0
-  jq -r --arg r "$root" '.projects[$r].mcpServers.headroom.command // empty' "$cj" 2>/dev/null
+  while IFS="$(printf '\t')" read -r k c; do
+    [ -n "$k" ] && [ -n "$c" ] || continue
+    ku=$(unix_path "$k" 2>/dev/null) || ku=$k
+    if [ "$ku" = "$root" ] || [ "$ku" -ef "$root" ]; then printf '%s\n' "$c"; return 0; fi
+  done < <(jq -r '(.projects // {}) | to_entries[]
+                  | select(.value.mcpServers.headroom.command? // empty | length > 0)
+                  | [.key, .value.mcpServers.headroom.command] | @tsv' "$cj" 2>/dev/null)
+  return 0
 }
 # The server NAME must precede -e: -e is variadic and swallows every following
 # bare token, so `-e A=1 headroom` is rejected by the real CLI with "Invalid
@@ -104,11 +128,13 @@ mcp_add() {  # mcp_add <engine path>
 mcp_add_hint() {  # the same command, for the user to run by hand
   printf 'claude %s "%s" mcp serve' "${MCP_ADD_ARGV[*]}" "$1"
 }
-same_file() {  # same_file <a> <b> — both name one file: through symlinks and MSYS
-  # spellings, or (a Windows shim is a byte COPY, not a link) identical bytes.
+same_file() {  # same_file <a> <b> [bytes] — both name one file (symlinks, MSYS spellings)
+  # With `bytes`, identical contents count too: a Windows shim is a byte COPY
+  # of the engine, and a copy that RUNS proves the engine runs. Never used for a
+  # dead verdict -- a relocatable launcher can fail as a copy and still work.
   local a b
   [ -n "$1" ] && [ -n "$2" ] || return 1
   a=$(real_file "$(unix_path "$1")"); b=$(real_file "$(unix_path "$2")")
   [ "$a" = "$b" ] && return 0
-  [ -f "$a" ] && [ -f "$b" ] && cmp -s "$a" "$b"
+  [ "${3:-}" = bytes ] && [ -f "$a" ] && [ -f "$b" ] && cmp -s "$a" "$b"
 }

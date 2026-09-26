@@ -71,7 +71,7 @@ _er_bounded() {  # _er_bounded <secs> <cmd...> — coreutils timeout, else a wat
   # gtimeout) all accept it.
   # A -k kill surfaces as 137, not 124; callers read 124 as "outran the bound".
   if [ -n "$t" ]; then
-    "$t" -k 2 "$secs" "$@"; t=$?
+    "$t" -k 2 "$secs" "$@" </dev/null; t=$?
     [ "$t" -eq 137 ] && t=124
     return "$t"
   fi
@@ -99,7 +99,9 @@ _er_bounded() {  # _er_bounded <secs> <cmd...> — coreutils timeout, else a wat
   # kill of the direct child alone orphaned the rest, still running.
   case $- in *m*) mon=1 ;; *) mon=0 ;; esac
   set -m
-  "$@" &
+  # </dev/null: under job control a background child would otherwise inherit
+  # the caller's stdin (a hook's JSON) or, on a tty, stop on SIGTTIN.
+  "$@" </dev/null &
   pid=$!
   [ "$mon" -eq 1 ] || set +m
   waited=0

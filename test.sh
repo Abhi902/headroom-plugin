@@ -4355,7 +4355,7 @@ if command -v shellcheck >/dev/null 2>&1; then
        "$ROOT/scripts/doctor.sh" \
        "$ROOT/scripts/session-probe.sh" "$ROOT/scripts/ledger-hook.sh" \
        "$ROOT/scripts/lib/headroom-state.sh" \
-       "$ROOT/scripts/lib/engine-resolve.sh" \
+       "$ROOT/scripts/lib/engine-resolve.sh" "$ROOT/scripts/lib/doctor-mcp.sh" \
        "$HCAT" "$ROOT/scripts/ci/windows-check.sh"; then
     echo "ok - shellcheck"; PASS=$((PASS+1))
   else
@@ -4888,7 +4888,7 @@ W26="$W/w26"; mkdir -p "$W26"
 w26_doc() {  # w26_doc <config json> <extra env...> -- POSIX --fix, engine only in the W25F venv
   local cj=$1; shift
   env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$cj" "$@" \
-      PATH="$W21/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$W25F/s.json" DOCTOR_CLAUDE_DIR="$W25F/cd" \
+      PATH="${W26_PATH:-$W21/stub:/usr/bin:/bin}" DOCTOR_SETTINGS="$W25F/s.json" DOCTOR_CLAUDE_DIR="$W25F/cd" \
       DOCTOR_VENV_DIR="$W25F/venv" DOCTOR_SHIM_DIR="$W26/shim" HEADROOM_STATE_DIR="$W26/state" \
       bash "$DOCTOR" --fix 2>&1
 }
@@ -4937,7 +4937,9 @@ if command -v git >/dev/null 2>&1; then
   if [ -d "$W26G/wt" ] && git -C "$W26G/wt" rev-parse --path-format=absolute --git-common-dir >/dev/null 2>&1; then
     jq -n --rawfile u "$(jraw "$W25F_CLI")" --arg r "$mroot" \
       '{mcpServers:{headroom:{type:"stdio",command:$u}}, projects:{($r):{mcpServers:{headroom:{type:"stdio",command:"/nonexistent/headroom"}}}}}' > "$W26/wt.json"
-    out=$(cd "$W26G/wt" && w26_doc "$W26/wt.json")
+    # git must be on PATH: on Git for Windows it lives in /mingw64/bin, outside
+    # w26_doc's /usr/bin:/bin, and without it the doctor falls back to the walk
+    out=$(cd "$W26G/wt" && W26_PATH="$W21/stub:$(dirname "$(command -v git)"):/usr/bin:/bin" w26_doc "$W26/wt.json")
     check "w26: from a git worktree, the main repo's dead local entry is found" \
           "local-scoped headroom MCP for this project (/nonexistent/headroom)" "$out"
   else
@@ -4981,9 +4983,12 @@ w27_inj() {  # w27_inj <run dir> <override> [env...] -- sl_bash_path via --fix; 
      env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$0" CLAUDE_CODE_GIT_BASH_PATH="$1" \
        PATH="$2" DOCTOR_SETTINGS="$3" DOCTOR_CLAUDE_DIR="$4" DOCTOR_VENV_DIR="$5" \
        DOCTOR_SHIM_DIR="$6" bash "$7" --fix >/dev/null 2>&1' \
-     "$W/cygpath" "$ov" "$FENG:$STUB:/usr/bin:/bin" "$W27/s.json" "$W27/cd" "$NOVENV" "$W27/shim" "$DOCTOR")
+     "$W/cygpath" "$ov" "$FENG:$STUB:$GITDIR:/usr/bin:/bin" "$W27/s.json" "$W27/cd" "$NOVENV" "$W27/shim" "$DOCTOR")
   jq -r '.statusLine.command' "$W27/s.json"
 }
+# git on the doctor's PATH, so containment is exercised through git (not only
+# the .git walk) on every host -- Git for Windows keeps it in /mingw64/bin
+GITDIR=$(dirname "$(command -v git 2>/dev/null || echo /usr/bin/git)")
 REFUSED='"C:\fake\bash" "C:\fake\headroom-statusline.sh"'
 ACCEPTED='"C:\fake\bash.exe" "C:\fake\headroom-statusline.sh"'
 if command -v git >/dev/null 2>&1; then
@@ -5022,8 +5027,7 @@ else
   skip_note "w27 git-derived roots (no git)"
 fi
 # no git at all: the .git walk still finds the root
-mkdir -p "$W27/nogit/bin" "$W27/walk/.git" "$W27/walk/a/b"
-link_tool "$(command -v dirname)" "$W27/nogit/bin/dirname"
+mkdir -p "$W27/nogit/bin" "$W27/walk/.git" "$W27/walk/a/b"   # nogit/bin stays EMPTY: the walk needs no tools
 check_eq "w27: without git the .git walk finds the root" "$(cd "$W27/walk" && pwd -P)" \
          "$(cd "$W27/walk/a/b" && PATH="$W27/nogit/bin" /bin/bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; workspace_root \"\$(pwd -P)\"")"
 
@@ -5068,6 +5072,103 @@ check_eq "w27: a vacuous 'sum:' identity never matches" "1" \
   "$(PATH="$W27/ck/bin:/usr/bin:/bin" HEALTH_STATE_DIR="$W27/ck/state" bash -c "
       eval \"\$(sed -n '/^_shim_recorded() {/,/^}/p' '$DOCTOR')\"
       cksum() { return 1; }; _shim_recorded '$W27/ck/headroom.exe'; echo \$?")"
+
+# --- w28. REGRESSION (PR #10 review round 9). One fixture per finding.
+W28="$W/w28"; mkdir -p "$W28"
+# the doctor's own sl_* functions, sourced with its libs, for direct probes
+sl_fn() {  # sl_fn <function> -- run a doctor.sh sl_* function with DOCTOR_OS=windows and a passthrough cygpath
+  # absolute bash: these fixtures put a fake `bash` first on PATH
+  DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" "$BASHBIN" -c "
+    . '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'
+    eval \"\$(sed -n '/^_sl_same_native() {/,/^}/p;/^sl_prefer_wrapper_bash() {/,/^}/p;/^sl_bash_path() {/,/^}/p;/^sl_path_bash() {/,/^}/p' '$DOCTOR')\"
+    \"\$@\"" _ "$@"
+}
+printf '#!/bin/sh\nshift; printf "%%s\\n" "$1"\n' > "$W28/cyg"; chmod +x "$W28/cyg"   # identity cygpath
+
+# #A: a bash on PATH inside the project is skipped for one outside it -- and with
+# none outside, nothing is returned (never a bare `bash`, never the project file)
+W28P="$W28/proj"; mkdir -p "$W28P/.git" "$W28P/src" "$W28P/bin" "$W28/sys"
+printf '#!/bin/sh\nexit 0\n' > "$W28P/bin/bash"; chmod +x "$W28P/bin/bash"
+printf '#!/bin/sh\nexit 0\n' > "$W28/sys/bash";  chmod +x "$W28/sys/bash"
+got=$(cd "$W28P/src" && PATH="$W28P/bin:$W28/sys:/usr/bin:/bin" sl_fn sl_path_bash)
+check_eq "w28: the PATH fallback skips a bash inside the project" "$W28/sys/bash" "$got"
+got=$(cd "$W28P/src" && PATH="$W28P/bin" sl_fn sl_path_bash)
+check_eq "w28: ...and with none outside it returns nothing" "" "$got"
+got=$(cd "$W28P/src" && env -u CLAUDE_CODE_GIT_BASH_PATH PATH="$W28P/bin" sl_fn sl_bash_path)
+check_eq "w28: sl_bash_path never falls back to a bare bash" "" "$got"
+
+# #B: the usr/bin -> bin promotion must pass the same provenance rule
+W28G="$W28/git"; mkdir -p "$W28G/usr/bin"
+printf '#!/bin/sh\nexit 0\n' > "$W28G/usr/bin/bash.exe"; chmod +x "$W28G/usr/bin/bash.exe"; : > "$W28G/usr/bin/git.exe"
+ln -s "$W28G/usr" "$W28P/usr" 2>/dev/null
+printf '#!/bin/sh\nexit 0\n' > "$W28P/bin/bash.exe"; chmod +x "$W28P/bin/bash.exe"
+if [ -L "$W28P/usr" ]; then
+  got=$(cd "$W28P/src" && CLAUDE_CODE_GIT_BASH_PATH="$W28P/usr/bin/bash.exe" PATH="$W28/sys:/usr/bin:/bin" sl_fn sl_bash_path)
+  case $got in
+    "$W28P/bin/"*) echo "FAIL - w28: the promotion re-admitted a project bin/bash.exe ($got)"; FAIL=$((FAIL+1)) ;;
+    *)             echo "ok - w28: the promotion does not re-admit a project bin/bash.exe"; PASS=$((PASS+1)) ;;
+  esac
+else
+  skip_note "w28 promotion bypass (no symlinks on this host)"
+fi
+
+# #D: containment is by identity -- a symlinked spelling of the project is still the project
+ln -s "$W28P" "$W28/alias" 2>/dev/null
+if [ -L "$W28/alias" ]; then
+  got=$(cd "$W28P/src" && bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; under_workspace '$W28/alias/bin' && echo in || echo out")
+  check_eq "w28: a symlinked spelling of the project is inside it" "in" "$got"
+else
+  skip_note "w28 identity containment (no symlinks on this host)"
+fi
+
+# #H: a local-scope key is matched by identity, not spelling
+jq -n --arg k "$W28/alias" '{projects:{($k):{mcpServers:{headroom:{command:"/nonexistent/headroom"}}}}}' > "$W28/alias.json"
+if [ -L "$W28/alias" ]; then
+  got=$(cd "$W28P" && HEADROOM_CLAUDE_JSON="$W28/alias.json" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; mcp_local_cmd")
+  check_eq "w28: a local-scope key in another spelling of the root still matches" "/nonexistent/headroom" "$got"
+fi
+
+# #F: bytes-equality proves only a WORKING copy, never a dead verdict
+printf 'x\n' > "$W28/c1"; printf 'x\n' > "$W28/c2"
+got=$(bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; same_file '$W28/c1' '$W28/c2' && echo same || echo diff")
+check_eq "w28: identical bytes are not the same file by default" "diff" "$got"
+got=$(bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; same_file '$W28/c1' '$W28/c2' bytes && echo same || echo diff")
+check_eq "w28: ...only when the caller asks for bytes" "same" "$got"
+
+# #E: a bounded child never reads the caller's stdin (watchdog and timeout paths)
+mkdir -p "$W28/notimeout"; link_tool "$(command -v sleep)" "$W28/notimeout/sleep"; link_tool "$(command -v cat)" "$W28/notimeout/cat"
+got=$(printf 'HOOK-JSON\n' | PATH="$W28/notimeout" /bin/bash -c ". '$ER'; _er_bounded 2 cat")
+check_eq "w28: the watchdog path gives the child /dev/null, not the hook's stdin" "" "$got"
+got=$(printf 'HOOK-JSON\n' | bash -c ". '$ER'; _er_bounded 2 cat")
+check_eq "w28: ...and so does the timeout-binary path" "" "$got"
+
+# round-4: the watchdog kills the child's whole process group
+rm -f "$W28/gc.pid"
+( cd "$W28" && PATH="$W28/notimeout" /bin/bash -c ". '$ER'; _er_bounded 1 /bin/sh -c 'sleep 30 & echo \$! > gc.pid; wait'" ) >/dev/null 2>&1
+sleep 1
+if [ -s "$W28/gc.pid" ] && ! kill -0 "$(cat "$W28/gc.pid")" 2>/dev/null; then
+  echo "ok - w28: a timed-out probe's grandchild is killed too"; PASS=$((PASS+1))
+else
+  echo "FAIL - w28: a timed-out probe left its grandchild running"; FAIL=$((FAIL+1))
+  kill "$(cat "$W28/gc.pid" 2>/dev/null)" 2>/dev/null
+fi
+
+# reliability: a stalled git is bounded; the .git walk takes over
+mkdir -p "$W28/slowgit" "$W28/walk/.git" "$W28/walk/x"
+printf '#!/bin/sh\nsleep 20\n' > "$W28/slowgit/git"; chmod +x "$W28/slowgit/git"
+t0=$(date +%s)
+got=$(cd "$W28/walk/x" && PATH="$W28/slowgit:/usr/bin:/bin" ER_GIT_TIMEOUT=1 bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; workspace_root \"\$(pwd -P)\"")
+t1=$(date +%s)
+check_eq "w28: a stalled git falls back to the .git walk" "$(cd "$W28/walk" && pwd -P)" "$got"
+[ $((t1 - t0)) -lt 10 ]; pass_fail "w28: ...within the bound ($((t1 - t0))s)" $?
+
+# the lib guard: a checkout without doctor-mcp.sh refuses to run
+mkdir -p "$W28/partial/scripts/lib"
+cp "$DOCTOR" "$W28/partial/scripts/doctor.sh"
+cp "$ROOT/scripts/lib/engine-resolve.sh" "$ROOT/scripts/lib/headroom-state.sh" "$W28/partial/scripts/lib/"
+out=$(bash "$W28/partial/scripts/doctor.sh" 2>&1); rc=$?
+check_eq "w28: a checkout missing doctor-mcp.sh exits 1" "1" "$rc"
+check "w28: ...saying the lib is missing or stale" "doctor-mcp.sh missing or stale" "$out"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

@@ -73,7 +73,8 @@ done
 # shellcheck disable=SC1090,SC1091
 [ -f "$SELF_DIR/lib/doctor-mcp.sh" ] && . "$SELF_DIR/lib/doctor-mcp.sh"
 if ! type engine_python_candidates >/dev/null 2>&1 || ! type under_workspace >/dev/null 2>&1 \
-   || ! type resolve_engine_python_validated >/dev/null 2>&1 || ! type claude_json_path >/dev/null 2>&1; then
+   || ! type resolve_engine_python_validated >/dev/null 2>&1 || ! type claude_json_path >/dev/null 2>&1 \
+   || ! type headroom_hijack_file >/dev/null 2>&1 || ! type _er_bounded >/dev/null 2>&1; then
   echo "doctor: scripts/lib/engine-resolve.sh or doctor-mcp.sh missing or stale — partial plugin checkout; reinstall the plugin" >&2
   exit 1
 fi
@@ -528,7 +529,7 @@ sl_prefer_wrapper_bash() {  # <bash path, native or POSIX spelling> → possibly
   printf '%s\n' "$p"
 }
 sl_bash_path() {  # → the bash a Windows statusLine.command should run through
-  local b nl cr bdir _sl_ov _sl_ovdir _sl_bdir
+  local b nl cr bdir _sl_ov _sl_ovdir _sl_bdir _sl_pre
   # CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT-scoped
   # settings.json — i.e. from repo config. `--fix` persists what we print here
   # into ~/.claude/settings.json as statusLine.command, which Claude Code then
@@ -607,22 +608,49 @@ sl_bash_path() {  # → the bash a Windows statusLine.command should run through
     _sl_ovdir=$(cd "$(dirname "$_sl_ov")" 2>/dev/null && pwd -P) || _sl_ovdir=$(dirname "$_sl_ov")
     under_workspace "$_sl_ovdir" && b=""
   fi
-  if [ -z "$b" ] || [ ! -f "$b" ]; then
-    b=$(command -v bash)
-    # The PATH fallback gets the same provenance rule: a bash resolved from
-    # inside the project is not a Git for Windows install. Name it bare and let
-    # Claude Code resolve `bash` itself rather than persist a project file.
-    if [ -n "$b" ]; then
-      _sl_bdir=$(cd "$(dirname "$b")" 2>/dev/null && pwd -P) || _sl_bdir=$(dirname "$b")
-      under_workspace "$_sl_bdir" && b=bash
-    fi
-  fi
+  # The PATH fallback gets the same provenance rule: the first bash on PATH
+  # that is NOT inside the project. None at all -> print nothing, and the
+  # callers refuse to wire rather than persist a project file or a bare name
+  # (which Windows would resolve cwd-first -- the very hijack refused here).
+  if [ -z "$b" ] || [ ! -f "$b" ]; then b=$(sl_path_bash); fi
+  [ -n "$b" ] || return 0
+  _sl_pre=$b
   b=$(sl_prefer_wrapper_bash "$b")
+  # ...and the usr/bin -> bin promotion is a NEW path: it must pass the rule
+  # too, or a project `usr` symlink beside a planted bin/bash.exe re-admits it.
+  if [ "$b" != "$_sl_pre" ]; then
+    # Only an absolute POSIX spelling can be located: `dirname` of a native
+    # C:\... that unix_path could not convert is ".", which would mis-read the
+    # cwd as the promoted file's home. (sl_prefer_wrapper_bash only promotes to
+    # a file it just stat-ed, so an unconvertible spelling is not an escape.)
+    _sl_bdir=""
+    case $(unix_path "$b") in
+      /*) _sl_bdir=$(cd "$(dirname "$(unix_path "$b")")" 2>/dev/null && pwd -P) || _sl_bdir="" ;;
+    esac
+    [ -n "$_sl_bdir" ] && under_workspace "$_sl_bdir" && b=$_sl_pre
+  fi
   # normalize the ACCEPTED value too, not just the fallback: an override may be
   # POSIX-spelled (/c/Program Files/Git/bin/bash.exe) and Claude Code executes
   # this command outside Git Bash, where only the native spelling resolves.
   # `cygpath -w` on an already-Windows path is a no-op, so one pass covers both.
   win_path "$b"
+}
+sl_path_bash() {  # the first bash on PATH outside the project, empty if none
+  # PATH is split once into an array, so the loop body (which spawns git via
+  # under_workspace) never shares a stdin stream with the iteration itself.
+  local d c dc
+  local -a dirs
+  IFS=: read -r -a dirs <<< "$PATH"
+  for d in "${dirs[@]}"; do
+    [ -n "$d" ] || continue
+    for c in "$d/bash" "$d/bash.exe"; do
+      [ -f "$c" ] && [ -x "$c" ] || continue
+      dc=$(cd "$d" 2>/dev/null && pwd -P) || continue
+      under_workspace "$dc" && continue
+      printf '%s\n' "$c"; return 0
+    done
+  done
+  return 0
 }
 sl_hr_cmd() {  # sl_hr_cmd <script> — the statusLine.command to write for this platform
   if is_windows; then
@@ -792,7 +820,11 @@ elif cli_res=$(resolve_headroom_cli); then
         if [ -f "$TMPD/shim-written" ]; then
           rm -f "$shim" && shim_gone=" (the broken shim was removed)"
         fi
-        CLI_DEAD_PATH=$cli_res   # the ENGINE it stands for: the shim is deleted just above
+        # A POSIX shim is a symlink, so a dead one IS the dead engine: hand the
+        # verdict on (the shim itself is deleted just above). A Windows shim is
+        # a byte COPY -- a relocatable launcher can die as a copy while the
+        # original runs -- so there 2c must still probe the engine itself.
+        is_windows || CLI_DEAD_PATH=$cli_res
         say FAIL "headroom shimmed to $shim but it does not run (\`$shim --help\` failed)$shim_gone — reinstall the engine: $(reinstall_hint)"
       else
         # Say the restart part too. Reaching check 2b at all means the bundled
@@ -872,7 +904,7 @@ if [ "$mcp_need" -eq 1 ]; then
   # verdict rather than spawning it again and reporting one dead file twice.
   mcp_dead=0; mcp_dead_seen=0
   if [ -z "$mcp_abs" ]; then :
-  elif same_file "$mcp_abs" "${CLI_OK_PATH:-}"; then :
+  elif same_file "$mcp_abs" "${CLI_OK_PATH:-}" bytes; then :
   elif same_file "$mcp_abs" "${CLI_DEAD_PATH:-}"; then mcp_abs=""; mcp_dead=1; mcp_dead_seen=1
   elif ! shim_runs "$(unix_path "$mcp_abs")"; then mcp_abs=""; mcp_dead=1
   fi
@@ -1237,7 +1269,7 @@ else
       # leaves everything else (a chained foreign command included) untouched.
       sl_good_bash=$(sl_bash_path)
       if [ "$FIX" -ne 1 ]; then
-        say fixable "statusLine runs through $sl_interp_missing but no such interpreter exists — the badge cannot render; --fix repoints it at $sl_good_bash"
+        say fixable "statusLine runs through $sl_interp_missing but no such interpreter exists — the badge cannot render; --fix repoints it at ${sl_good_bash:-a Git for Windows bash (none found outside this project yet)}"
       elif [ ! -f "$sl_good_bash" ] && [ ! -f "$(unix_path "$sl_good_bash")" ]; then
         say FAIL "statusLine runs through $sl_interp_missing but no such interpreter exists, and no working bash was found to replace it with — install Git for Windows, or fix statusLine.command in settings.json by hand"
       elif ! backup_settings; then
@@ -1421,6 +1453,10 @@ CHEOF
         [ "$sl_chain_ok" -eq 1 ] && sl_chain=$(sl_hr_cmd "$sl_chain_path")
       fi
       mkdir -p "$CLAUDE_DIR/lib"
+      # No Git for Windows bash outside the project: refuse to wire rather than
+      # persist a project file or a bare `bash` (resolved cwd-first on Windows).
+      sl_no_bash=0
+      if is_windows && [ -z "$(sl_bash_path)" ]; then sl_no_bash=1; sl_chain_ok=0; fi
       if [ "$sl_chain_ok" -eq 1 ] \
          && cp "$PLUGIN_ROOT/scripts/lib/attribution.jq"    "$CLAUDE_DIR/lib/" \
          && cp "$PLUGIN_ROOT/scripts/lib/headroom-state.sh" "$CLAUDE_DIR/lib/" \
@@ -1433,6 +1469,8 @@ CHEOF
         else
           say fixed "statusLine wired to $sl_disp (script copied, backup: settings.json.bak.*)"
         fi
+      elif [ "$sl_no_bash" -eq 1 ]; then
+        say FAIL "no Git for Windows bash was found outside this project (a bash inside the project is never wired) — install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH to its bash.exe, then re-run --fix; settings.json left untouched"
       elif [ "$sl_chain_ok" -eq 0 ]; then
         say FAIL "could not write the status-line chain script to $CLAUDE_DIR/headroom-statusline-chain.sh — settings.json left untouched"
       else

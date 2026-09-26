@@ -42,7 +42,9 @@ ambient-health failure (the `last-error` file that flips the statusline badge
 to "broken") can now be cleared. On Windows the doctor also confirms it is
 running under Git Bash (a stale `CLAUDE_CODE_GIT_BASH_PATH` is `FAIL`) and
 writes the status-line command with explicit Windows paths (`"C:\…\bash.exe"
-"C:\…\headroom-statusline.sh"`; when it has to merge with a status line you
+"C:\…\headroom-statusline.sh"`; the bash is never one found inside the current
+project — if no Git for Windows bash exists outside it, `--fix` FAILs and asks for
+Git for Windows or `CLAUDE_CODE_GIT_BASH_PATH` rather than wire anything; when it has to merge with a status line you
 already had, the chain lives in `~/.claude/headroom-statusline-chain.sh` so the
 stored command keeps that two-token shape).
 It also `FAIL`s when an executable named `headroom` (`.com`, `.exe`, `.bat`,

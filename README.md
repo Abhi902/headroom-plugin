@@ -271,7 +271,7 @@ Do **not** run the legacy installer if the plugin is installed — you'd registe
 - `skills/doctor/SKILL.md` — the doctor: checks `jq`, the engine, the MCP, the hooks, the status line, and ambient-health state; fixes what you consent to, including legacy-install and project-settings cleanup.
 - `hooks/hooks.json` — plugin-native registration for session-probe (SessionStart), the hcat gate (PreToolUse), Dangi (PostToolUse), and the session ledger (Stop, SessionEnd).
 - `bin/hcat` — compress-at-the-source, on Claude's PATH while the plugin is enabled; falls back to a lossless TOON-lite (jq-only) rendering when the Python engine is absent.
-- `scripts/` — `statusline.sh`, `dangi-hook.sh`, `hcat-gate.sh`, `session-probe.sh`, `ledger-hook.sh`, `doctor.sh` (the working parts), plus `scripts/lib/` (`attribution.jq`, `headroom-state.sh`, `engine-resolve.sh` — shared deps the installer copies next to the status-line script).
+- `scripts/` — `statusline.sh`, `dangi-hook.sh`, `hcat-gate.sh`, `session-probe.sh`, `ledger-hook.sh`, `doctor.sh` (the working parts), plus `scripts/lib/` (`attribution.jq`, `headroom-state.sh`, `engine-resolve.sh` — shared deps the installer copies next to the status-line script; `doctor-mcp.sh` — the doctor's own workspace-containment and MCP-registration helpers, sourced only by `doctor.sh`).
 - `data/model-prices.json` — the badge's price table as data; adding a model is an edit here, not a code change.
 - `.mcp.json` — bundled headroom MCP server definition (`headroom mcp serve`, spawned by name).
 - `test.sh` — the synthetic-transcript test suite; run it from the repo root.
