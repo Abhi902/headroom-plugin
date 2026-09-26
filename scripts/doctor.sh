@@ -579,12 +579,12 @@ _sl_bash_path_compute() {
   # EXECUTES, so a hostile value must not survive into it.
   #
   # Rejecting only the double quote was not enough: inside the double-quoted
-  # word we print, exactly four things stay ACTIVE — `"` (closes the quoting),
+  # word we print, exactly five things stay ACTIVE — `"` (closes the quoting),
   # `$` (parameter AND command substitution: a path under a directory literally
   # named `$(cmd)` is a real, existing file, so the -f test below passes), a
-  # backtick (command substitution) and a newline/carriage return (starts a
-  # second command line). Reject all four. A BACKSLASH is deliberately
-  # ALLOWED: every native Windows path is full of them, and with the four
+  # backtick (command substitution), and a newline or a carriage return (each
+  # starts a second command line). Reject all five. A BACKSLASH is deliberately
+  # ALLOWED: every native Windows path is full of them, and with the five
   # above gone a backslash can neither introduce an expansion nor terminate
   # the quoting — the worst it can do is name a file that does not exist,
   # which the -f test already catches.

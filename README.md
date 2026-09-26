@@ -53,7 +53,7 @@ If any of those three don't happen, ask Claude to **run the headroom doctor** �
 
 This plugin does **not** compress anything by itself — the actual compression is done by **headroom**, a local Python engine (→ https://github.com/headroomlabs-ai/headroom). Think of it like a fuel gauge: **headroom is the engine, this plugin is the gauge** (plus, since v2.3, a hand that reaches for the fuel-saver button for you).
 
-The good news: you no longer have to plumb the engine in yourself. The plugin bundles the MCP server registration (its tools appear as `mcp__headroom__headroom_compress` and friends), and if the engine itself is missing, the **doctor** offers to bootstrap it into `~/.headroom-venv`. If headroom is absent and you decline, everything stays politely silent — the badge sits at "idle", the gate lets Reads through — nothing breaks.
+The good news: you no longer have to plumb the engine in yourself. The plugin bundles the MCP server registration (its tools appear as `mcp__plugin_headroom-usage-indicator_headroom__headroom_compress` and friends; a server you registered yourself shows up as `mcp__headroom__headroom_compress` — either works, and the badge counts both), and if the engine itself is missing, the **doctor** offers to bootstrap it into `~/.headroom-venv`. If headroom is absent and you decline, everything stays politely silent — the badge sits at "idle", the gate lets Reads through — nothing breaks.
 
 > **v2.7.3 — the bundled MCP server actually connects now.** From v2.5 through v2.7.2 the bundled registration was shipped broken: its launcher path carried literal quotes, and because Claude Code spawns an MCP `stdio` command *directly* (no shell ever unwraps quoting), every connection attempt died instantly and `/plugin` showed a ✗ beside headroom. It went unnoticed because anyone with a pre-plugin manual registration in `~/.claude.json` still had the tools from there. If you're upgrading, run **`/headroom-usage-indicator:doctor --fix`** once — it repairs an already-installed broken copy in place (with a backup), and from that release on it judged that launcher *exactly as spawned* rather than being fooled by its own quote-stripping (v2.8 removed the launcher and its quote-stripping altogether — the bundled MCP now spawns the bare `headroom` name).
 
@@ -229,7 +229,7 @@ The status-line copy (`~/.claude/headroom-statusline.sh`) stays — that one is 
 ## FAQ
 
 **It always says "idle" — why?**
-Most likely the headroom engine isn't installed or the MCP isn't loading. Ask Claude to **run the headroom doctor** — it checks each link in the chain and tells you which one is broken. (Manual check: `mcp__headroom__headroom_compress` should exist in your session's tools.)
+Most likely the headroom engine isn't installed or the MCP isn't loading. Ask Claude to **run the headroom doctor** — it checks each link in the chain and tells you which one is broken. (Manual check: `mcp__plugin_headroom-usage-indicator_headroom__headroom_compress` — or `mcp__headroom__headroom_compress` for a server you registered yourself — should exist in your session's tools.)
 
 If `/plugin` shows a **✗ beside headroom** and those tools are missing entirely, you're on a version between v2.5 and v2.7.2, where the bundled MCP registration could never connect. Update to v2.7.3 and run **`/headroom-usage-indicator:doctor --fix`** — see [The gauge and the engine](#the-gauge-and-the-engine).
 

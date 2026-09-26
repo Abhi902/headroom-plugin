@@ -666,7 +666,7 @@ check "dangi nudge: says plugin installs have it on PATH" "plugin installs have 
 check "dangi nudge: names legacy fallback" "~/.claude/hcat" "$out"
 check_absent "dangi nudge: no plugin-internal path" "bin/hcat" "$out"
 # the default (plugin) install exposes ONLY the namespaced tool: the nudge must name it
-check "dangi nudge: names the plugin-namespaced compress tool" "mcp__plugin_<plugin>_headroom__headroom_compress" "$out"
+check "dangi nudge: names the plugin-namespaced compress tool" "mcp__plugin_headroom-usage-indicator_headroom__headroom_compress" "$out"
 check "dangi nudge: ...and the hand-registered one" "or mcp__headroom__headroom_compress when registered by hand" "$out"
 
 if [ -n "$HEADROOM_PY" ]; then
@@ -5441,6 +5441,28 @@ got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28F/"'$(touch
 check_eq "w28f: the PATH fallback skips a bash under a \$(...)-named dir" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
 got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28F/"'$(touch pwned)' sl_fn sl_bash_path)
 check_eq "w28f: ...and with nothing else on PATH nothing is printed (refuse to wire)" "" "$got"
+# the INTAKE quote filter on the override itself: a Git-shaped override (git.exe
+# beside it, outside the project) under a $(...)-named dir is dropped at intake
+# and falls through to the PATH bash -- only that filter produces the fallback
+# (without it the final gate would refuse to wire and print nothing instead)
+mkdir -p "$W28F/q/"'$(touch pwned)dir'
+printf '#!/bin/sh\nexit 0\n' > "$W28F/q/"'$(touch pwned)dir/bash.exe'; chmod +x "$W28F/q/"'$(touch pwned)dir/bash.exe'
+: > "$W28F/q/"'$(touch pwned)dir/git.exe'
+got=$(cd "$W28P/src" && CLAUDE_CODE_GIT_BASH_PATH="$W28F/q/"'$(touch pwned)dir/bash.exe' PATH="$W28/sys:/usr/bin:/bin" sl_fn sl_bash_path)
+check_eq "w28f: a Git-shaped \$(...) override is dropped at intake (PATH fallback)" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+# the LAST gate on the printed value: an override that passes the intake filter
+# but canonicalises (through a symlink outside the project) into a $(...)-named
+# dir must print nothing, never the $(...) path
+case ${OSTYPE:-} in
+  msys*|cygwin*) skip_note "w28f: symlinked override into a \$-named dir (POSIX-only: MSYS ln -s copies)" ;;
+  *)
+    mkdir -p "$W28F/out/"'$(touch pwned)'"/bin"
+    printf '#!/bin/sh\nexit 0\n' > "$W28F/out/"'$(touch pwned)'"/bin/bash.exe"; chmod +x "$W28F/out/"'$(touch pwned)'"/bin/bash.exe"
+    : > "$W28F/out/"'$(touch pwned)'"/bin/git.exe"
+    ln -s "$W28F/out/"'$(touch pwned)'"/bin" "$W28F/gitlink"
+    got=$(cd "$W28P/src" && CLAUDE_CODE_GIT_BASH_PATH="$W28F/gitlink/bash.exe" PATH=/usr/bin:/bin sl_fn sl_bash_path)
+    check_eq "w28f: an override canonicalised into a \$(...) dir prints nothing" "" "$got" ;;
+esac
 got=$(bash -c ". '$ER'; eval \"\$(sed -n '/^_sl_quote_safe() {/,/^}/p' '$DOCTOR')\"; for v in 'C:\\Git\\bin\\bash.exe' '/c/a b/bash' 'a\"b' 'a\$b' 'a\`b' \"\$(printf 'a\\rb')\" 'a
 b'; do _sl_quote_safe \"\$v\" && printf y || printf n; done")
 check_eq "w28f: _sl_quote_safe passes paths and refuses the five active characters" "yynnnnn" "$got"
