@@ -39,6 +39,7 @@ type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # parti
   return 1
 }
 type is_windows >/dev/null 2>&1 || is_windows() { return 1; }
+type is_network_path >/dev/null 2>&1 || is_network_path() { case $1 in [\\/][\\/]*) return 0 ;; esac; return 1; }
 type note_error >/dev/null 2>&1 || note_error() { :; }
 [ -n "${STATE_DIR:-}" ] || STATE_DIR="${HEADROOM_STATE_DIR:-${HOME:-${TMPDIR:-/tmp}}/.claude/headroom-indicator}"
 
@@ -55,7 +56,11 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # --- 1b. Windows: hooks and the badge run through Git Bash; a stale override is an outage
-if is_windows && [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
+# A network share is named as one and never stat-ed (doctor check 0 says the same).
+if is_windows && is_network_path "${CLAUDE_CODE_GIT_BASH_PATH:-}"; then
+  note_error install "CLAUDE_CODE_GIT_BASH_PATH points at a network share"
+  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a network share ($CLAUDE_CODE_GIT_BASH_PATH) — Git for Windows is never installed on one; set it to the local Git\\bin\\bash.exe in settings.json env, or unset it"
+elif is_windows && [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
   note_error install "CLAUDE_CODE_GIT_BASH_PATH points at a missing file"
   add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a missing Git Bash ($CLAUDE_CODE_GIT_BASH_PATH) — fix it in settings.json env"
 fi

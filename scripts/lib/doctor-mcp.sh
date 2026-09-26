@@ -103,9 +103,11 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   home=$(_dm_canon "${HOME:-/}") || home=${HOME:-/}
   # The roots depend only on the cwd: compute them (up to three bounded git
   # spawns) once per cwd per run, not once per candidate, via the run's TMPD.
-  local cached _nl=$'\n'
+  local cached
   if cached=$(_dm_cache_get ws-roots "$pwd_c"); then
-    r2=${cached%%"$_nl"*}; r3=${cached#*"$_nl"}; r3=${r3%"$_nl"}
+    # read, not expansions: an EMPTY r3 must stay empty (r2's value is not a
+    # stand-in for it), and $() already dropped the trailing newline
+    { IFS= read -r r2; IFS= read -r r3; } <<< "$cached"
   else
     r2=$(worktree_top "$pwd_c"); r3=$(workspace_root "$pwd_c")
     _dm_cache_put ws-roots "$pwd_c" "$r2" "$r3"

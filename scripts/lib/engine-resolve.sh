@@ -18,6 +18,14 @@ is_windows() {  # exit 0 on Git Bash / MSYS / Cygwin
   return 1
 }
 
+is_network_path() {  # exit 0 when <path> is a network share: \\host\share, //host/share or any
+  # mix of the two separators (also \\?\ and \\.\ device prefixes, refused alike).
+  # A PURE string test -- callers use it to refuse a share BEFORE anything stats
+  # it, since a stat would reach out over the network.
+  case $1 in [\\/][\\/]*) return 0 ;; esac
+  return 1
+}
+
 _er_venv() { printf '%s' "${DOCTOR_VENV_DIR:-${HOME:-}/.headroom-venv}"; }
 
 headroom_name_variants() {  # every spelling Windows resolves for a bare `headroom`, in search order

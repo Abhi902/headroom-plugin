@@ -5313,8 +5313,10 @@ W28D="$W28/d"; mkdir -p "$W28D/ext/bin"
 printf '#!/bin/sh\nexit 0\n' > "$W28D/ext/bin/bash.exe"; chmod +x "$W28D/ext/bin/bash.exe"; : > "$W28D/ext/bin/git.exe"
 W28De=$(cd "$W28D/ext/bin" && pwd -P)
 # NON-vacuous UNC: this cygpath maps ANY share spelling onto a real Git-shaped bash
-# OUTSIDE the project, so every later rule (basename, git beside it, containment,
-# canonicalisation) would accept it -- only the intake refusal keeps it out.
+# OUTSIDE the project, so the basename, git-beside-it, containment and
+# canonicalisation rules would all accept it. For the slash-leading spellings
+# (//host, /\host) only the intake refusal keeps it out; the backslash-leading
+# ones are ALSO refused by the absolute-path rule, so they guard the pair.
 cat > "$W28D/cyg" <<DCYG
 #!/bin/sh
 m=\$1; shift
@@ -5383,6 +5385,35 @@ check_eq "w28d: _dm_cache_get serves only complete, same-key files" "c1=v
 c2=miss
 c1other=miss
 nope=miss" "$got"
+
+# --- w28e. REGRESSION (PR #10 review round 13).
+# The PATH fallback skips a network-share dir. On POSIX `//<abs>` names a REAL
+# directory, so without the rule the share spelling is returned (non-vacuous).
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="/$W28De:$W28/sys:/usr/bin:/bin" sl_fn sl_path_bash)
+check_eq "w28e: the PATH fallback skips a network-share dir" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+case ${OSTYPE:-} in
+  # on MSYS `//tmp/...` really IS a network path, so the spelling cannot be staged
+  msys*|cygwin*) skip_note "w28e: //-spelled PATH dir sanity (POSIX-only: // is a real share on MSYS)" ;;
+  *) got=$(cd "$W28P/src" && PATH="/$W28De:$W28/sys:/usr/bin:/bin" sl_fn eval '[ -f "/'"$W28De"'/bash.exe" ] && echo exists')
+     check_eq "w28e: ...(fixture sanity: the share spelling resolves on this host)" "exists" "$got" ;;
+esac
+# ...and one shared predicate decides "network share" for every caller
+got=$(bash -c ". '$ER'; for p in '\\\\h\\s' '//h/s' '\\/h' '/\\h' '/c/x' 'C:\\x' ''; do is_network_path \"\$p\" && printf 'y' || printf 'n'; done")
+check_eq "w28e: is_network_path classifies share / non-share spellings" "yyyynnn" "$got"
+# a two-field cache entry whose LAST field is empty round-trips as empty (the
+# ws-roots parse): $() strips the trailing newline, so a suffix split misread it
+got=$(bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; export TMPD='$W28D/t'
+  _dm_cache_put rt k foo ''; c=\$(_dm_cache_get rt k); { IFS= read -r a; IFS= read -r b; } <<< \"\$c\"; printf '[%s][%s]' \"\$a\" \"\$b\"")
+check_eq "w28e: an empty trailing cache field stays empty" "[foo][]" "$got"
+got=$(grep -c 'IFS= read -r r2; IFS= read -r r3; } <<< "$cached"' "$ROOT/scripts/lib/doctor-mcp.sh")
+check_eq "w28e: ...and under_workspace parses the roots that way" "1" "$got"
+# the SessionStart probe names a share override instead of stat-ing it
+mkdir -p "$W28/e/home"
+out=$(printf '{"session_id":"w28e"}' | env -u HCAT_PYTHON DOCTOR_OS=windows HOME="$W28/e/home" \
+      CLAUDE_CODE_GIT_BASH_PATH="/$W28De/bash.exe" PATH="$STUB:/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W28/e/pstate" bash "$PROBE")
+check "w28e: the probe reports a share override as a network share" "points at a network share" "$out"
+check_absent "w28e: ...not as a missing Git Bash" "points at a missing Git Bash" "$out"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

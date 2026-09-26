@@ -74,7 +74,8 @@ done
 [ -f "$SELF_DIR/lib/doctor-mcp.sh" ] && . "$SELF_DIR/lib/doctor-mcp.sh"
 if ! type engine_python_candidates >/dev/null 2>&1 || ! type under_workspace >/dev/null 2>&1 \
    || ! type resolve_engine_python_validated >/dev/null 2>&1 || ! type claude_json_path >/dev/null 2>&1 \
-   || ! type headroom_hijack_file >/dev/null 2>&1 || ! type _er_bounded >/dev/null 2>&1; then
+   || ! type headroom_hijack_file >/dev/null 2>&1 || ! type _er_bounded >/dev/null 2>&1 \
+   || ! type is_network_path >/dev/null 2>&1; then
   echo "doctor: scripts/lib/engine-resolve.sh or doctor-mcp.sh missing or stale — partial plugin checkout; reinstall the plugin" >&2
   exit 1
 fi
@@ -129,11 +130,7 @@ backup_settings() {
 
 # --- 0. platform — on Windows every hook and the status line run through Git Bash
 if is_windows; then
-  case ${CLAUDE_CODE_GIT_BASH_PATH:-} in
-    [\\/][\\/]*) _gb_unc=1 ;;   # a network share: refused below, never stat-ed
-    *) _gb_unc=0 ;;
-  esac
-  if [ "$_gb_unc" -eq 1 ]; then
+  if is_network_path "${CLAUDE_CODE_GIT_BASH_PATH:-}"; then   # refused below, never stat-ed
     say FAIL "CLAUDE_CODE_GIT_BASH_PATH points at a network share ($CLAUDE_CODE_GIT_BASH_PATH) — Git for Windows is never installed on one, and the doctor will not wire it; set it to the local Git\\bin\\bash.exe or unset it"
   elif [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
     # Actionable like session-probe.sh's twin line: the usual cause is a STALE
@@ -539,9 +536,8 @@ sl_bash_path() {  # → the bash a Windows statusLine.command should run through
   # cwd, and computing it spawns git per candidate. Cache it in the run's TMPD.
   # Keyed on the cwd (line 1), like the ws-roots cache: a later caller that
   # changed directory must not read another project's answer.
-  local _slc _slb _nl=$'\n'
+  local _slc _slb
   if _slc=$(_dm_cache_get sl-bash "$PWD"); then
-    _slc=${_slc%"$_nl"}
     [ -n "$_slc" ] && printf '%s\n' "$_slc"; return 0
   fi
   _slb=$(_sl_bash_path_compute)
@@ -592,7 +588,7 @@ _sl_bash_path_compute() {
   # A network share (\\host\share, //host/share, or any mix of the two
   # separators) is refused BEFORE anything below stats it: Git for Windows is
   # never installed on one, and probing it would reach out to the network.
-  case $b in [\\/][\\/]*) b="" ;; esac
+  is_network_path "$b" && b=""
   # ...and it has to actually BE bash. The filter above only proves the value
   # cannot break out of the quoted word; it does not prove identity, and merely
   # existing on disk is not identity either. What we print is persisted into the
@@ -693,9 +689,14 @@ sl_path_bash() {  # the first bash on PATH outside the project, empty if none
   IFS=: read -r -a dirs <<< "$PATH"
   for d in "${dirs[@]}"; do
     [ -n "$d" ] || continue
+    # the same network-share rule as an override: PATH can come from project
+    # settings env too, and a share is never where Git for Windows lives --
+    # refused before the -f below stats it
+    is_network_path "$d" && continue
     for c in "$d/bash" "$d/bash.exe"; do
       [ -f "$c" ] && [ -x "$c" ] || continue
       dc=$(cd "$d" 2>/dev/null && pwd -P) || continue
+      is_network_path "$dc" && continue   # e.g. a symlink onto a share
       under_workspace "$dc" && continue
       # System32\bash.exe is WSL's launcher, not Git for Windows' bash
       # (bracket classes, not tr: this must work on whatever PATH is given)
