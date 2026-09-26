@@ -25,7 +25,7 @@ export HEADROOM_STATE_DIR="$TMP/state"
 # hosts; the one fixture that tests the PE refusal unsets it explicitly.
 export DOCTOR_FAKE_PE=1
 # The Windows bash-preference fixtures put a FAKE `bash` first on PATH so the
-# doctor's own `command -v bash` finds it. That must not also hijack the bash
+# doctor's PATH fallback (sl_path_bash) finds it. That must not also hijack the bash
 # used to RUN the doctor, so resolve a real one now, before any such games.
 BASHBIN=$(command -v bash)
 
@@ -5307,6 +5307,82 @@ got=$(cd "$W28W/proj/src" && CLAUDE_CODE_GIT_BASH_PATH='C:\Git\bin\bash.exe' DOC
       PATH="$W28/sys:/usr/bin:/bin" SL_FUNCS="$SL_FUNCS" DOCTOR_OS=windows DOCTOR_CYGPATH="$W28W/cyg" "$BASHBIN" -c "
         . '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; eval \"\$SL_FUNCS\"; sl_bash_path")
 check_eq "w28c: a native Git override is persisted as Git\\bin\\bash.exe, not collapsed to usr\\bin" 'C:\Git\bin\bash.exe' "$got"
+
+# --- w28d. REGRESSION (PR #10 review round 12).
+W28D="$W28/d"; mkdir -p "$W28D/ext/bin"
+printf '#!/bin/sh\nexit 0\n' > "$W28D/ext/bin/bash.exe"; chmod +x "$W28D/ext/bin/bash.exe"; : > "$W28D/ext/bin/git.exe"
+W28De=$(cd "$W28D/ext/bin" && pwd -P)
+# NON-vacuous UNC: this cygpath maps ANY share spelling onto a real Git-shaped bash
+# OUTSIDE the project, so every later rule (basename, git beside it, containment,
+# canonicalisation) would accept it -- only the intake refusal keeps it out.
+cat > "$W28D/cyg" <<DCYG
+#!/bin/sh
+m=\$1; shift
+case "\$m:\$1" in
+  -u:[\\\\/][\\\\/]*) printf '%s/%s\n' '$W28De' "\${1##*[\\\\/]}" ;;
+  *) printf '%s\n' "\$1" ;;
+esac
+DCYG
+chmod +x "$W28D/cyg"
+# sanity: the stub really does resolve a share onto the outside bash
+got=$(DOCTOR_CYGPATH="$W28D/cyg" bash -c ". '$ER'; unix_path '\\\\host\\share\\bin\\bash.exe'")
+check_eq "w28d: the share-mapping cygpath stub resolves (fixture sanity)" "$W28De/bash.exe" "$got"
+for unc in '\\host\share\bin\bash.exe' '//host/share/bin/bash.exe' '\/host/share/bin/bash.exe' '/\host\share\bin\bash.exe'; do
+  got=$(cd "$W28P/src" && CLAUDE_CODE_GIT_BASH_PATH="$unc" PATH="$W28/sys:/usr/bin:/bin" SL_FUNCS="$SL_FUNCS" DOCTOR_OS=windows \
+        DOCTOR_CYGPATH="$W28D/cyg" "$BASHBIN" -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; eval \"\$SL_FUNCS\"; sl_bash_path")
+  check_eq "w28d: a resolvable network-share override is still refused ($unc)" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+done
+# check 0 names the share instead of stat-ing it into a "missing file"
+W28Dn="$W28D/nb"; mkdir -p "$W28Dn/cd"
+printf '{"statusLine":{"type":"command","command":"echo mine"}}\n' > "$W28Dn/s.json"
+out=$(cd "$W28P/src" && env -u HCAT_PYTHON CLAUDE_CODE_GIT_BASH_PATH='//host/share/bin/bash.exe' DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" \
+      DOCTOR_SETTINGS="$W28Dn/s.json" DOCTOR_CLAUDE_DIR="$W28Dn/cd" DOCTOR_VENV_DIR="$NOVENV" \
+      DOCTOR_SHIM_DIR="$W28Dn/shim" HEADROOM_STATE_DIR="$W28Dn/state" "$BASHBIN" "$DOCTOR" 2>&1)
+check "w28d: check 0 reports a network-share override as such" "points at a network share (//host/share/bin/bash.exe)" "$out"
+check_absent "w28d: ...not as a missing file" "points at a missing file" "$out"
+# The next three need "no bash outside the project", which a real Windows host
+# cannot stage (see the w28b note in .github/windows-known-failures.txt) -- a
+# COUNTED skip there, never a silent one; ubuntu/macos run them.
+case ${OSTYPE:-} in
+  msys*|cygwin*) skip_note "w28d: refused --fix / clean stderr / dead-interpreter sentence (POSIX-ONLY fixture)" ;;
+  *)
+  # a refused --fix writes NOTHING under the claude dir, and a cold TMPD leaves stderr clean
+  cp "$W28Dn/s.json" "$W28Dn/s.orig"
+  out=$(cd "$W28P/src" && env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" \
+        PATH="$W28N/tools:$W28P/bin" DOCTOR_SETTINGS="$W28Dn/s.json" DOCTOR_CLAUDE_DIR="$W28Dn/cd" DOCTOR_VENV_DIR="$NOVENV" \
+        DOCTOR_SHIM_DIR="$W28Dn/shim" HEADROOM_STATE_DIR="$W28Dn/state" "$BASHBIN" "$DOCTOR" --fix 2>"$W28Dn/err")
+  check "w28d: the refused --fix fixture really was refused" "no Git for Windows bash was found outside this project" "$out"
+  got=$(cd "$W28Dn" && ls -A cd; for f in s.json.bak.*; do [ -e "$f" ] && printf '%s\n' "$f"; done)
+  check_eq "w28d: ...leaving no backup, lib/ or price file behind" "" "$got"
+  check_absent "w28d: the doctor's stderr is clean on a cold TMPD" "No such file" "$(cat "$W28Dn/err")"
+  # the dead-interpreter FAIL is one complete sentence (no dangling "repoint it at")
+  out=$(cd "$W28P/src" && env -u HCAT_PYTHON -u CLAUDE_CODE_GIT_BASH_PATH DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" \
+        PATH="$W28N/tools:$W28P/bin" DOCTOR_SETTINGS="$W28C/dead.json" DOCTOR_CLAUDE_DIR="$W28N/cd" DOCTOR_VENV_DIR="$NOVENV" \
+        DOCTOR_SHIM_DIR="$W28N/shim" HEADROOM_STATE_DIR="$W28N/state" "$BASHBIN" "$DOCTOR" 2>&1)
+  got=$(printf '%s\n' "$out" | grep 'no such interpreter exists')
+  case $got in
+    *"no such interpreter exists, and no Git for Windows bash was found outside this project"*) ;;
+    *) got="MISSING: $got" ;;
+  esac
+  check_absent "w28d: the dead-interpreter FAIL has no dangling clause" "repoint it at" "$got"
+  check_absent "w28d: ...and the sentence is present" "MISSING:" "$got"
+    ;;
+esac
+# the promotion FAILS CLOSED: a promoted path that cannot be canonicalised is dropped
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28/sys:/usr/bin:/bin" \
+      sl_fn eval "sl_prefer_wrapper_bash() { printf '%s\n' '$W28D/no/such/dir/bash.exe'; }; sl_bash_path")
+check_eq "w28d: an uncanonicalisable promotion falls back to the checked bash" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+# a truncated cache file (no terminating ".") is a miss, never a stale value
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28/sys:/usr/bin:/bin" \
+      sl_fn eval "export TMPD='$W28D/t'; mkdir -p \"\$TMPD\"; printf '%s\n%s\n' \"\$PWD\" '/bogus/bash.exe' > \"\$TMPD/sl-bash\"; sl_bash_path")
+check_eq "w28d: a truncated sl-bash cache is recomputed" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+got=$(bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; export TMPD='$W28D/t'
+  printf 'k\nv\n.\n' > \"\$TMPD/c1\"; printf 'k\nv\n' > \"\$TMPD/c2\"
+  a=\$(_dm_cache_get c1 k) && echo \"c1=\$a\"; _dm_cache_get c2 k || echo c2=miss; _dm_cache_get c1 other || echo c1other=miss; _dm_cache_get nope k 2>&1 || echo nope=miss")
+check_eq "w28d: _dm_cache_get serves only complete, same-key files" "c1=v
+c2=miss
+c1other=miss
+nope=miss" "$got"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

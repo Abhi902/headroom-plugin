@@ -30,6 +30,29 @@ _dm_git() {  # _dm_git <dir> <rev-parse args...> — git, answering for <dir> ON
 }
 _dm_canon() { (cd "$1" 2>/dev/null && pwd -P); }
 
+# Per-run memo files in the doctor's own TMPD, keyed on the cwd. ONE reader and
+# ONE writer for every cache here: builtins only (callers may run under a
+# restricted PATH), silent on a cold cache, and a file counts only when it is
+# COMPLETE -- the writer ends it with a "." line, so a half-written file (a run
+# killed mid-write) is a miss, never a stale answer.
+_dm_cache_get() {  # _dm_cache_get <name> <key> -- prints the cached lines; 1 on a miss
+  local f l out="" seen=0
+  [ -n "${TMPD:-}" ] && [ -f "$TMPD/$1" ] || return 1
+  f="$TMPD/$1"
+  { IFS= read -r l && [ "$l" = "$2" ]; } < "$f" 2>/dev/null || return 1
+  while IFS= read -r l; do
+    [ "$seen" -eq 1 ] || { seen=1; continue; }      # skip the key line
+    [ "$l" = "." ] && { printf '%s' "$out"; return 0; }
+    out="$out$l"$'\n'
+  done < "$f"
+  return 1
+}
+_dm_cache_put() {  # _dm_cache_put <name> <key> <line...>
+  local n=$1 k=$2; shift 2
+  [ -n "${TMPD:-}" ] || return 0
+  { printf '%s\n' "$k"; [ $# -gt 0 ] && printf '%s\n' "$@"; printf '.\n'; } > "$TMPD/$n" 2>/dev/null
+}
+
 _dm_dotgit_walk() {  # nearest ancestor of <dir> holding .git (dir or file), empty if none
   # Pure parameter expansion: this is the no-git fallback, so it must not lean
   # on any other external tool either.
@@ -80,14 +103,12 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   home=$(_dm_canon "${HOME:-/}") || home=${HOME:-/}
   # The roots depend only on the cwd: compute them (up to three bounded git
   # spawns) once per cwd per run, not once per candidate, via the run's TMPD.
-  # (builtin reads, not sed: callers may run under a restricted PATH)
-  local ck=""
-  [ -n "${TMPD:-}" ] && { IFS= read -r ck; IFS= read -r r2; IFS= read -r r3; } < "$TMPD/ws-roots" 2>/dev/null
-  if [ -n "$ck" ] && [ "$ck" = "$pwd_c" ]; then
-    :
+  local cached _nl=$'\n'
+  if cached=$(_dm_cache_get ws-roots "$pwd_c"); then
+    r2=${cached%%"$_nl"*}; r3=${cached#*"$_nl"}; r3=${r3%"$_nl"}
   else
     r2=$(worktree_top "$pwd_c"); r3=$(workspace_root "$pwd_c")
-    [ -n "${TMPD:-}" ] && printf '%s\n%s\n%s\n' "$pwd_c" "$r2" "$r3" > "$TMPD/ws-roots" 2>/dev/null
+    _dm_cache_put ws-roots "$pwd_c" "$r2" "$r3"
   fi
   r1=$pwd_c
   a=$d

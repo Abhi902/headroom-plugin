@@ -129,7 +129,13 @@ backup_settings() {
 
 # --- 0. platform — on Windows every hook and the status line run through Git Bash
 if is_windows; then
-  if [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
+  case ${CLAUDE_CODE_GIT_BASH_PATH:-} in
+    [\\/][\\/]*) _gb_unc=1 ;;   # a network share: refused below, never stat-ed
+    *) _gb_unc=0 ;;
+  esac
+  if [ "$_gb_unc" -eq 1 ]; then
+    say FAIL "CLAUDE_CODE_GIT_BASH_PATH points at a network share ($CLAUDE_CODE_GIT_BASH_PATH) — Git for Windows is never installed on one, and the doctor will not wire it; set it to the local Git\\bin\\bash.exe or unset it"
+  elif [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
     # Actionable like session-probe.sh's twin line: the usual cause is a STALE
     # variable on a box that has Git Bash, so name where the value lives before
     # suggesting an install.
@@ -533,14 +539,13 @@ sl_bash_path() {  # → the bash a Windows statusLine.command should run through
   # cwd, and computing it spawns git per candidate. Cache it in the run's TMPD.
   # Keyed on the cwd (line 1), like the ws-roots cache: a later caller that
   # changed directory must not read another project's answer.
-  # (builtin reads, not sed: callers may run under a restricted PATH)
-  local _slk _slv
-  if [ -n "${TMPD:-}" ] && { IFS= read -r _slk && IFS= read -r _slv; } < "$TMPD/sl-bash" 2>/dev/null \
-     && [ "$_slk" = "$PWD" ]; then
-    [ -n "$_slv" ] && printf '%s\n' "$_slv"; return 0
+  local _slc _slb _nl=$'\n'
+  if _slc=$(_dm_cache_get sl-bash "$PWD"); then
+    _slc=${_slc%"$_nl"}
+    [ -n "$_slc" ] && printf '%s\n' "$_slc"; return 0
   fi
-  local _slb; _slb=$(_sl_bash_path_compute)
-  [ -n "${TMPD:-}" ] && printf '%s\n%s\n' "$PWD" "$_slb" > "$TMPD/sl-bash" 2>/dev/null
+  _slb=$(_sl_bash_path_compute)
+  _dm_cache_put sl-bash "$PWD" "$_slb"
   [ -n "$_slb" ] && printf '%s\n' "$_slb"
   return 0
 }
@@ -584,6 +589,10 @@ _sl_bash_path_compute() {
   cr=$(printf '\r')
   b=${CLAUDE_CODE_GIT_BASH_PATH:-}
   case $b in *'"'*|*'$'*|*'`'*|*"$nl"*|*"$cr"*) b="" ;; esac
+  # A network share (\\host\share, //host/share, or any mix of the two
+  # separators) is refused BEFORE anything below stats it: Git for Windows is
+  # never installed on one, and probing it would reach out to the network.
+  case $b in [\\/][\\/]*) b="" ;; esac
   # ...and it has to actually BE bash. The filter above only proves the value
   # cannot break out of the quoted word; it does not prove identity, and merely
   # existing on disk is not identity either. What we print is persisted into the
@@ -620,11 +629,8 @@ _sl_bash_path_compute() {
     #     satisfies every rule above and the -f test below (both resolve against
     #     the workspace cwd) while never matching an absolute prefix -- so the
     #     prefix test alone let the payload straight through.
-    #     A network share (\\host\share, //host/share) is refused too: Git for
-    #     Windows is never installed on one, and a repo-controlled share is
-    #     exactly what must not be persisted into the GLOBAL settings.
+    #     (A network share was already refused at intake, above.)
     case $b in
-      //*|\\\\*) b="" ;;
       /*|[A-Za-z]:[\\/]*) ;;
       *) b="" ;;
     esac
@@ -663,12 +669,15 @@ _sl_bash_path_compute() {
   # too, or a project `usr` symlink beside a planted bin/bash.exe re-admits it.
   # (A spelling unix_path cannot locate is left alone: sl_prefer_wrapper_bash
   # only promotes to a file it just stat-ed, so it is not an escape.)
-  # The promoted path is kept as spelled: it is built from the already
-  # canonical pre-promotion path, and re-canonicalising it could collapse the
-  # wrapper back onto usr/bin through Git Bash's /bin alias.
-  if [ "$b" != "$_sl_pre" ] && _sl_canon=$(_sl_canon_file "$b") \
-     && under_workspace "$(dirname "$_sl_canon")"; then
-    b=$_sl_pre
+  # The promoted path is persisted as spelled (only CHECKED canonically): it is
+  # built from the already canonical pre-promotion path, and re-canonicalising
+  # it could collapse the wrapper back onto usr/bin through Git Bash's /bin alias.
+  # Fail CLOSED: a promoted path that cannot be located cannot be checked, so
+  # the (already checked) pre-promotion bash is kept instead.
+  if [ "$b" != "$_sl_pre" ]; then
+    if ! _sl_canon=$(_sl_canon_file "$b") || under_workspace "$(dirname "$_sl_canon")"; then
+      b=$_sl_pre
+    fi
   fi
   # normalize the ACCEPTED value too, not just the fallback: an override may be
   # POSIX-spelled (/c/Program Files/Git/bin/bash.exe) and Claude Code executes
@@ -1313,7 +1322,7 @@ else
       # leaves everything else (a chained foreign command included) untouched.
       sl_good_bash=$(sl_bash_path)
       if [ "$FIX" -ne 1 ] && [ -z "$sl_good_bash" ]; then
-        say FAIL "statusLine runs through $sl_interp_missing but no such interpreter exists, and $(sl_no_bash_reason) to repoint it at"
+        say FAIL "statusLine runs through $sl_interp_missing but no such interpreter exists, and $(sl_no_bash_reason)"
       elif [ "$FIX" -ne 1 ]; then
         say fixable "statusLine runs through $sl_interp_missing but no such interpreter exists — the badge cannot render; --fix repoints it at $sl_good_bash"
       elif [ ! -f "$sl_good_bash" ] && [ ! -f "$(unix_path "$sl_good_bash")" ]; then
