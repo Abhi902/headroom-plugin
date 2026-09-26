@@ -207,6 +207,9 @@ if [ -f "$STATE_DIR/last-error" ]; then
 fi
 
 if [ -n "$broken" ]; then
+  # Deliberately the short "/doctor" form: the badge is width-budgeted. Every
+  # full-sentence nudge (session probe, last-error, docs) names the real command,
+  # /headroom-usage-indicator:doctor — keep those qualified.
   printf '\033[33m▲ headroom broken (%s) · run /doctor\033[0m' "$broken"
 elif [ "$n" -gt 0 ] 2>/dev/null; then
   tok=$(fmt_tok "$saved")

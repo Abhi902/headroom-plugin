@@ -37,7 +37,7 @@ HCAT="$here/../bin/hcat"
 [ -x "$HCAT" ] || HCAT="$here/hcat"
 if [ ! -x "$HCAT" ]; then
   note_error install "hcat missing or not executable"
-  add_problem "hcat is missing or not executable — reinstall the plugin or run /doctor"
+  add_problem "hcat is missing or not executable — reinstall the plugin or run /headroom-usage-indicator:doctor"
 fi
 
 # --- 2b. shared libs — the badge/ledger read attribution.jq; the hooks source
@@ -67,7 +67,7 @@ else
   if [ -z "$py" ]; then
     # Never-installed engine is the ordinary red-idle state, not a breakage:
     # say it once at session start, but do not flip the badge to broken.
-    add_problem "headroom engine not installed — run /doctor --fix to bootstrap it"
+    add_problem "headroom engine not installed — run /headroom-usage-indicator:doctor --fix to bootstrap it"
   fi
 fi
 
@@ -86,16 +86,20 @@ if [ -z "$problems" ] && [ -f "$STATE_DIR/last-error" ]; then
   case "${le_ts:-}" in (*[!0-9]*|"") le_ts=0 ;; esac
   le_age=$(( $(date +%s) - le_ts ))
   if [ "$le_age" -ge 0 ] 2>/dev/null && [ "$le_age" -le 86400 ] 2>/dev/null; then
-    add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /doctor (doctor clears this once healthy)"
+    # Recorded messages already end with their own "run <doctor>" pointer; strip
+    # it (current or pre-rename wording) so the line names the command once.
+    le_msg="${le_msg%" — run /"*doctor}"
+    le_msg="${le_msg%"; run /"*doctor}"
+    add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /headroom-usage-indicator:doctor (doctor clears this once healthy)"
   fi
 fi
 
 # --- 5b. status line not wired yet — the one setup step a plugin can't perform
 # for you: Claude Code has no plugin field for the status line, so wiring it means
-# writing the user's settings.json, which only /doctor does (with consent). A
+# writing the user's settings.json, which only /headroom-usage-indicator:doctor does (with consent). A
 # freshly installed plugin therefore shows no badge until that step. Nudge about
 # it — but only when everything else is healthy: a broken toolchain is the bigger
-# fish, and /doctor --fix wires the status line while repairing it anyway. This is
+# fish, and /headroom-usage-indicator:doctor --fix wires the status line while repairing it anyway. This is
 # a setup reminder, never a breakage: it does not write last-error or flip the
 # badge to "broken".
 if [ -z "$problems" ] && command -v jq >/dev/null 2>&1; then

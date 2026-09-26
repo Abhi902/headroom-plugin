@@ -355,6 +355,11 @@ printf '{"k":1}' > "$TMP/hc_small.json"
 out=$(HCAT_PYTHON=/nonexistent/python bash "$HCAT" "$TMP/hc_small.json" 2>/dev/null); rc=$?
 check_eq "hcat: no headroom → exit 3" "3" "$rc"
 check_absent "hcat: no headroom → stdout empty" "{" "$out"
+# 23b. the recorded last-error message must name the real doctor command --
+# regression guard for the bug this suite's own history shows a green run can
+# miss: bin/hcat:106's engine-not-executable message once said bare "/doctor".
+check "hcat: engine-error last-error names real doctor command" "headroom-usage-indicator:doctor" \
+      "$(cat "$HEADROOM_STATE_DIR/last-error" 2>/dev/null)"
 
 if [ -n "$HEADROOM_PY" ]; then
   # 24. real compression: big structured JSON shrinks, header cites source path
@@ -383,6 +388,41 @@ PYEOF
 else
   echo "skip - hcat compression tests (headroom venv not found)"
 fi
+
+# 25b. static regression guard: the doctor command name stays correct in
+# spots this suite cannot exercise dynamically without a live engine
+# exception (bin/hcat's Python-side compression-failure message) or that
+# are pure documentation (skills/headroom-usage-indicator/SKILL.md,
+# README.md). All four were, at one point in this PR's history, still
+# pointing at the nonexistent bare "/doctor" command while the rest of the
+# suite stayed green -- these checks read the shipped source/docs directly.
+check "hcat: python compression-failure message names real doctor command" \
+      "run /headroom-usage-indicator:doctor" "$(grep 'compression failed' "$HCAT")"
+
+USAGE_SKILL="$ROOT/skills/headroom-usage-indicator/SKILL.md"
+usage_skill_content=$(cat "$USAGE_SKILL" 2>/dev/null)
+check "usage-indicator skill: frontmatter names real doctor command" \
+      "until /headroom-usage-indicator:doctor clears it" "$usage_skill_content"
+check "usage-indicator skill: broken-badge bullet names real doctor command" \
+      "a clean \`/headroom-usage-indicator:doctor\` run" "$usage_skill_content"
+
+readme_content=$(cat "$ROOT/README.md" 2>/dev/null)
+check "README: broken-badge table names real doctor command" \
+      "a clean \`/headroom-usage-indicator:doctor\` run" "$readme_content"
+
+# 25c. invariant: no bare "/doctor" command reference anywhere in the nudge and
+# doc surfaces -- catches a regression on any line (not just the pinned ones
+# above) and any brand-new bare nudge. The status-line badge's short
+# "run /doctor" form is the one deliberate exception (width-budgeted), so its
+# verbatim quotes (after the badge's " · ") are stripped first, as is every
+# qualified name. Paths (doctor.sh, skills/doctor/, installer/doctor) don't match.
+for f in README.md bin/hcat scripts/doctor.sh scripts/hcat-gate.sh \
+         scripts/session-probe.sh skills/headroom-usage-indicator/SKILL.md \
+         skills/doctor/SKILL.md; do
+  stray=$(sed -e 's#headroom-usage-indicator:doctor##g' -e 's#· run /doctor##g' "$ROOT/$f" \
+          | grep -nE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|$)')
+  check_eq "no bare /doctor command in $f" "" "$stray"
+done
 
 # --- 26-28. hcat-gate (PreToolUse Read gate)
 GATE="$ROOT/scripts/hcat-gate.sh"
@@ -2100,6 +2140,17 @@ check_eq "health: gate broken engine exit 0"       "0"    "$rc"
 check_absent "health: gate broken engine fails open" "deny" "$out"
 check "health: gate recorded the breakage" "import failed" \
       "$(cat "$HEADROOM_STATE_DIR/last-error" 2>/dev/null)"
+check "health: gate import-failed breakage names real doctor command" "headroom-usage-indicator:doctor" \
+      "$(cat "$HEADROOM_STATE_DIR/last-error" 2>/dev/null)"
+
+# gate with an HCAT_PYTHON pointing nowhere (not merely wrong) hits the
+# distinct "not executable" branch (as opposed to "import failed" above)
+rm -f "$HEADROOM_STATE_DIR/last-error"
+out=$(gate_input "$big_h" health-g2 | HCAT_PYTHON=/nonexistent/python bash "$ROOT/scripts/hcat-gate.sh"); rc=$?
+check_eq "health: gate not-executable engine exit 0" "0" "$rc"
+check_absent "health: gate not-executable engine fails open" "deny" "$out"
+check "health: gate not-executable breakage names real doctor command" "headroom-usage-indicator:doctor" \
+      "$(cat "$HEADROOM_STATE_DIR/last-error" 2>/dev/null)"
 
 # hooks.json registers the SessionStart probe
 jq -e '.hooks.SessionStart[0].hooks[0].command | contains("session-probe.sh")' \
@@ -2123,6 +2174,7 @@ check_eq "health: probe exit 0" "0" "$rc"
 rm -f "$HEADROOM_STATE_DIR/last-error"
 out=$(env -u HCAT_PYTHON HOME="$TMP/nohome" PATH="$STUB:/usr/bin:/bin" bash "$PROBE")
 check "health: probe notes missing engine" "not installed" "$out"
+check "health: probe missing-engine nudge names real doctor command" "headroom-usage-indicator:doctor --fix" "$out"
 if [ -f "$HEADROOM_STATE_DIR/last-error" ]; then
   echo "FAIL - health: missing engine must not write last-error"; FAIL=$((FAIL+1))
 else
@@ -2133,6 +2185,16 @@ fi
 printf '%s runtime hcat: compression failed: boom\n' "$(date +%s)" > "$HEADROOM_STATE_DIR/last-error"
 out=$(HCAT_PYTHON=/usr/bin/true bash "$PROBE")
 check "health: probe surfaces recorded failure" "recent failure" "$out"
+check "health: probe recent-failure nudge names real doctor command" "headroom-usage-indicator:doctor" "$out"
+# a real recorded message already carries its own doctor pointer; the probe
+# line must name the command once, not twice (current and pre-rename wording)
+for rec in "engine engine python not executable (/x) — gate failing open; run /headroom-usage-indicator:doctor" \
+           "runtime hcat: compression failed: boom — run /doctor"; do
+  printf '%s %s\n' "$(date +%s)" "$rec" > "$HEADROOM_STATE_DIR/last-error"
+  out=$(HCAT_PYTHON=/usr/bin/true bash "$PROBE")
+  n=$(printf '%s' "$out" | grep -o 'run /[a-z:-]*doctor' | wc -l | tr -d ' ')
+  check_eq "health: probe names doctor once for '${rec%% *}' record" "1" "$n"
+done
 
 # probe: status line not wired yet → one-line setup nudge (the "I installed it,
 # why is there no badge?" case). Must be a setup line, not a breakage, and must
@@ -2193,6 +2255,18 @@ out=$(HCAT_PYTHON=/nonexistent/python DOCTOR_SETTINGS="$S2" DOCTOR_CLAUDE_DIR="$
       DOCTOR_VENV_DIR="$DOCD/none" bash "$DOCTOR" 2>&1)
 check "health: doctor keeps state while fixable" "failure state kept" "$out"
 rm -f "$HEADROOM_STATE_DIR/last-error"
+
+# 38b. static regression guard: two doctor-command messages this suite cannot
+# trigger dynamically without extra fixture machinery -- session-probe.sh's
+# hcat-missing/not-executable check resolves $HCAT relative to the script's
+# own directory (not overridable via env var short of an isolated script
+# copy), and doctor.sh's "NEW failure recorded while this run was in
+# progress" message is a genuine concurrent-write race. Read the shipped
+# source directly instead.
+check "session-probe: hcat-missing message names real doctor command" \
+      "reinstall the plugin or run /headroom-usage-indicator:doctor" "$(cat "$PROBE" 2>/dev/null)"
+check "doctor.sh: concurrent-failure message names real doctor command" \
+      "badge kept broken; run /headroom-usage-indicator:doctor again" "$(cat "$DOCTOR" 2>/dev/null)"
 
 # --- 39. dangi router: true-size detection + tiered compress/delegate advice (v2.7)
 export HEADROOM_STATE_DIR="$TMP/state-router"
