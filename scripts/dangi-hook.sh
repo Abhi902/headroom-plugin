@@ -39,7 +39,7 @@ in=$(cat)
 tool=$(printf '%s' "$in" | jq -r '.tool_name // empty' 2>/dev/null) || exit 0
 tool=$(printf '%s' "$tool" | tr -cd 'A-Za-z0-9_.-')   # defensive: tool name feeds JSON + AppleScript
 [ -n "$tool" ] || exit 0
-case "$tool" in "$HPREFIX"*) exit 0 ;; esac
+case "$tool" in "$HPREFIX"*|mcp__plugin_*_headroom__*) exit 0 ;; esac   # user-registered or the plugin's namespaced MCP
 # Edits/writes echo the code being changed; web results are prose — never
 # compression targets. Neither are image responses (base64, not text).
 case "$tool" in Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch) exit 0 ;; esac

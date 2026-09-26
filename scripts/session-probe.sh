@@ -108,8 +108,21 @@ done
 # a NUDGE-level proxy only -- a native process sees a different PATH, and
 # doctor.sh check 2b re-asks natively (cmd.exe /c where, MSYS dirs pruned) and is
 # the one to believe when the two disagree.
+user_mcp_by_path() {  # a user-scoped `headroom` MCP registered by an absolute path that exists
+  # doctor.sh check 2c writes exactly this when `headroom` is off PATH, and the
+  # doctor reports it `ok`. Flagging the same install broken every session
+  # contradicted the doctor and could never clear. Only reached on the rare
+  # off-PATH branch, so the jq read of ~/.claude.json costs nothing normally.
+  local cj cmd
+  cj=${HEADROOM_CLAUDE_JSON:-${HOME:-}/.claude.json}
+  [ -f "$cj" ] && command -v jq >/dev/null 2>&1 || return 1
+  cmd=$(jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null) || return 1
+  case $cmd in /*|[A-Za-z]:[\\/]*) ;; *) return 1 ;; esac
+  [ -f "$(unix_path "$cmd" 2>/dev/null || printf '%s' "$cmd")" ]
+}
 engine_off_path() {
   command -v headroom >/dev/null 2>&1 && return 0
+  user_mcp_by_path && return 0
   add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /doctor --fix to shim it"
   # The engine WORKS and the MCP still cannot start: that is a live feature
   # outage, not a setup gap, and the badge has to say so. Leaving it at a nudge

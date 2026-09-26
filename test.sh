@@ -161,6 +161,12 @@ printf '%s\n' '{"message":{"content":[{"type":"tool_use","id":"s1","name":"mcp__
 out=$(badge "$TMP/t_stats.jsonl" claude-opus-4-8 sess-stats)
 check "stats-only: idle"   "not compressing yet" "$out"
 
+# --- 2b. the plugin's OWN bundled MCP is namespaced by Claude Code; it must count too
+compress_event p1 700 | sed 's/"mcp__headroom__headroom_compress"/"mcp__plugin_headroom-usage-indicator_headroom__headroom_compress"/' > "$TMP/t_plugin.jsonl"
+out=$(badge "$TMP/t_plugin.jsonl" claude-opus-4-8 sess-plugin)
+check "plugin MCP: active"  "●"        "$out"
+check "plugin MCP: tokens"  "~700 tok" "$out"
+
 # --- 3. money: 500 tok on opus-4-8 = $0.0025 → shown as cents
 out=$(badge "$TMP/t_active.jsonl" claude-opus-4-8 sess-money)
 check "money: cents"        "0.25¢"      "$out"
@@ -3818,6 +3824,7 @@ fi
 W13T2="$W13T/withtimeout"; mkdir -p "$W13T2" "$W13T2/live"
 cat > "$W13T2/timeout" <<'W13TO'
 #!/bin/sh
+[ "$1" = "-k" ] && shift 2   # accept --kill-after like coreutils (the lib passes -k 2)
 s=$1; shift
 "$@" & p=$!
 i=0
@@ -4432,11 +4439,26 @@ fi
 W21="$W/w21-mcpreg"; mkdir -p "$W21/stub" "$W21/venv/bin" "$W21/cd" "$W21/shim" "$W21/state"
 printf '#!/bin/sh\nexit 0\n'  > "$W21/venv/bin/python";   chmod +x "$W21/venv/bin/python"
 printf '#!/bin/sh\necho hr\n' > "$W21/venv/bin/headroom"; chmod +x "$W21/venv/bin/headroom"
+# The stub behaves like the real CLI where the doctor depends on it: `get` prints
+# the real layout (Scope:/Command:) and fails when nothing is registered, `add`
+# REFUSES a name that already exists (the old stub overwrote, which hid a
+# re-run that stayed `fixable` forever), and `remove` exists.
 cat > "$W21/stub/claude" <<'W21CLAUDE'
 #!/bin/sh
 reg="$CLAUDE_STUB_REG"
-if [ "$1" = "mcp" ] && [ "$2" = "get" ]; then [ -f "$reg" ] && cat "$reg"; exit 0; fi
-if [ "$1" = "mcp" ] && [ "$2" = "add" ]; then shift 2; printf '%s\n' "$*" > "$reg"; exit 0; fi
+[ "$1" = "mcp" ] || exit 0
+case $2 in
+  get)
+    [ -f "$reg" ] || { echo "No MCP server found with name: headroom" >&2; exit 1; }
+    printf 'headroom:\n  Scope: User config (available in all your projects)\n  Type: stdio\n  Command: %s\n  Args: mcp serve\n' "$(cat "$reg")"
+    exit 0 ;;
+  add)
+    [ -f "$reg" ] && { echo "MCP server headroom already exists in user config" >&2; exit 1; }
+    shift 2; printf '%s\n' "$*" > "$reg.args"
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+    printf '%s\n' "$2" > "$reg"; exit 0 ;;
+  remove) rm -f "$reg"; exit 0 ;;
+esac
 exit 0
 W21CLAUDE
 chmod +x "$W21/stub/claude"
@@ -4449,9 +4471,10 @@ w21_run() {
       HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" --fix 2>&1
 }
 out=$(w21_run)
-check "w21: --fix registers the bundled MCP by absolute path" "registered the bundled MCP by absolute path" "$out"
-check "w21: the registration names the resolved CLI, not a bare name" "headroom -- " "$(cat "$W21/reg" 2>/dev/null)"
-check "w21: ...and carries the bundled env" "HEADROOM_UPDATE_CHECK=off" "$(cat "$W21/reg" 2>/dev/null)"
+check "w21: --fix registers the MCP by absolute path" "registered the headroom MCP by absolute path" "$out"
+check "w21: ...and says the bundled bare-name entry still spawns (no false \"closed\" claim)" "bundled bare-name entry still spawns" "$out"
+check "w21: the registration names the resolved CLI, not a bare name" "headroom -- " "$(cat "$W21/reg.args" 2>/dev/null)"
+check "w21: ...and carries the bundled env" "HEADROOM_UPDATE_CHECK=off" "$(cat "$W21/reg.args" 2>/dev/null)"
 out=$(w21_run)
 check        "w21: a second --fix sees it already registered" "MCP registered by absolute path" "$out"
 # review #3: the DETECT half must run read-only too, or an agent following the
@@ -4462,13 +4485,13 @@ out=$(env -u HCAT_PYTHON DOCTOR_OS=windows CLAUDE_STUB_REG="$W21/reg2" \
       HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" 2>&1)
 check        "w21: a READ-ONLY run reports the bare-name exposure as fixable" \
              "registered by bare name only" "$out"
-check_absent "w21: ...and a read-only run registers nothing" "registered the bundled MCP" "$out"
+check_absent "w21: ...and a read-only run registers nothing" "registered the headroom MCP" "$out"
 if [ -f "$W21/reg2" ]; then
   echo "FAIL - w21: a read-only run must not call claude mcp add"; FAIL=$((FAIL+1))
 else
   echo "ok - w21: a read-only run must not call claude mcp add"; PASS=$((PASS+1))
 fi
-check_absent "w21: ...and re-registers nothing (idempotent)" "registered the bundled MCP by absolute path — " "$out"
+check_absent "w21: ...and re-registers nothing (idempotent)" "registered the headroom MCP by absolute path" "$out"
 # no claude CLI: say so plainly rather than silently leaving the bare name exposed
 out=$(env -u HCAT_PYTHON DOCTOR_OS=windows PATH="$STUB:$W21/venv/bin:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$W21/s.json" DOCTOR_CLAUDE_DIR="$W21/cd" DOCTOR_VENV_DIR="$W21/venv" \
@@ -4581,6 +4604,118 @@ if [ $((t1 - t0)) -lt 6 ]; then
 else
   echo "FAIL - w23: ER_PY_TIMEOUT did not bound the probe ($((t1 - t0))s)"; FAIL=$((FAIL+1))
 fi
+
+# --- w24. REGRESSION (PR #10 review round 5). One fixture per finding.
+W24="$W/w24"; mkdir -p "$W24"
+pass_fail() {  # pass_fail <name> <cond-exit-status>
+  if [ "$2" -eq 0 ]; then echo "ok - $1"; PASS=$((PASS+1)); else echo "FAIL - $1"; FAIL=$((FAIL+1)); fi
+}
+
+# #5: an env-supplied bound must never reach $(( )). Force the WATCHDOG branch
+# (a PATH with `sleep` but no timeout/gtimeout) -- the coreutils branch hides it.
+# The payload is a BUILTIN (echo + redirect): that PATH has no `touch`, and a
+# payload that cannot run passes against the vulnerable code too.
+mkdir -p "$W24/inj/bin"; link_tool "$(command -v sleep)" "$W24/inj/bin/sleep"
+( cd "$W24/inj" && PATH="$W24/inj/bin" /bin/bash -c ". '$ER'; _er_bounded 'a[\$(echo x > pwned)]' true" ) >/dev/null 2>&1
+[ ! -e "$W24/inj/pwned" ]; pass_fail "w24: a crafted ER_PY_TIMEOUT is not evaluated as arithmetic (no command execution)" $?
+( cd "$W24/inj" && PATH="$W24/inj/bin" _ER_SLEEP_UNIT=1 _ER_SLEEP_TICKS='a[$(echo x > pwned2)]' /bin/bash -c ". '$ER'; _er_bounded 1 true" ) >/dev/null 2>&1
+[ ! -e "$W24/inj/pwned2" ]; pass_fail "w24: an inherited _ER_SLEEP_TICKS is not trusted either" $?
+w24_st=$( PATH="$W24/inj/bin" /bin/bash -c ". '$ER'; _er_bounded 'junk' true; echo \$?" 2>/dev/null)
+check_eq "w24: a non-numeric bound still runs the command (falls back to 5s)" "0" "$w24_st"
+
+# #4: a wedged candidate must not preempt a later one that imports in time.
+mkdir -p "$W24/wedge" "$W24/venv/bin"
+printf '#!/bin/sh\necho hr\n'           > "$W24/wedge/headroom"; chmod +x "$W24/wedge/headroom"
+printf '#!/bin/sh\nsleep 8\nexit 0\n'   > "$W24/wedge/python";   chmod +x "$W24/wedge/python"
+printf '#!/bin/sh\nexit 0\n'            > "$W24/venv/bin/python"; chmod +x "$W24/venv/bin/python"
+t0=$(date +%s)
+got=$(unset HCAT_PYTHON; export PATH="$W24/wedge:/usr/bin:/bin" DOCTOR_VENV_DIR="$W24/venv" ER_PY_TIMEOUT=1; er resolve_engine_python_validated 2>/dev/null)
+t1=$(date +%s)
+check_eq "w24: the walk skips a wedged candidate for a later healthy one" "$W24/venv/bin/python" "$got"
+[ $((t1 - t0)) -lt 6 ]; pass_fail "w24: ...and the wedge costs one bound, not its full hang ($((t1 - t0))s)" $?
+
+# #3: the Git Bash override refusal covers the whole WORKSPACE, not only $PWD.
+# CYGPATH_UNIX_DIR points the fake cygpath at the real dir, or unix_path re-roots
+# the override onto /c/fake and neither side of the comparison is real.
+W24R="$W24/repo"; mkdir -p "$W24R/.git" "$W24R/src" "$W24R/tools"
+printf '#!/bin/sh\nexit 0\n' > "$W24R/tools/bash.exe"; chmod +x "$W24R/tools/bash.exe"; : > "$W24R/tools/git.exe"
+printf '{}\n' > "$W24/s-repo.json"
+cmd24=$(cd "$W24R/src" && CYGPATH_UNIX_DIR="$W24R/tools" w13_inj "$W24/s-repo.json" "$W24/cd-repo" "$W24R/tools/bash.exe")
+check_eq "w24: an override elsewhere in the repo is refused when the doctor runs from a subdirectory" \
+         '"C:\fake\bash" "C:\fake\headroom-statusline.sh"' "$cmd24"
+W24N="$W24/norepo"; mkdir -p "$W24N/src" "$W24N/tools"
+printf '#!/bin/sh\nexit 0\n' > "$W24N/tools/bash.exe"; chmod +x "$W24N/tools/bash.exe"; : > "$W24N/tools/git.exe"
+printf '{}\n' > "$W24/s-norepo.json"
+check_eq "w24: control -- outside any repo the same layout is accepted (the refusal above is the workspace rule)" \
+         '"C:\fake\bash.exe" "C:\fake\headroom-statusline.sh"' \
+         "$(cd "$W24N/src" && CYGPATH_UNIX_DIR="$W24N/tools" w13_inj "$W24/s-norepo.json" "$W24/cd-norepo" "$W24N/tools/bash.exe")"
+
+# #2/#7: POSIX with the engine only in the venv. Before, the bundled MCP was
+# simply down after the update and --fix could only print an rc-file edit.
+W24P="$W24/posix"; mkdir -p "$W24P/venv/bin" "$W24P/cd" "$W24P/shim" "$W24P/state"
+printf '#!/bin/sh\nexit 0\n'  > "$W24P/venv/bin/python";   chmod +x "$W24P/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W24P/venv/bin/headroom"; chmod +x "$W24P/venv/bin/headroom"
+doc_settings_wired "$W24P/cd" > "$W24P/s.json"
+w24p_run() {  # w24p_run <PATH> [--fix]
+  env -u HCAT_PYTHON DOCTOR_OS=unix CLAUDE_STUB_REG="$W24P/reg" PATH="$1" \
+      DOCTOR_SETTINGS="$W24P/s.json" DOCTOR_CLAUDE_DIR="$W24P/cd" DOCTOR_VENV_DIR="$W24P/venv" \
+      DOCTOR_SHIM_DIR="$W24P/shim" HEADROOM_STATE_DIR="$W24P/state" bash "$DOCTOR" ${2:-} 2>&1
+}
+out=$(w24p_run "$W21/stub:/usr/bin:/bin"); rc=$?
+check "w24: read-only POSIX run reports the off-PATH MCP as fixable" "registers the engine by absolute path" "$out"
+out=$(w24p_run "$W21/stub:/usr/bin:/bin" --fix); rc=$?
+check "w24: POSIX --fix registers the engine by absolute path" "registered the headroom MCP by absolute path" "$out"
+check_eq "w24: ...naming the venv engine itself, not the PATH-dependent shim" \
+         "$(cd "$W24P/venv/bin" && pwd -P)/headroom" "$(cat "$W24P/reg" 2>/dev/null)"
+check_absent "w24: ...so the off-PATH shim is a note, not a FAIL" "FAIL    - headroom shimmed" "$out"
+out=$(w24p_run "$W21/stub:/usr/bin:/bin" --fix)
+check "w24: a second POSIX --fix sees it registered" "MCP registered by absolute path" "$out"
+check_absent "w24: ...and does not re-add it" "registered the headroom MCP by absolute path" "$out"
+# #7: a registration that no longer starts (venv moved) is replaced, not re-added into a refusal
+printf '%s\n' "$W24P/moved/headroom" > "$W24P/reg"
+out=$(w24p_run "$W21/stub:/usr/bin:/bin" --fix)
+check "w24: a dead user-scoped entry is replaced" "replaced a dead entry: $W24P/moved/headroom" "$out"
+check_eq "w24: ...with the live engine" "$(cd "$W24P/venv/bin" && pwd -P)/headroom" "$(cat "$W24P/reg" 2>/dev/null)"
+# a live hand-registered entry at a DIFFERENT path is kept (no churn, no refusal loop)
+mkdir -p "$W24P/other"; printf '#!/bin/sh\necho hr\n' > "$W24P/other/headroom"; chmod +x "$W24P/other/headroom"
+printf '%s\n' "$W24P/other/headroom" > "$W24P/reg"
+out=$(w24p_run "$W21/stub:/usr/bin:/bin" --fix)
+check "w24: a live entry at another path is kept" "MCP registered by absolute path ($W24P/other/headroom)" "$out"
+check_absent "w24: ...and never reported fixable" "does not start; --fix replaces" "$out"
+# neither remedy possible: that is the outage, and it must still FAIL
+rm -f "$W24P/reg"; rm -rf "$W24P/shim"; mkdir -p "$W24P/shim"
+out=$(w24p_run "$STUB:/usr/bin:/bin" --fix); rc=$?
+check "w24: off PATH and no claude CLI still FAILs" "is not on PATH, and \`claude\` is not on PATH" "$out"
+check_eq "w24: ...with a nonzero exit" "1" "$rc"
+# headroom already on PATH: POSIX needs no registration and says nothing about it
+out=$(w24p_run "$W21/stub:$W24P/venv/bin:/usr/bin:/bin" --fix)
+check_absent "w24: headroom on PATH -> no POSIX registration" "by absolute path" "$out"
+
+# #9: the probe must not flag an install broken that the doctor reports ok.
+W24S="$W24/probe"; mkdir -p "$W24S/home" "$W24S/state"
+jq -n --arg c "$W24P/venv/bin/headroom" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W24S/home/.claude.json"
+printf '{"session_id":"w24"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W24S/home" \
+  DOCTOR_VENV_DIR="$W24P/venv" PATH="$STUB:/usr/bin:/bin" \
+  HEADROOM_STATE_DIR="$W24S/state" bash "$PROBE" >/dev/null
+[ ! -s "$W24S/state/last-error" ]; pass_fail "w24: a working absolute-path MCP keeps the badge out of broken (mcp)" $?
+jq -n '{mcpServers:{headroom:{command:"/nonexistent/headroom"}}}' > "$W24S/home/.claude.json"
+printf '{"session_id":"w24b"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W24S/home" \
+  DOCTOR_VENV_DIR="$W24P/venv" PATH="$STUB:/usr/bin:/bin" \
+  HEADROOM_STATE_DIR="$W24S/state" bash "$PROBE" >/dev/null
+check "w24: ...but a registration whose command is gone still records the outage" "mcp" \
+      "$(cut -d' ' -f2 "$W24S/state/last-error" 2>/dev/null)"
+
+# pre-existing: with no engine, only redirect to hcat when its jq tier can render the file
+W24G="$W24/gate"; mkdir -p "$W24G/bin" "$W24G/state"
+printf '#!/nonexistent/python\n' > "$W24G/bin/headroom"; chmod +x "$W24G/bin/headroom"
+jq -n '[range(0;600) | {id:., meta:{deep:"yyyyyyyyyyyyyyyy"}}]' > "$W24G/nested.json"
+mkuniform "$W24G/flat.json"
+out=$(gate_input "$W24G/nested.json" w24-g1 | env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent \
+      PATH="$W24G/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W24G/state" bash "$GATE")
+check_absent "w24: no engine + nested JSON -> no dead-end deny" "deny" "$out"
+out=$(gate_input "$W24G/flat.json" w24-g2 | env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent \
+      PATH="$W24G/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W24G/state" bash "$GATE")
+check "w24: control -- no engine + a uniform flat array is still redirected" "deny" "$out"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

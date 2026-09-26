@@ -428,29 +428,11 @@ shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the
     ln -sfn "$1" "$target" 2>/dev/null && { : > "$TMPD/shim-written"; _shim_record "$target" "$1"; printf '%s' "$target"; }
   fi
 }
-run_bounded() {  # run_bounded <seconds> <cmd> [args...] — the command's own status, nonzero if it overran
-  # Portable bounded wait: coreutils `timeout` when the box has it (gtimeout on a
-  # brew-installed macOS), else a background child plus a watchdog loop. Keep it
-  # bash-3.2 safe — no `wait -n`, no arrays, no process substitution.
-  local secs pid waited
-  secs=$1; shift
-  if   command -v timeout  >/dev/null 2>&1; then timeout  "$secs" "$@"; return $?
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?
-  fi
-  "$@" &
-  pid=$!
-  waited=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
-      kill -9 "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
-      return 124          # same status coreutils `timeout` uses for a kill
-    fi
-    sleep 1
-    waited=$((waited+1))
-  done
-  wait "$pid"             # finished on its own: report ITS status, not ours
-  return $?
+run_bounded() {  # run_bounded <seconds> <cmd> [args...] — the command's own status, 124 if it overran
+  # One bounded-wait implementation, not two: engine-resolve.sh (sourced above,
+  # mandatory) already owns the coreutils-timeout-else-watchdog logic, with the
+  # sub-second polling and the untrusted-input guards this copy never had.
+  _er_bounded "$@"
 }
 shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves
   # Name resolution alone proves nothing: uv's relocatable trampolines resolve the
@@ -604,6 +586,19 @@ sl_bash_path() {  # → the bash a Windows statusLine.command should run through
     #     DOCTOR_PROJECT_DIR stays a test/scan seam elsewhere; it must not be able
     #     to weaken a security decision. $PWD is set by the shell, not by config.
     _sl_pwd=$(cd "$PWD" 2>/dev/null && pwd -P) || _sl_pwd=$PWD
+    # ...and widen $PWD to the WORKSPACE root. Compared against $PWD alone, a
+    # doctor run from repo/src accepted a bash.exe at repo/tools, which is the
+    # same project the settings.json came from. The root comes from the
+    # filesystem (nearest ancestor holding .git), never from an env var.
+    _sl_root=$_sl_pwd
+    while [ -n "$_sl_root" ] && [ "$_sl_root" != / ]; do
+      [ -e "$_sl_root/.git" ] && break
+      _sl_root=$(dirname "$_sl_root")
+    done
+    # A dotfiles repo at $HOME is not a workspace: widening to it would refuse
+    # every legitimate Git-for-Windows install under the user profile.
+    _sl_home=$(cd "${HOME:-/}" 2>/dev/null && pwd -P) || _sl_home=${HOME:-/}
+    { [ -z "$_sl_root" ] || [ "$_sl_root" = / ] || [ "$_sl_root" = "$_sl_home" ]; } || _sl_pwd=$_sl_root
     _sl_ov=$(unix_path "$b")
     _sl_ovdir=$(cd "$(dirname "$_sl_ov")" 2>/dev/null && pwd -P) || _sl_ovdir=$(dirname "$_sl_ov")
     # Canonicalise both sides so `..`, a symlinked workspace or a subdirectory
@@ -768,7 +763,14 @@ elif cli_res=$(resolve_headroom_cli); then
       # PATH never changed, skips the "not on PATH" FAIL, and reports
       # `fixed - ... (resolves on PATH)` with exit 0.
       if ! command -v headroom >/dev/null 2>&1; then
-        say FAIL "headroom shimmed to $shim but $SHIM_DIR is not on PATH — $(path_hint)"
+        if is_windows; then
+          say FAIL "headroom shimmed to $shim but $SHIM_DIR is not on PATH — $(path_hint)"
+        else
+          # POSIX has a PATH-independent remedy: check 2c registers the engine by
+          # absolute path, and FAILs there if it cannot.
+          posix_shim_off_path=1
+          say note "headroom shimmed to $shim but $SHIM_DIR is not on PATH, so the bundled bare-name MCP cannot start — check 2c registers the engine by absolute path instead (or: $(path_hint))"
+        fi
       elif ! shim_runs "$shim"; then
         # Remove the dead file we just wrote. Leaving it behind is worse than
         # never writing it: the next run's `command -v headroom` branch would
@@ -829,66 +831,129 @@ if is_windows; then
   fi
 fi
 
-# 2b-win/2c. CLOSE the CWD tier rather than only reporting it. The check above can
-# only see a hijack that is already sitting there, and neither it nor the
-# SessionStart probe runs BEFORE the MCP is spawned -- so detection always arrives
-# after the foreign code has run. .mcp.json can express neither an absolute nor a
-# per-platform command, so the bundled entry has to stay a bare name. A USER-scoped
-# registration naming the shim's ABSOLUTE path does not resolve by name at all,
-# so no file in a project directory can win against it; the bundled bare-name
-# entry remains the fallback for anyone who never runs the doctor.
+# 2c. Register the engine as a user-scoped MCP by ABSOLUTE path. .mcp.json can
+# express neither an absolute nor a per-platform command, so the bundled entry has
+# to stay a bare name, and that bare name fails in two ways this check covers:
+#   Windows: a bare name resolves from the project directory BEFORE PATH, so a
+#     headroom.* committed to a repo is spawned instead of the engine.
+#   POSIX:   an engine that lives only in the doctor's venv (the pre-v2.8 happy
+#     path) is not on PATH at all, so the bundled entry cannot start. Without
+#     this, the only remedy was an rc-file edit.
+# What the registration does NOT do: it adds a SECOND server. Claude Code keeps
+# plugin servers under their own namespaced name (plugin:<plugin>:headroom), so the
+# bundled bare-name entry is still spawned next to it -- on Windows a planted
+# headroom.* in the project still runs. Nothing here may claim otherwise; 2b-win
+# above is the detector for that file.
+mcp_need=0
 if is_windows; then
-  # DETECT unconditionally, MUTATE only under --fix — the split every neighbouring
-  # check uses. Buried entirely inside --fix, this reported nothing on a read-only
-  # run, so an agent following the doctor skill (read-only first, then ask consent
-  # for whatever came back `fixable`) had no basis to ever recommend --fix for this
-  # reason, and an otherwise-healthy Windows install stayed exposed with a clean
-  # bill of health.
+  mcp_need=1
+elif ! command -v headroom >/dev/null 2>&1; then
+  mcp_need=1
+fi
+real_file() {  # real_file <path> — follow symlinks to the file itself (bash-3.2 safe, no readlink -f)
+  local p=$1 l n=0
+  while [ -L "$p" ] && [ "$n" -lt 20 ]; do
+    l=$(readlink "$p") || break
+    case $l in /*) p=$l ;; *) p=$(dirname "$p")/$l ;; esac
+    n=$((n+1))
+  done
+  printf '%s\n' "$(cd "$(dirname "$p")" 2>/dev/null && pwd -P || dirname "$p")/$(basename "$p")"
+}
+mcp_get_cmd() {  # the Command: of an existing USER-scoped `headroom` MCP, empty if none
+  local out
+  out=$( ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; run_bounded 10 claude mcp get headroom ) 2>/dev/null) || return 0
+  printf '%s\n' "$out" | grep -q 'Scope:[[:space:]]*User' || return 0
+  printf '%s\n' "$out" | sed -n 's/^[[:space:]]*Command:[[:space:]]*//p' | head -1
+}
+mcp_add() {
+  ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+    run_bounded 20 claude mcp add -s user \
+      -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 \
+      headroom -- "$1" mcp serve ) >/dev/null 2>&1
+}
+if [ "$mcp_need" -eq 1 ]; then
+  if is_windows; then
+    mcp_why="the bundled bare-name entry still spawns too, so a headroom.* in a project directory can still run -- keep check 2b-win clean"
+  else
+    mcp_why="it works without \`headroom\` on PATH; the bundled bare-name entry stays unconnected until it is"
+  fi
   # Resolve the engine path FIRST and unconditionally: resolve_headroom_cli does
   # not depend on `claude`, and gating it behind that test left the no-claude
   # remedy below shipping a literal "<engine path>" placeholder an agent cannot run.
-  # NATIVE spelling. resolve_headroom_cli yields a Git Bash path, and Claude Code
-  # spawns MCP commands outside Git Bash where that does not resolve — the same
-  # thing win_path already fixes for statusLine a few lines up. win_path is a
-  # no-op on an already-native path, so the uv tier is unaffected. The
-  # MSYS_NO_PATHCONV guards stop MSYS rewriting the argument on the way in,
-  # which would also break the fixed-string idempotency probe below.
-  mcp_abs=$(resolve_headroom_cli 2>/dev/null) && mcp_abs=$(win_path "$mcp_abs") || mcp_abs=""
+  # PATH-INDEPENDENT on POSIX: resolve_headroom_cli prefers PATH, so a doctor
+  # shim appearing later would change the answer and make a correct registration
+  # look stale. The symlink shim's target is the same engine, so register that.
+  # On Windows the shim is a copy and has no target; win_path gives the NATIVE
+  # spelling Claude Code needs outside Git Bash (a no-op on a native path).
+  mcp_abs=$(resolve_headroom_cli 2>/dev/null) || mcp_abs=""
+  if [ -n "$mcp_abs" ]; then
+    if is_windows; then mcp_abs=$(win_path "$mcp_abs"); else mcp_abs=$(real_file "$mcp_abs"); fi
+  fi
   # ...and never register a path that does not START. 2b may have just FAILed this
-  # very file as dead (both reach it through `command -v headroom`), and persisting
-  # it into the user's global MCP config would print `fixed` over an entry that can
-  # never connect — the same misdiagnosis 2b's own liveness probe exists to stop.
+  # very file as dead, and persisting it into the user's global MCP config would
+  # print `fixed` over an entry that can never connect.
   if [ -n "$mcp_abs" ] && ! shim_runs "$(unix_path "$mcp_abs")"; then
     mcp_abs=""; mcp_dead=1
   else
     mcp_dead=0
   fi
+  mcp_state=unregistered
   if ! command -v claude >/dev/null 2>&1; then
     if [ -n "$mcp_abs" ]; then
-      say note "\`claude\` is not on PATH, so the MCP could not be registered by absolute path — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it; once the CLI is available run: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
+      mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
     else
-      say note "\`claude\` is not on PATH, so the MCP could not be registered by absolute path — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it; fix the engine first, then re-run /doctor --fix"
+      mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; fix the engine first, then re-run /headroom-usage-indicator:doctor --fix"
     fi
+    if is_windows; then say note "$mcp_msg — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it"
+    else mcp_state=blocked; fi
   elif [ "$mcp_dead" -eq 1 ]; then
-    say fixable "the resolved headroom CLI does not start, so the MCP was not registered by absolute path — the project-directory tier stays open until the engine is repaired; fix the engine (see check 2b) and re-run /doctor --fix"
+    say fixable "the resolved headroom CLI does not start, so the MCP was not registered by absolute path; fix the engine (see check 2b) and re-run /headroom-usage-indicator:doctor --fix"
+    mcp_state=dead
   elif [ -z "$mcp_abs" ]; then
     # Say SOMETHING. check 2 reports the engine, but it can be `ok` while
     # resolve_headroom_cli still returns nothing (HCAT_PYTHON set with the CLI
-    # elsewhere), and then this exposure was reported by nobody at all.
+    # elsewhere), and then this was reported by nobody at all.
     say skip "MCP registration by absolute path (no headroom CLI resolved yet — fix the engine first)"
-  elif ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; run_bounded 10 claude mcp get headroom ) 2>/dev/null | grep -qF "$mcp_abs"; then
-    say ok "bundled MCP registered by absolute path ($mcp_abs) — the project-directory tier cannot win against it"
-  elif [ "$FIX" -eq 1 ]; then
-    if ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-         run_bounded 20 claude mcp add -s user \
-           -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 \
-           headroom -- "$mcp_abs" mcp serve ) >/dev/null 2>&1; then
-      say fixed "registered the bundled MCP by absolute path ($mcp_abs) — a headroom.* in a project directory can no longer be spawned in its place; restart Claude Code"
-    else
-      say fixable "could not register the MCP by absolute path (\`claude mcp add\` failed) — the bare-name entry still applies; run it by hand: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
-    fi
+    mcp_state=skip
   else
-    say fixable "bundled MCP is registered by bare name only — a headroom.* dropped into a project directory could still be spawned before it; --fix registers it by absolute path via \`claude mcp add -s user\`"
+    mcp_old=$(mcp_get_cmd)
+    # An existing registration that still STARTS is kept, even when it names a
+    # different path than this run resolved (a hand-registered venv, a PATH fix
+    # since the last run). Re-adding under the same name is refused by the real
+    # CLI, which is how 2c used to stay `fixable` forever.
+    if [ -n "$mcp_old" ] && shim_runs "$(unix_path "$mcp_old")"; then
+      say ok "MCP registered by absolute path ($mcp_old) as a user-scoped server — $mcp_why"
+      mcp_state=ok
+    elif [ "$FIX" -eq 1 ]; then
+      mcp_repl=""
+      if [ -n "$mcp_old" ]; then
+        # Only a user-scoped entry that no longer starts is replaced: it is dead
+        # weight, and add would refuse the name while it exists.
+        ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; run_bounded 10 claude mcp remove headroom -s user ) >/dev/null 2>&1
+        mcp_repl=" (replaced a dead entry: $mcp_old)"
+      fi
+      if mcp_add "$mcp_abs"; then
+        say fixed "registered the headroom MCP by absolute path ($mcp_abs) as a user-scoped server$mcp_repl — $mcp_why; restart Claude Code"
+        mcp_state=ok
+      else
+        say fixable "could not register the MCP by absolute path (\`claude mcp add\` failed); run it by hand: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
+      fi
+    elif [ -n "$mcp_old" ]; then
+      say fixable "the user-scoped headroom MCP points at $mcp_old, which does not start; --fix replaces it with $mcp_abs"
+    elif is_windows; then
+      say fixable "bundled MCP is registered by bare name only — a headroom.* dropped into a project directory could still be spawned before it; --fix adds a user-scoped server by absolute path via \`claude mcp add -s user\` (the bundled entry keeps spawning too)"
+    else
+      say fixable "\`headroom\` is not on PATH, so the bundled bare-name MCP cannot start; --fix registers the engine by absolute path via \`claude mcp add -s user\`"
+    fi
+  fi
+  # POSIX, and neither remedy landed: the MCP is down. This is the FAIL 2b used to
+  # print for an off-PATH shim, moved here because 2c is what can still repair it.
+  if ! is_windows && [ "$mcp_state" = blocked ]; then
+    if [ "${posix_shim_off_path:-0}" -eq 1 ]; then
+      say FAIL "headroom shimmed to $(shim_target) but $SHIM_DIR is not on PATH, and $mcp_msg — the bundled MCP cannot start until one of them is done; or $(path_hint)"
+    else
+      say fixable "$mcp_msg — or put headroom on PATH: $(path_hint)"
+    fi
   fi
 fi
 

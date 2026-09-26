@@ -61,13 +61,28 @@ _er_bounded() {  # _er_bounded <secs> <cmd...> — coreutils timeout, else a wat
   # bash-3.2 safe: no `wait -n`, no arrays.
   local t secs pid waited ticks unit
   t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
-  if [ -n "$t" ]; then "$t" "$@"; return $?; fi
   secs=$1; shift
+  # secs arrives from the environment (ER_PY_TIMEOUT / ER_UV_TIMEOUT), and bash
+  # evaluates a variable's CONTENTS inside $(( )) -- `a[$(cmd)]` runs cmd. Only
+  # a plain integer may reach the arithmetic below or the timeout binary.
+  case $secs in ''|*[!0-9]*) secs=5 ;; esac
+  # -k: a child that ignores SIGTERM is SIGKILLed 2s later, the guarantee the
+  # watchdog below already gives. GNU coreutils (Linux, Git for Windows, brew
+  # gtimeout) all accept it.
+  # A -k kill surfaces as 137, not 124; callers read 124 as "outran the bound".
+  if [ -n "$t" ]; then
+    "$t" -k 2 "$secs" "$@"; t=$?
+    [ "$t" -eq 137 ] && t=124
+    return "$t"
+  fi
   # Poll sub-second where the platform allows. The previous `sleep 1` ran BEFORE
   # the first re-poll, so on a host without coreutils (stock macOS) every bounded
   # call paid a full second even when the child exited immediately -- and this
   # runs per candidate, on every gated Read, every hcat and every SessionStart.
   # Resolve the unit once per process; `none` means no usable sleep at all.
+  # The cache is process-local; anything inherited from the environment is
+  # untrusted and ends up in $(( )) too, so accept only the values set below.
+  case "${_ER_SLEEP_UNIT:-}:${_ER_SLEEP_TICKS:-}" in 0.1:10|1:1|none:0) ;; *) _ER_SLEEP_UNIT="" ;; esac
   if [ -z "${_ER_SLEEP_UNIT:-}" ]; then
     if sleep 0.1 2>/dev/null; then _ER_SLEEP_UNIT=0.1; _ER_SLEEP_TICKS=10
     elif sleep 1 2>/dev/null; then _ER_SLEEP_UNIT=1;   _ER_SLEEP_TICKS=1
@@ -104,7 +119,7 @@ resolve_engine_python_validated() {  # first IMPORTABLE candidate, not first exe
   #   1  prints nothing (no engine installed at all)
   # Callers need 1 vs 2: one is the ordinary red-idle state, the other is an
   # outage that must fail open AND light the badge.
-  local c seen="" st
+  local c seen="" st slow=""
   # HCAT_PYTHON is authoritative with no fallback (an existing contract, pinned by
   # the suite), so it is returned unprobed -- status 0 here means "this is the
   # engine", not "its import was verified". Callers that must know re-check it.
@@ -116,14 +131,15 @@ resolve_engine_python_validated() {  # first IMPORTABLE candidate, not first exe
     st=$?
     # 0 imports. 124 means the probe outran its bound -- and doctor.sh's own
     # comment concedes a cold headroom-ai[all] import with torch can do that on a
-    # slow disk. ACCEPT it: calling a working engine broken is the worse error,
-    # especially while doctor.sh's walk is unbounded and would report `ok` on the
-    # same machine. Accepting also stops the walk, so one slow candidate costs one
-    # timeout, not one per candidate.
-    if [ "$st" -eq 0 ] || [ "$st" -eq 124 ]; then
-      printf '%s\n' "$c"; return 0
-    fi
+    # slow disk. Calling a working engine broken is the worse error, so a slow
+    # candidate is still ACCEPTED -- but only after the walk has ruled out a later
+    # candidate that imports in time. Returning on the first 124 let one wedged
+    # interpreter preempt a healthy one, and bin/hcat then execs its pick
+    # unbounded.
+    if [ "$st" -eq 0 ]; then printf '%s\n' "$c"; return 0; fi
+    [ "$st" -eq 124 ] && [ -z "$slow" ] && slow=$c
   done < <(engine_python_candidates)
+  [ -n "$slow" ] && { printf '%s\n' "$slow"; return 0; }
   [ -n "$seen" ] && { printf '%s\n' "$seen"; return 2; }
   return 1
 }

@@ -51,8 +51,19 @@ def idset($ids): ($ids | map({key: (. // ""), value: true}) | from_entries);
 
 def tool_uses: [.[] | .message.content[]? | select(.type=="tool_use")];
 
-def mcp_ids($tool): [tool_uses[] | select(.name==$tool) | .id];
-def headroom_ids($pfx): [tool_uses[] | select((.name // "")|startswith($pfx)) | .id];
+# The MCP is reachable under two names: a user-registered server
+# (mcp__headroom__<tool>) and the plugin's own bundled one, which Claude Code
+# namespaces as mcp__plugin_<plugin>_headroom__<tool>. Matching only the first
+# meant every compression through the bundled MCP -- the default install --
+# never reached the badge or the ledger.
+def tool_match($tool): (. // "") as $n
+  | $n == $tool
+    or ($n | startswith("mcp__plugin_") and endswith("_" + ($tool | ltrimstr("mcp__"))));
+def pfx_match($pfx): (. // "") as $n
+  | ($n | startswith($pfx))
+    or ($n | startswith("mcp__plugin_") and contains("_" + ($pfx | ltrimstr("mcp__"))));
+def mcp_ids($tool): [tool_uses[] | select(.name | tool_match($tool)) | .id];
+def headroom_ids($pfx): [tool_uses[] | select(.name | pfx_match($pfx)) | .id];
 
 # The hcat gate REWRITES a raw `cat <big file>` into an hcat run by returning
 # updatedInput from PreToolUse. Claude Code hands the rewritten command to the

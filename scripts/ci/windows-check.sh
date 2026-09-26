@@ -15,6 +15,10 @@ skip() { echo "skip - $1"; SKIP=$((SKIP+1)); SKIP_NAMES="${SKIP_NAMES:+$SKIP_NAM
 need() { [ -n "${!1:-}" ] || { echo "windows-check: env $1 is required" >&2; exit 2; }; }
 need VENV_DIR          # a venv the workflow created with `python -m venv` + pip install headroom-ai
 need HOME
+# jq is not optional: the sandbox PATH below is built from `dirname "$(command -v jq)"`,
+# and a missing jq turns that into `.` -- the checkout itself on PATH -- while every
+# JSON assertion quietly reports "invalid".
+command -v jq >/dev/null 2>&1 || { echo "windows-check: jq is required on PATH" >&2; exit 2; }
 
 # shellcheck disable=SC1091
 . "$ROOT/scripts/lib/engine-resolve.sh"
@@ -91,6 +95,29 @@ if printf '%s' "$neg" | grep -q "engine absent"; then
 else
   fail "negative control: hcat without an engine did not report 'engine absent'" "$(printf '%s' "$neg" | head -1)"
 fi
+
+# 4b. hcat-gate.sh (the PreToolUse Read hook) with the REAL engine. The POSIX
+# suite only drives it through stub interpreters, and its one Windows-layout
+# fixture (w3) is on the known-failures list -- so without this nothing proved
+# the gate denies on Windows at all.
+python - "$TMPD/big.json" <<'PY'
+import json, sys
+json.dump([{"id": i, "name": "row %d" % i, "ok": True} for i in range(2000)], open(sys.argv[1], "w"), indent=2)
+PY
+gate_in() { jq -n --arg fp "$1" --arg sid "$2" '{hook_event_name:"PreToolUse", tool_name:"Read", session_id:$sid, tool_input:{file_path:$fp}}'; }
+out=$(gate_in "$TMPD/big.json" wc-gate-1 | env -u HCAT_PYTHON DOCTOR_VENV_DIR="$VENV_DIR" HEADROOM_STATE_DIR="$TMPD/gate-state" \
+      PATH="$(dirname "$(command -v jq)"):/usr/bin:/bin" bash "$ROOT/scripts/hcat-gate.sh" 2>/dev/null)
+if printf '%s' "$out" | grep -q '"permissionDecision"[[:space:]]*:[[:space:]]*"deny"'; then
+  ok "hcat-gate denies a large JSON Read with the REAL Windows engine"
+else fail "hcat-gate did not deny a large JSON Read with the real engine" "$(printf '%s' "$out" | head -c 300)"; fi
+# negative control: engine unresolvable -> the gate must fail OPEN (no deny)
+# jq stays on PATH: without it the gate exits before reading its input, and the
+# control would pass for the wrong reason.
+neg=$(gate_in "$TMPD/big.json" wc-gate-2 | env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent HEADROOM_STATE_DIR="$TMPD/gate-state" \
+      PATH="$(dirname "$(command -v jq)"):/usr/bin:/bin" bash "$ROOT/scripts/hcat-gate.sh" 2>/dev/null)
+if printf '%s' "$neg" | grep -q '"deny"'; then
+  fail "negative control: hcat-gate denied with no engine and no jq-renderable path" "$(printf '%s' "$neg" | head -c 300)"
+else ok "negative control: with no engine the gate fails open (the check above can fail)"; fi
 
 # 5. doctor --fix in a sandbox HOME with the real venv: engine ok, shim created,
 # status line wired with Windows paths.
