@@ -88,7 +88,8 @@ Each line is aligned `<status> - <what>`:
 - `fixable` — the doctor can repair this itself with `--fix`:
   - engine missing → bootstrap a venv at `~/.headroom-venv` (`python3`,
     `python`, or `py -3` — whichever works; `bin/` or `Scripts/` layout) +
-    `pip install "headroom-ai[all]"`, then shim `headroom` onto PATH as above
+    `pip install "headroom-ai[all]"` (falling back to plain `headroom-ai` when
+    the extras fail to build), then shim `headroom` onto PATH as above
   - legacy hook entries → removed from `~/.claude/settings.json`,
     `~/.claude/settings.local.json`, and the current project's
     `.claude/settings.json` / `.claude/settings.local.json` (a timestamped

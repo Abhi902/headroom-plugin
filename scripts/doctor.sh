@@ -563,8 +563,16 @@ _sl_canon_file() {  # _sl_canon_file <path> -> canonical dir (pwd -P) + basename
   case $d in //*) return 1 ;; esac
   printf '%s\n' "$d/${u##*/}"
 }
+_sl_quote_safe() {  # exit 0 when <s> is inert inside the "..." word sl_hr_cmd prints
+  # (see _sl_bash_path_compute for why exactly these five are the active ones)
+  local nl='
+' cr
+  cr=$(printf '\r')
+  case $1 in *'"'*|*'$'*|*'`'*|*"$nl"*|*"$cr"*) return 1 ;; esac
+  return 0
+}
 _sl_bash_path_compute() {
-  local b nl cr bdir _sl_pre _sl_canon
+  local b bdir _sl_pre _sl_canon
   # CLAUDE_CODE_GIT_BASH_PATH is env, and env can come from a PROJECT-scoped
   # settings.json — i.e. from repo config. `--fix` persists what we print here
   # into ~/.claude/settings.json as statusLine.command, which Claude Code then
@@ -580,11 +588,11 @@ _sl_bash_path_compute() {
   # above gone a backslash can neither introduce an expansion nor terminate
   # the quoting — the worst it can do is name a file that does not exist,
   # which the -f test already catches.
-  nl='
-'
-  cr=$(printf '\r')
+  # The same rule holds for EVERY source of the printed path, not just this
+  # override: sl_path_bash applies it to PATH candidates, and the final value
+  # is checked once more below.
   b=${CLAUDE_CODE_GIT_BASH_PATH:-}
-  case $b in *'"'*|*'$'*|*'`'*|*"$nl"*|*"$cr"*) b="" ;; esac
+  _sl_quote_safe "$b" || b=""
   # A network share (\\host\share, //host/share, or any mix of the two
   # separators) is refused BEFORE anything below stats it: Git for Windows is
   # never installed on one, and probing it would reach out to the network.
@@ -679,7 +687,11 @@ _sl_bash_path_compute() {
   # POSIX-spelled (/c/Program Files/Git/bin/bash.exe) and Claude Code executes
   # this command outside Git Bash, where only the native spelling resolves.
   # `cygpath -w` on an already-Windows path is a no-op, so one pass covers both.
-  win_path "$b"
+  # Last gate on what is actually printed (and persisted): whatever produced it,
+  # it must be inert inside the quoted word -- else print nothing (refuse to wire).
+  b=$(win_path "$b")
+  _sl_quote_safe "$b" && printf '%s\n' "$b"
+  return 0
 }
 sl_path_bash() {  # the first bash on PATH outside the project, empty if none
   # PATH is split once into an array, so the loop body (which spawns git via
@@ -697,6 +709,8 @@ sl_path_bash() {  # the first bash on PATH outside the project, empty if none
       [ -f "$c" ] && [ -x "$c" ] || continue
       dc=$(cd "$d" 2>/dev/null && pwd -P) || continue
       is_network_path "$dc" && continue   # e.g. a symlink onto a share
+      # a PATH dir is config-reachable too: the override's quoting rule applies
+      _sl_quote_safe "$dc/${c##*/}" || continue
       under_workspace "$dc" && continue
       # System32\bash.exe is WSL's launcher, not Git for Windows' bash
       # (bracket classes, not tr: this must work on whatever PATH is given)
@@ -923,7 +937,8 @@ fi
 #     path) is not on PATH at all, so the bundled entry cannot start. Without
 #     this, the only remedy was an rc-file edit.
 # What the registration does NOT do: it adds a SECOND server. Claude Code keeps
-# plugin servers under their own namespaced name (plugin:<plugin>:headroom), so the
+# plugin servers under their own namespaced name (listed as plugin:<plugin>:headroom;
+# its tools are mcp__plugin_<plugin>_headroom__*), so the
 # bundled bare-name entry is still spawned next to it -- on Windows a planted
 # headroom.* in the project still runs. Nothing here may claim otherwise; 2b-win
 # above is the detector for that file.

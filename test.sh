@@ -665,6 +665,9 @@ check "dangi nudge: plain hcat form (on PATH)" 'hcat \"<path>\"' "$out"
 check "dangi nudge: says plugin installs have it on PATH" "plugin installs have it on PATH" "$out"
 check "dangi nudge: names legacy fallback" "~/.claude/hcat" "$out"
 check_absent "dangi nudge: no plugin-internal path" "bin/hcat" "$out"
+# the default (plugin) install exposes ONLY the namespaced tool: the nudge must name it
+check "dangi nudge: names the plugin-namespaced compress tool" "mcp__plugin_<plugin>_headroom__headroom_compress" "$out"
+check "dangi nudge: ...and the hand-registered one" "or mcp__headroom__headroom_compress when registered by hand" "$out"
 
 if [ -n "$HEADROOM_PY" ]; then
   out=$(gate_input "$TMP/hc_big.json" plugnat-g1 | CLAUDE_PLUGIN_ROOT="$ROOT" sh -c "$gate_cmd"); rc=$?
@@ -5083,7 +5086,7 @@ W28="$W/w28"; mkdir -p "$W28"
 # The doctor's sl_* functions, extracted HERE (with the full PATH): the probes
 # below run under restricted PATHs, and a sed that is not on them would make
 # every probe an empty, vacuously-passing string.
-SL_FUNCS=$(sed -n '/^_sl_same_native() {/,/^}/p;/^_sl_drive_posix() {/,/^}/p;/^sl_prefer_wrapper_bash() {/,/^}/p;/^sl_bash_path() {/,/^}/p;/^_sl_canon_file() {/,/^}/p;/^_sl_bash_path_compute() {/,/^}/p;/^sl_path_bash() {/,/^}/p' "$DOCTOR")
+SL_FUNCS=$(sed -n '/^_sl_same_native() {/,/^}/p;/^_sl_quote_safe() {/,/^}/p;/^_sl_drive_posix() {/,/^}/p;/^sl_prefer_wrapper_bash() {/,/^}/p;/^sl_bash_path() {/,/^}/p;/^_sl_canon_file() {/,/^}/p;/^_sl_bash_path_compute() {/,/^}/p;/^sl_path_bash() {/,/^}/p' "$DOCTOR")
 sl_fn() {  # sl_fn <function> -- run a doctor.sh sl_* function with DOCTOR_OS=windows and a passthrough cygpath
   # absolute bash: these fixtures put a fake `bash` first on PATH
   SL_FUNCS="$SL_FUNCS" DOCTOR_OS=windows DOCTOR_CYGPATH="$W28/cyg" "$BASHBIN" -c "
@@ -5389,14 +5392,27 @@ nope=miss" "$got"
 # --- w28e. REGRESSION (PR #10 review round 13).
 # The PATH fallback skips a network-share dir. On POSIX `//<abs>` names a REAL
 # directory, so without the rule the share spelling is returned (non-vacuous).
-got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="/$W28De:$W28/sys:/usr/bin:/bin" sl_fn sl_path_bash)
-check_eq "w28e: the PATH fallback skips a network-share dir" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
 case ${OSTYPE:-} in
   # on MSYS `//tmp/...` really IS a network path, so the spelling cannot be staged
-  msys*|cygwin*) skip_note "w28e: //-spelled PATH dir sanity (POSIX-only: // is a real share on MSYS)" ;;
-  *) got=$(cd "$W28P/src" && PATH="/$W28De:$W28/sys:/usr/bin:/bin" sl_fn eval '[ -f "/'"$W28De"'/bash.exe" ] && echo exists')
-     check_eq "w28e: ...(fixture sanity: the share spelling resolves on this host)" "exists" "$got" ;;
+  msys*|cygwin*) skip_note "w28e: //-spelled PATH dir fixtures (POSIX-only: // is a real share on MSYS)" ;;
+  *)
+    got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="/$W28De:$W28/sys:/usr/bin:/bin" sl_fn sl_path_bash)
+    check_eq "w28e: the PATH fallback skips a network-share dir" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+    got=$(cd "$W28P/src" && PATH="/$W28De:$W28/sys:/usr/bin:/bin" sl_fn eval '[ -f "/'"$W28De"'/bash.exe" ] && echo exists')
+    check_eq "w28e: ...(fixture sanity: the share spelling resolves on this host)" "exists" "$got"
+    # ...and it is refused BEFORE anything stats it: shadow `[` and log every
+    # //-spelled operand it is handed (a stat of a share reaches the network)
+    got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="/$W28De:$W28/sys:/usr/bin:/bin" \
+          sl_fn eval '[() { case $1:${2:-} in -[efdxrs]://*) printf "STAT:%s\n" "$2" >&2 ;; esac; builtin [ "$@"; }
+                      sl_path_bash >/dev/null' 2>&1)
+    check_eq "w28e: ...without stat-ing the share first" "" "$got"
+    ;;
 esac
+# a PATH dir that RESOLVES onto a share (symlink / junction) is refused after
+# canonicalisation: pwd is shadowed to report a share for an ordinary dir
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28/sys" \
+      sl_fn eval 'pwd() { printf "%s\n" "//host/share/bin"; }; sl_path_bash')
+check_eq "w28e: a PATH dir that resolves onto a share is skipped" "" "$got"
 # ...and one shared predicate decides "network share" for every caller
 got=$(bash -c ". '$ER'; for p in '\\\\h\\s' '//h/s' '\\/h' '/\\h' '/c/x' 'C:\\x' ''; do is_network_path \"\$p\" && printf 'y' || printf 'n'; done")
 check_eq "w28e: is_network_path classifies share / non-share spellings" "yyyynnn" "$got"
@@ -5414,6 +5430,20 @@ out=$(printf '{"session_id":"w28e"}' | env -u HCAT_PYTHON DOCTOR_OS=windows HOME
       HEADROOM_STATE_DIR="$W28/e/pstate" bash "$PROBE")
 check "w28e: the probe reports a share override as a network share" "points at a network share" "$out"
 check_absent "w28e: ...not as a missing Git Bash" "points at a missing Git Bash" "$out"
+
+# --- w28f. REGRESSION (PR #10 review round 14).
+# A PATH dir OUTSIDE the project whose name is a command substitution is skipped
+# by the fallback, exactly like such an override (the value is persisted inside
+# a double-quoted word that Claude Code executes).
+W28F="$W28/f"; mkdir -p "$W28F/"'$(touch pwned)'
+printf '#!/bin/sh\nexit 0\n' > "$W28F/"'$(touch pwned)/bash'; chmod +x "$W28F/"'$(touch pwned)/bash'
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28F/"'$(touch pwned)'":$W28/sys:/usr/bin:/bin" sl_fn sl_path_bash)
+check_eq "w28f: the PATH fallback skips a bash under a \$(...)-named dir" "$(cd "$W28/sys" && pwd -P)/bash" "$got"
+got=$(cd "$W28P/src" && unset CLAUDE_CODE_GIT_BASH_PATH && PATH="$W28F/"'$(touch pwned)' sl_fn sl_bash_path)
+check_eq "w28f: ...and with nothing else on PATH nothing is printed (refuse to wire)" "" "$got"
+got=$(bash -c ". '$ER'; eval \"\$(sed -n '/^_sl_quote_safe() {/,/^}/p' '$DOCTOR')\"; for v in 'C:\\Git\\bin\\bash.exe' '/c/a b/bash' 'a\"b' 'a\$b' 'a\`b' \"\$(printf 'a\\rb')\" 'a
+b'; do _sl_quote_safe \"\$v\" && printf y || printf n; done")
+check_eq "w28f: _sl_quote_safe passes paths and refuses the five active characters" "yynnnnn" "$got"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
