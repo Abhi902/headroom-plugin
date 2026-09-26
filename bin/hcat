@@ -84,6 +84,11 @@ else
   PY=$(resolve_engine_python) || PY=""   # partial legacy copy: narrower lookup
 fi
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  # A resolved-but-broken engine is an outage whether or not the jq tier below
+  # can still serve this file -- record it FIRST. Recording only on the exit-4
+  # path let a successful toon-lite render (exit 0) hide the breakage from the
+  # badge on every file it could handle.
+  [ -n "$PY_BROKEN" ] && note_error engine "hcat: engine import failed ($PY_BROKEN) — run /headroom-usage-indicator:doctor"
   # No engine: TOON-lite lossless tier (pure jq) before giving up. A uniform
   # JSON array (same flat keys per row) renders as one header row + CSV-like
   # rows — typically 30-60% smaller, lossless, zero dependencies beyond jq —
@@ -124,9 +129,8 @@ if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   # resolved-but-broken one IS: say which interpreter, record it, and keep the
   # base's exit 4 so callers can still tell the two apart.
   if [ -n "$PY_BROKEN" ]; then
-    echo "hcat: engine python found but cannot import headroom.compress ($PY_BROKEN) — run /doctor" >&2
-    note_error engine "hcat: engine import failed ($PY_BROKEN) — run /doctor"
-    exit 4
+    echo "hcat: engine python found but cannot import headroom.compress ($PY_BROKEN) — run /headroom-usage-indicator:doctor" >&2
+    exit 4   # already recorded above
   fi
   echo "hcat: headroom python not found (pip install \"headroom-ai[all]\", or set HCAT_PYTHON)" >&2
   # PY is non-empty here exactly when HCAT_PYTHON points at a non-executable.

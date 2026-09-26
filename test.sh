@@ -5,6 +5,10 @@ set -u
 ROOT=$(cd "$(dirname "$0")" && pwd)
 SCRIPT="$ROOT/scripts/statusline.sh"
 TMP=$(mktemp -d)
+# doctor.sh and session-probe.sh read MCP registrations from the Claude Code
+# config file. Point every run at a private, absent one so no fixture can read
+# (or, through the claude stub, write) the developer's real ~/.claude.json.
+export HEADROOM_CLAUDE_JSON="$TMP/claude.json.absent"
 trap 'rm -rf "$TMP"' EXIT
 export HEADROOM_STATE_DIR="$TMP/state"
 # The Windows fixtures below fake the OS (DOCTOR_OS=windows) while their fake
@@ -4439,25 +4443,56 @@ fi
 W21="$W/w21-mcpreg"; mkdir -p "$W21/stub" "$W21/venv/bin" "$W21/cd" "$W21/shim" "$W21/state"
 printf '#!/bin/sh\nexit 0\n'  > "$W21/venv/bin/python";   chmod +x "$W21/venv/bin/python"
 printf '#!/bin/sh\necho hr\n' > "$W21/venv/bin/headroom"; chmod +x "$W21/venv/bin/headroom"
-# The stub behaves like the real CLI where the doctor depends on it: `get` prints
-# the real layout (Scope:/Command:) and fails when nothing is registered, `add`
-# REFUSES a name that already exists (the old stub overwrote, which hid a
-# re-run that stayed `fixable` forever), and `remove` exists.
+# The stub behaves like the real CLI (2.1.x) where the doctor depends on it. It
+# keeps state in the same JSON file the doctor reads ($HEADROOM_CLAUDE_JSON):
+# user scope under .mcpServers, local scope under .projects[<root>].mcpServers.
+# `add` parses argv like the real one: -e is VARIADIC, so a bare token after it
+# (the old `-e A=1 -e B=1 headroom --` order) is rejected exactly as the real CLI
+# rejects it -- the previous stub took any order, which is how an add that never
+# worked on a real host passed the suite. It refuses an existing name and honours
+# CLAUDE_STUB_FAIL_ADD for the add-failed path.
 cat > "$W21/stub/claude" <<'W21CLAUDE'
 #!/bin/sh
-reg="$CLAUDE_STUB_REG"
+cj="$HEADROOM_CLAUDE_JSON"
+[ -f "$cj" ] || printf '{}\n' > "$cj"
 [ "$1" = "mcp" ] || exit 0
-case $2 in
+sub=$2; shift 2
+case $sub in
   get)
-    [ -f "$reg" ] || { echo "No MCP server found with name: headroom" >&2; exit 1; }
-    printf 'headroom:\n  Scope: User config (available in all your projects)\n  Type: stdio\n  Command: %s\n  Args: mcp serve\n' "$(cat "$reg")"
+    c=$(jq -r '.mcpServers.headroom.command // empty' "$cj")
+    [ -n "$c" ] || { echo "No MCP server found with name: headroom" >&2; exit 1; }
+    printf 'headroom:\n  Scope: User config (available in all your projects)\n  Type: stdio\n  Command: %s\n  Args: mcp serve\n' "$c"
     exit 0 ;;
   add)
-    [ -f "$reg" ] && { echo "MCP server headroom already exists in user config" >&2; exit 1; }
-    shift 2; printf '%s\n' "$*" > "$reg.args"
-    while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
-    printf '%s\n' "$2" > "$reg"; exit 0 ;;
-  remove) rm -f "$reg"; exit 0 ;;
+    scope=local; name=""; envs=""
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -s|--scope) scope=$2; shift 2 ;;
+        -e|--env) shift
+          while [ $# -gt 0 ]; do
+            case $1 in
+              -*) break ;;
+              *=*) envs="$envs $1"; shift ;;
+              *) echo "Invalid environment variable format: $1, environment variables should be added as: -e KEY1=value1 -e KEY2=value2" >&2; exit 1 ;;
+            esac
+          done ;;
+        --) shift; break ;;
+        -*) shift ;;
+        *) [ -z "$name" ] && name=$1; shift ;;
+      esac
+    done
+    [ -n "$name" ] && [ $# -gt 0 ] || { echo "error: missing required argument" >&2; exit 1; }
+    [ -n "${CLAUDE_STUB_FAIL_ADD:-}" ] && { echo "stub: add failed on purpose" >&2; exit 1; }
+    [ "$scope" = user ] || { echo "stub models user scope only" >&2; exit 1; }
+    if jq -e --arg n "$name" '.mcpServers[$n]' "$cj" >/dev/null 2>&1; then
+      echo "MCP server $name already exists in user config" >&2; exit 1
+    fi
+    c=$1; shift
+    jq --arg n "$name" --arg c "$c" '.mcpServers[$n] = {type:"stdio", command:$c, args:$ARGS.positional}' "$cj" --args "$@" > "$cj.tmp" && mv "$cj.tmp" "$cj"
+    printf '%s --%s -- %s %s\n' "$name" "$envs" "$c" "$*" > "$cj.args"
+    exit 0 ;;
+  remove)
+    jq 'del(.mcpServers.headroom)' "$cj" > "$cj.tmp" && mv "$cj.tmp" "$cj"; exit 0 ;;
 esac
 exit 0
 W21CLAUDE
@@ -4465,7 +4500,7 @@ chmod +x "$W21/stub/claude"
 link_tool "$(command -v jq)" "$W21/stub/jq"
 doc_settings_wired "$W21/cd" > "$W21/s.json"
 w21_run() {
-  env -u HCAT_PYTHON DOCTOR_OS=windows CLAUDE_STUB_REG="$W21/reg" \
+  env -u HCAT_PYTHON DOCTOR_OS=windows HEADROOM_CLAUDE_JSON="$W21/cj.json" \
       PATH="$W21/stub:$W21/venv/bin:/usr/bin:/bin" DOCTOR_SETTINGS="$W21/s.json" \
       DOCTOR_CLAUDE_DIR="$W21/cd" DOCTOR_VENV_DIR="$W21/venv" DOCTOR_SHIM_DIR="$W21/shim" \
       HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" --fix 2>&1
@@ -4473,20 +4508,20 @@ w21_run() {
 out=$(w21_run)
 check "w21: --fix registers the MCP by absolute path" "registered the headroom MCP by absolute path" "$out"
 check "w21: ...and says the bundled bare-name entry still spawns (no false \"closed\" claim)" "bundled bare-name entry still spawns" "$out"
-check "w21: the registration names the resolved CLI, not a bare name" "headroom -- " "$(cat "$W21/reg.args" 2>/dev/null)"
-check "w21: ...and carries the bundled env" "HEADROOM_UPDATE_CHECK=off" "$(cat "$W21/reg.args" 2>/dev/null)"
+check "w21: the registration names the resolved CLI, not a bare name" "$W21/venv/bin/headroom" "$(jq -r '.mcpServers.headroom.command' "$W21/cj.json" 2>/dev/null)"
+check "w21: ...and carries the bundled env" "HEADROOM_UPDATE_CHECK=off" "$(cat "$W21/cj.json.args" 2>/dev/null)"
 out=$(w21_run)
 check        "w21: a second --fix sees it already registered" "MCP registered by absolute path" "$out"
 # review #3: the DETECT half must run read-only too, or an agent following the
 # doctor skill (read-only first, consent second) can never recommend --fix for it.
-out=$(env -u HCAT_PYTHON DOCTOR_OS=windows CLAUDE_STUB_REG="$W21/reg2" \
+out=$(env -u HCAT_PYTHON DOCTOR_OS=windows HEADROOM_CLAUDE_JSON="$W21/cj2.json" \
       PATH="$W21/stub:$W21/venv/bin:/usr/bin:/bin" DOCTOR_SETTINGS="$W21/s.json" \
       DOCTOR_CLAUDE_DIR="$W21/cd" DOCTOR_VENV_DIR="$W21/venv" DOCTOR_SHIM_DIR="$W21/shim" \
       HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" 2>&1)
 check        "w21: a READ-ONLY run reports the bare-name exposure as fixable" \
              "registered by bare name only" "$out"
 check_absent "w21: ...and a read-only run registers nothing" "registered the headroom MCP" "$out"
-if [ -f "$W21/reg2" ]; then
+if jq -e '.mcpServers.headroom' "$W21/cj2.json" >/dev/null 2>&1; then
   echo "FAIL - w21: a read-only run must not call claude mcp add"; FAIL=$((FAIL+1))
 else
   echo "ok - w21: a read-only run must not call claude mcp add"; PASS=$((PASS+1))
@@ -4656,8 +4691,10 @@ W24P="$W24/posix"; mkdir -p "$W24P/venv/bin" "$W24P/cd" "$W24P/shim" "$W24P/stat
 printf '#!/bin/sh\nexit 0\n'  > "$W24P/venv/bin/python";   chmod +x "$W24P/venv/bin/python"
 printf '#!/bin/sh\necho hr\n' > "$W24P/venv/bin/headroom"; chmod +x "$W24P/venv/bin/headroom"
 doc_settings_wired "$W24P/cd" > "$W24P/s.json"
+w24p_cmd()  { jq -r '.mcpServers.headroom.command // empty' "$W24P/cj.json" 2>/dev/null; }
+w24p_seed() { jq -n --arg c "$1" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W24P/cj.json"; }
 w24p_run() {  # w24p_run <PATH> [--fix]
-  env -u HCAT_PYTHON DOCTOR_OS=unix CLAUDE_STUB_REG="$W24P/reg" PATH="$1" \
+  env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W24P/cj.json" PATH="$1" \
       DOCTOR_SETTINGS="$W24P/s.json" DOCTOR_CLAUDE_DIR="$W24P/cd" DOCTOR_VENV_DIR="$W24P/venv" \
       DOCTOR_SHIM_DIR="$W24P/shim" HEADROOM_STATE_DIR="$W24P/state" bash "$DOCTOR" ${2:-} 2>&1
 }
@@ -4666,24 +4703,24 @@ check "w24: read-only POSIX run reports the off-PATH MCP as fixable" "registers 
 out=$(w24p_run "$W21/stub:/usr/bin:/bin" --fix); rc=$?
 check "w24: POSIX --fix registers the engine by absolute path" "registered the headroom MCP by absolute path" "$out"
 check_eq "w24: ...naming the venv engine itself, not the PATH-dependent shim" \
-         "$(cd "$W24P/venv/bin" && pwd -P)/headroom" "$(cat "$W24P/reg" 2>/dev/null)"
+         "$(cd "$W24P/venv/bin" && pwd -P)/headroom" "$(w24p_cmd)"
 check_absent "w24: ...so the off-PATH shim is a note, not a FAIL" "FAIL    - headroom shimmed" "$out"
 out=$(w24p_run "$W21/stub:/usr/bin:/bin" --fix)
 check "w24: a second POSIX --fix sees it registered" "MCP registered by absolute path" "$out"
 check_absent "w24: ...and does not re-add it" "registered the headroom MCP by absolute path" "$out"
 # #7: a registration that no longer starts (venv moved) is replaced, not re-added into a refusal
-printf '%s\n' "$W24P/moved/headroom" > "$W24P/reg"
+w24p_seed "$W24P/moved/headroom"
 out=$(w24p_run "$W21/stub:/usr/bin:/bin" --fix)
 check "w24: a dead user-scoped entry is replaced" "replaced a dead entry: $W24P/moved/headroom" "$out"
-check_eq "w24: ...with the live engine" "$(cd "$W24P/venv/bin" && pwd -P)/headroom" "$(cat "$W24P/reg" 2>/dev/null)"
+check_eq "w24: ...with the live engine" "$(cd "$W24P/venv/bin" && pwd -P)/headroom" "$(w24p_cmd)"
 # a live hand-registered entry at a DIFFERENT path is kept (no churn, no refusal loop)
 mkdir -p "$W24P/other"; printf '#!/bin/sh\necho hr\n' > "$W24P/other/headroom"; chmod +x "$W24P/other/headroom"
-printf '%s\n' "$W24P/other/headroom" > "$W24P/reg"
+w24p_seed "$W24P/other/headroom"
 out=$(w24p_run "$W21/stub:/usr/bin:/bin" --fix)
 check "w24: a live entry at another path is kept" "MCP registered by absolute path ($W24P/other/headroom)" "$out"
 check_absent "w24: ...and never reported fixable" "does not start; --fix replaces" "$out"
 # neither remedy possible: that is the outage, and it must still FAIL
-rm -f "$W24P/reg"; rm -rf "$W24P/shim"; mkdir -p "$W24P/shim"
+rm -f "$W24P/cj.json"; rm -rf "$W24P/shim"; mkdir -p "$W24P/shim"
 out=$(w24p_run "$STUB:/usr/bin:/bin" --fix); rc=$?
 check "w24: off PATH and no claude CLI still FAILs" "is not on PATH, and \`claude\` is not on PATH" "$out"
 check_eq "w24: ...with a nonzero exit" "1" "$rc"
@@ -4694,12 +4731,12 @@ check_absent "w24: headroom on PATH -> no POSIX registration" "by absolute path"
 # #9: the probe must not flag an install broken that the doctor reports ok.
 W24S="$W24/probe"; mkdir -p "$W24S/home" "$W24S/state"
 jq -n --arg c "$W24P/venv/bin/headroom" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W24S/home/.claude.json"
-printf '{"session_id":"w24"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W24S/home" \
+printf '{"session_id":"w24"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W24S/home" HEADROOM_CLAUDE_JSON="$W24S/home/.claude.json" \
   DOCTOR_VENV_DIR="$W24P/venv" PATH="$STUB:/usr/bin:/bin" \
   HEADROOM_STATE_DIR="$W24S/state" bash "$PROBE" >/dev/null
 [ ! -s "$W24S/state/last-error" ]; pass_fail "w24: a working absolute-path MCP keeps the badge out of broken (mcp)" $?
 jq -n '{mcpServers:{headroom:{command:"/nonexistent/headroom"}}}' > "$W24S/home/.claude.json"
-printf '{"session_id":"w24b"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W24S/home" \
+printf '{"session_id":"w24b"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W24S/home" HEADROOM_CLAUDE_JSON="$W24S/home/.claude.json" \
   DOCTOR_VENV_DIR="$W24P/venv" PATH="$STUB:/usr/bin:/bin" \
   HEADROOM_STATE_DIR="$W24S/state" bash "$PROBE" >/dev/null
 check "w24: ...but a registration whose command is gone still records the outage" "mcp" \
@@ -4716,6 +4753,111 @@ check_absent "w24: no engine + nested JSON -> no dead-end deny" "deny" "$out"
 out=$(gate_input "$W24G/flat.json" w24-g2 | env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent \
       PATH="$W24G/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W24G/state" bash "$GATE")
 check "w24: control -- no engine + a uniform flat array is still redirected" "deny" "$out"
+
+# --- w25. REGRESSION (PR #10 review round 6). One fixture per finding.
+W25="$W/w25"; mkdir -p "$W25"
+# #2: the stub now parses argv like the real CLI, so the add the doctor used to
+# issue (name AFTER the variadic -e) must fail here exactly as it does for real.
+out=$(HEADROOM_CLAUDE_JSON="$W25/order.json" "$W21/stub/claude" mcp add -s user \
+      -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 headroom -- /x/headroom mcp serve 2>&1); rc=$?
+check_eq "w25: the stub rejects the name-after--e order, like the real CLI" "1" "$rc"
+check "w25: ...with the real CLI's error" "Invalid environment variable format: headroom" "$out"
+
+# #7: POSIX, off PATH, --fix, and the add fails -> that is an outage: FAIL, rc 1.
+W25F="$W25/addfail"; mkdir -p "$W25F/venv/bin" "$W25F/cd" "$W25F/shim" "$W25F/state"
+printf '#!/bin/sh\nexit 0\n'  > "$W25F/venv/bin/python";   chmod +x "$W25F/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W25F/venv/bin/headroom"; chmod +x "$W25F/venv/bin/headroom"
+doc_settings_wired "$W25F/cd" > "$W25F/s.json"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=unix CLAUDE_STUB_FAIL_ADD=1 HEADROOM_CLAUDE_JSON="$W25F/cj.json" \
+      PATH="$W21/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$W25F/s.json" DOCTOR_CLAUDE_DIR="$W25F/cd" \
+      DOCTOR_VENV_DIR="$W25F/venv" DOCTOR_SHIM_DIR="$W25F/shim" HEADROOM_STATE_DIR="$W25F/state" \
+      bash "$DOCTOR" --fix 2>&1); rc=$?
+check "w25: a failed add names the CLI's own error" "stub: add failed on purpose" "$out"
+check "w25: POSIX --fix with the MCP still down FAILs" "no working MCP registration landed" "$out"
+check_eq "w25: ...and exits nonzero" "1" "$rc"
+
+# #6: a DEAD local-scoped entry for this project shadows the user-scoped one.
+W25L="$W25/local"; mkdir -p "$W25L/proj/.git" "$W25L/proj/sub"
+proot=$(cd "$W25L/proj" && pwd -P)
+jq -n --arg r "$proot" '{projects:{($r):{mcpServers:{headroom:{type:"stdio",command:"/nonexistent/headroom",args:[]}}}}}' > "$W25L/cj.json"
+out=$(cd "$W25L/proj/sub" && env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W25L/cj.json" \
+      PATH="$W21/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$W25F/s.json" DOCTOR_CLAUDE_DIR="$W25F/cd" \
+      DOCTOR_VENV_DIR="$W25F/venv" DOCTOR_SHIM_DIR="$W25L/shim" HEADROOM_STATE_DIR="$W25L/state" \
+      bash "$DOCTOR" --fix 2>&1)
+check "w25: a dead local-scoped entry is reported, keyed by the git root" \
+      "local-scoped headroom MCP for this project (/nonexistent/headroom)" "$out"
+check "w25: ...with the command to remove it" "claude mcp remove headroom -s local" "$out"
+check_eq "w25: ...and it is never removed for the user" "/nonexistent/headroom" \
+         "$(jq -r --arg r "$proot" '.projects[$r].mcpServers.headroom.command' "$W25L/cj.json")"
+check_absent "w25: ...and the user-scoped registration is not reported as working" \
+             "MCP registered by absolute path" "$out"
+
+# #5: CLAUDE_CONFIG_DIR relocates the config file; the probe must read it there.
+W25C="$W25/ccd"; mkdir -p "$W25C/cfg" "$W25C/home" "$W25C/state"
+jq -n --arg c "$W24P/venv/bin/headroom" '{mcpServers:{headroom:{type:"stdio",command:$c}}}' > "$W25C/cfg/.claude.json"
+printf '{"session_id":"w25c"}' | env -u HCAT_PYTHON -u HEADROOM_CLAUDE_JSON DOCTOR_OS=unix HOME="$W25C/home" \
+  CLAUDE_CONFIG_DIR="$W25C/cfg" DOCTOR_VENV_DIR="$W24P/venv" PATH="$STUB:/usr/bin:/bin" \
+  HEADROOM_STATE_DIR="$W25C/state" bash "$PROBE" >/dev/null
+[ ! -s "$W25C/state/last-error" ]; pass_fail "w25: the probe reads \$CLAUDE_CONFIG_DIR/.claude.json" $?
+# HOME unset: an explicit HEADROOM_CLAUDE_JSON still works (hooks can run without HOME)
+mkdir -p "$W25C/state2"
+printf '{"session_id":"w25d"}' | env -u HCAT_PYTHON -u HOME DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W25C/cfg/.claude.json" \
+  DOCTOR_VENV_DIR="$W24P/venv" PATH="$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W25C/state2" bash "$PROBE" >/dev/null 2>&1
+[ ! -s "$W25C/state2/last-error" ]; pass_fail "w25: ...and works with HOME unset" $?
+# a registered file that exists but is not executable is not a working MCP
+chmod -x "$W24P/venv/bin/headroom"
+mkdir -p "$W25C/state3"
+printf '{"session_id":"w25e"}' | env -u HCAT_PYTHON -u HEADROOM_CLAUDE_JSON DOCTOR_OS=unix HOME="$W25C/home" \
+  CLAUDE_CONFIG_DIR="$W25C/cfg" DOCTOR_VENV_DIR="$W24P/venv" PATH="$STUB:/usr/bin:/bin" \
+  HEADROOM_STATE_DIR="$W25C/state3" bash "$PROBE" >/dev/null
+chmod +x "$W24P/venv/bin/headroom"
+check "w25: a non-executable registered command still records the outage" "mcp" \
+      "$(cut -d' ' -f2 "$W25C/state3/last-error" 2>/dev/null)"
+
+# #4: a broken engine is recorded even when the toon-lite tier serves the file.
+W25H="$W25/hcat"; mkdir -p "$W25H/venv/bin" "$W25H/state" "$W25H/home"
+printf '#!/bin/sh\nexit 1\n' > "$W25H/venv/bin/python"; chmod +x "$W25H/venv/bin/python"
+mkuniform "$W25H/flat.json"
+out=$(env -u HCAT_PYTHON HOME="$W25H/home" DOCTOR_VENV_DIR="$W25H/venv" PATH="$STUB:/usr/bin:/bin" \
+      HEADROOM_STATE_DIR="$W25H/state" bash "$HCAT" "$W25H/flat.json" 2>/dev/null); rc=$?
+check_eq "w25: toon-lite still serves the file" "0" "$rc"
+check "w25: ...but the broken engine is recorded for the badge" "engine" \
+      "$(cut -d' ' -f2 "$W25H/state/last-error" 2>/dev/null)"
+
+# #10/#12: check 2 names a broken engine, and does not claim a timed-out import works.
+W25D="$W25/doc"; mkdir -p "$W25D/venv/bin" "$W25D/cd" "$W25D/slow/bin"
+printf '#!/bin/sh\nexit 1\n' > "$W25D/venv/bin/python"; chmod +x "$W25D/venv/bin/python"
+doc_settings_wired "$W25D/cd" > "$W25D/s.json"
+out=$(env -u HCAT_PYTHON PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$W25D/s.json" DOCTOR_CLAUDE_DIR="$W25D/cd" \
+      DOCTOR_VENV_DIR="$W25D/venv" DOCTOR_SHIM_DIR="$W25D/shim" HEADROOM_STATE_DIR="$W25D/state" bash "$DOCTOR" 2>&1)
+check "w25: a broken engine is named, not reported as not found" \
+      "engine python at $W25D/venv/bin/python cannot import headroom.compress" "$out"
+printf '#!/bin/sh\nsleep 4\nexit 0\n' > "$W25D/slow/bin/python"; chmod +x "$W25D/slow/bin/python"
+out=$(env -u HCAT_PYTHON DOCTOR_PY_TIMEOUT=1 PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$W25D/s.json" \
+      DOCTOR_CLAUDE_DIR="$W25D/cd" DOCTOR_VENV_DIR="$W25D/slow" DOCTOR_SHIM_DIR="$W25D/shim" \
+      HEADROOM_STATE_DIR="$W25D/state" bash "$DOCTOR" 2>&1)
+check "w25: a timeout-accepted engine says so" "accepted as a slow cold start" "$out"
+check_absent "w25: ...and never claims the import works" "import headroom.compress works" "$out"
+
+# #14: the gate's copy of the toon-lite shape test must agree with bin/hcat's.
+# With no engine, the gate may only redirect to hcat for files hcat's jq tier
+# actually renders -- for every shape, gate-deny <=> hcat exit 0.
+W25G="$W25/agree"; mkdir -p "$W25G/bin" "$W25G/state"
+printf '#!/nonexistent/python\n' > "$W25G/bin/headroom"; chmod +x "$W25G/bin/headroom"
+jq -n '[range(0;700) | {id:., v:"xxxxxxxxxxxxxxxx"}]'                 > "$W25G/flat.json"
+jq -n '[range(0;700) | {id:., v:{deep:"xxxxxxxxxxxxxxxx"}}]'          > "$W25G/nested.json"
+jq -n '[range(0;700) | if . % 2 == 0 then {id:., a:"xxxxxxxxxxxxxxxx"} else {id:., b:"xxxxxxxxxxxxxxxx"} end]' > "$W25G/mixed.json"
+jq -n '{rows:[range(0;700) | {id:., v:"xxxxxxxxxxxxxxxx"}]}'           > "$W25G/object.json"
+jq -n '[range(0;700) | [., "xxxxxxxxxxxxxxxx"]]'                      > "$W25G/arrays.json"
+for f in flat nested mixed object arrays; do
+  g=$(gate_input "$W25G/$f.json" "w25g-$f" | env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent \
+      PATH="$W25G/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W25G/state" bash "$GATE")
+  env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent PATH="$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W25G/state" \
+      bash "$HCAT" "$W25G/$f.json" >/dev/null 2>&1; h=$?
+  gd=no; printf '%s' "$g" | grep -q '"deny"' && gd=yes
+  hr=no; [ "$h" -eq 0 ] && hr=yes
+  check_eq "w25: gate and hcat agree on the $f shape (gate denies <=> hcat renders)" "$hr" "$gd"
+done
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

@@ -139,7 +139,13 @@ resolve_engine_python_validated() {  # first IMPORTABLE candidate, not first exe
     if [ "$st" -eq 0 ]; then printf '%s\n' "$c"; return 0; fi
     [ "$st" -eq 124 ] && [ -z "$slow" ] && slow=$c
   done < <(engine_python_candidates)
-  [ -n "$slow" ] && { printf '%s\n' "$slow"; return 0; }
+  # ER_SLOW_NOTE lets an interactive caller (doctor.sh) say "accepted on a
+  # timeout" instead of claiming the import was verified; the status stays 0 so
+  # the hooks' 0/1/2 contract is unchanged.
+  if [ -n "$slow" ]; then
+    [ -n "${ER_SLOW_NOTE:-}" ] && : > "$ER_SLOW_NOTE" 2>/dev/null
+    printf '%s\n' "$slow"; return 0
+  fi
   [ -n "$seen" ] && { printf '%s\n' "$seen"; return 2; }
   return 1
 }
@@ -214,6 +220,13 @@ _er_cygpath() {
   if [ -n "${DOCTOR_CYGPATH:-}" ]; then "$DOCTOR_CYGPATH" "$@"
   elif command -v cygpath >/dev/null 2>&1; then cygpath "$@"
   else return 1; fi
+}
+claude_json_path() {  # the Claude Code config that holds user- and local-scoped MCP servers
+  # The CLI writes $CLAUDE_CONFIG_DIR/.claude.json when that is set, else
+  # ~/.claude.json. HEADROOM_CLAUDE_JSON overrides both (tests, odd layouts).
+  if [ -n "${HEADROOM_CLAUDE_JSON:-}" ]; then printf '%s\n' "$HEADROOM_CLAUDE_JSON"
+  elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then printf '%s\n' "$CLAUDE_CONFIG_DIR/.claude.json"
+  else printf '%s\n' "${HOME:-}/.claude.json"; fi
 }
 win_path()  { _er_cygpath -w "$1" 2>/dev/null || printf '%s\n' "$1"; }   # /c/x → C:\x
 unix_path() { _er_cygpath -u "$1" 2>/dev/null || printf '%s\n' "$1"; }   # C:\x → /c/x

@@ -175,7 +175,7 @@ The hooks, `hcat`, and the MCP definition update with the plugin — nothing to 
 
 **Coming from v2.7.2 or earlier, run `/headroom-usage-indicator:doctor --fix` once too** — v2.7.3 fixes the bundled MCP registration that never connected (see [above](#the-gauge-and-the-engine)), and `--fix` repairs the already-installed broken copy rather than waiting for the next fresh install.
 
-**Coming from v2.7.4 or earlier, run `/headroom-usage-indicator:doctor --fix` once more** — v2.8 spawns the bundled MCP by its bare name, so you need headroom on PATH. If the doctor bootstrapped your engine into `~/.headroom-venv`, `--fix` shims it into `~/.local/bin` and tells you the one line to add to your shell rc if that directory isn't on PATH yet.
+**Coming from v2.7.4 or earlier, run `/headroom-usage-indicator:doctor --fix` once more** — v2.8 spawns the bundled MCP by its bare name, so you need headroom on PATH. If the doctor bootstrapped your engine into `~/.headroom-venv`, `--fix` shims it into `~/.local/bin`; if that directory isn't on PATH, it also registers the engine as a user-scoped MCP by absolute path (`claude mcp add -s user headroom ...`), so the MCP works without a shell-rc edit. The bundled bare-name entry stays unconnected until `headroom` is on PATH; the doctor prints the one rc line for that too.
 
 ## Windows
 

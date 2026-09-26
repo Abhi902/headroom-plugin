@@ -182,12 +182,15 @@ than the current working one, set `DOCTOR_PROJECT_DIR` before running either
 command.
 
 **`--fix` may also register the engine as a user-scoped MCP by absolute path**
-via `claude mcp add -s user -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 headroom -- <engine path> mcp serve`.
+via `claude mcp add -s user headroom -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 -- <engine path> mcp serve` (the name goes before `-e`, which is variadic).
 It does this on Windows, and on macOS/Linux only when `headroom` is not on PATH
 (the bundled bare-name entry cannot start there). This writes to the user's
 Claude Code MCP configuration, which is OUTSIDE `~/.claude/settings.json` and
 outside the plugin — list it when asking for consent. A user-scoped entry that
 no longer starts is removed and re-added; one that still starts is left alone.
+A local-scoped `headroom` for the current project wins over the user-scoped one;
+the doctor reports a dead one with the `claude mcp remove headroom -s local`
+command but never removes it itself.
 Be accurate about what it achieves: it adds a SECOND server. On Windows the
 bundled bare-name entry is still spawned, so a `headroom.exe` in a project
 directory still runs — never tell the user this registration closes that. When

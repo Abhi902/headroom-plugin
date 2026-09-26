@@ -113,17 +113,21 @@ user_mcp_by_path() {  # a user-scoped `headroom` MCP registered by an absolute p
   # doctor reports it `ok`. Flagging the same install broken every session
   # contradicted the doctor and could never clear. Only reached on the rare
   # off-PATH branch, so the jq read of ~/.claude.json costs nothing normally.
-  local cj cmd
-  cj=${HEADROOM_CLAUDE_JSON:-${HOME:-}/.claude.json}
+  local cj cmd f
+  # Same file the CLI writes: $CLAUDE_CONFIG_DIR/.claude.json when that is set.
+  # Reading only ~/.claude.json flagged a doctor-ok install broken every session.
+  if type claude_json_path >/dev/null 2>&1; then cj=$(claude_json_path)
+  else cj=${HEADROOM_CLAUDE_JSON:-${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}}; cj=${cj:-${HOME:-}/.claude.json}; fi
   [ -f "$cj" ] && command -v jq >/dev/null 2>&1 || return 1
   cmd=$(jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null) || return 1
   case $cmd in /*|[A-Za-z]:[\\/]*) ;; *) return 1 ;; esac
-  [ -f "$(unix_path "$cmd" 2>/dev/null || printf '%s' "$cmd")" ]
+  f=$(unix_path "$cmd" 2>/dev/null) || f=$cmd
+  [ -f "$f" ] && [ -x "$f" ]
 }
 engine_off_path() {
   command -v headroom >/dev/null 2>&1 && return 0
   user_mcp_by_path && return 0
-  add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /doctor --fix to shim it"
+  add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /headroom-usage-indicator:doctor --fix to repair it"
   # The engine WORKS and the MCP still cannot start: that is a live feature
   # outage, not a setup gap, and the badge has to say so. Leaving it at a nudge
   # is what makes a v2.7.x -> v2.8 update go silent -- a dead MCP renders as an
@@ -139,7 +143,7 @@ engine_off_path() {
   # forever, for a condition that never changed -- which is the fastest way to
   # teach someone to ignore the one always-visible health signal. Under `mcp` it
   # persists until /doctor actually resolves it and clears the file.
-  is_windows || note_error mcp "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /doctor --fix"
+  is_windows || note_error mcp "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /headroom-usage-indicator:doctor --fix"
 }
 # ...and the other half of "spawned by name": on Windows a bare command name is
 # resolved from the spawning process's current directory BEFORE PATH, so a

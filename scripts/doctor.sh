@@ -149,6 +149,7 @@ fi
 # dir → venv bin/ or Scripts/); the first one that imports headroom.compress wins.
 PY=""
 HCAT_PY_BROKEN=0
+ENGINE_BROKEN_AT=""
 # set when this run just bootstrapped the venv itself; check 3 must not smoke
 # a stub/fresh venv on the same run it was created (see check 3 below)
 boot_used=""
@@ -158,26 +159,27 @@ if [ -n "${HCAT_PYTHON:-}" ]; then
   else
     HCAT_PY_BROKEN=1
   fi
-elif type resolve_engine_python_validated >/dev/null 2>&1; then
+else
   # Use the SHARED resolver. This walk was the model the gate and bin/hcat copied,
   # and keeping a private copy here meant three definitions of "which interpreter
   # is the engine" -- able to disagree about the same machine, and this one alone
   # unbounded, so a wedged interpreter could hang a plain /doctor forever.
   # The doctor may wait longer than a hook: it is interactive, and a cold
   # headroom-ai[all] import is exactly what it is here to diagnose.
-  PY=$(ER_PY_TIMEOUT="${DOCTOR_PY_TIMEOUT:-60}" resolve_engine_python_validated); case $? in
+  # (The lib is mandatory -- see the guard where it is sourced -- so there is no
+  # legacy walk to fall back to here.)
+  # Status 2 is a resolved-but-broken engine: keep it apart from "not found" so
+  # the report names the interpreter instead of offering to create a venv as if
+  # nothing were installed.
+  PY=$(ER_SLOW_NOTE="$TMPD/er-slow" ER_PY_TIMEOUT="${DOCTOR_PY_TIMEOUT:-60}" resolve_engine_python_validated); case $? in
     0) ;;
+    2) ENGINE_BROKEN_AT=$PY; PY="" ;;
     *) PY="" ;;
   esac
-else
-  # partial/legacy install with no lib beside this script
-  while IFS= read -r cand; do
-    if [ -n "$cand" ] && [ -x "$cand" ] && "$cand" -c 'import headroom.compress' >/dev/null 2>&1; then
-      PY=$cand; break
-    fi
-  done < <(engine_python_candidates)
 fi
-if [ -n "$PY" ]; then
+if [ -n "$PY" ] && [ -f "$TMPD/er-slow" ]; then
+  say ok "engine python: $PY (the import probe outran ${DOCTOR_PY_TIMEOUT:-60}s and was accepted as a slow cold start — not verified)"
+elif [ -n "$PY" ]; then
   say ok "engine python: $PY (import headroom.compress works)"
 elif [ "$HCAT_PY_BROKEN" -eq 1 ] && [ "$FIX" -eq 1 ]; then
   # the override is authoritative, so a bootstrapped venv would never be used:
@@ -253,6 +255,8 @@ elif [ "$FIX" -eq 1 ]; then
   fi
 elif [ "$HCAT_PY_BROKEN" -eq 1 ]; then
   say fixable "engine python not found — HCAT_PYTHON is set but broken ($HCAT_PYTHON); unset it or point it at a working python (--fix refuses to bootstrap while it is set)"
+elif [ -n "$ENGINE_BROKEN_AT" ]; then
+  say fixable "engine python at $ENGINE_BROKEN_AT cannot import headroom.compress (a broken install) — reinstall headroom-ai into that environment, or --fix creates $VENV_DIR and pip-installs it there"
 else
   say fixable "engine python not found — --fix creates $VENV_DIR (python3/python/py -3 -m venv) and pip-installs headroom-ai"
 fi
@@ -636,6 +640,45 @@ path_hint() {  # the one line the user must run/do to put SHIM_DIR on PATH
     printf "run: echo 'export PATH=\"%s:\$PATH\"' >> %s — then restart Claude Code" "$SHIM_DIR" "$rc"
   fi
 }
+real_file() {  # real_file <path> — follow symlinks to the file itself (bash-3.2 safe, no readlink -f)
+  local p=$1 l n=0
+  while [ -L "$p" ] && [ "$n" -lt 20 ]; do
+    l=$(readlink "$p") || break
+    case $l in /*) p=$l ;; *) p=$(dirname "$p")/$l ;; esac
+    n=$((n+1))
+  done
+  printf '%s\n' "$(cd "$(dirname "$p")" 2>/dev/null && pwd -P || dirname "$p")/$(basename "$p")"
+}
+# MCP registration state is read from the config FILE, not `claude mcp get`:
+# `get` reports only the winning scope (local > project > user), so a local entry
+# hid the user one and 2c re-added into a refusal forever; and `get` health-checks
+# by spawning the server, which a cold engine can outrun.
+mcp_user_cmd() {  # the command of the USER-scoped `headroom` MCP, empty if none
+  local cj; cj=$(claude_json_path)
+  [ -f "$cj" ] || return 0
+  jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null
+}
+mcp_project_root() {  # the key the CLI files local-scoped servers under: the git root, else $PWD
+  local d; d=$(cd "$PWD" 2>/dev/null && pwd -P) || d=$PWD
+  local r=$d
+  while [ -n "$r" ] && [ "$r" != / ]; do [ -e "$r/.git" ] && { printf '%s\n' "$r"; return 0; }; r=$(dirname "$r"); done
+  printf '%s\n' "$d"
+}
+mcp_local_cmd() {  # the command of a LOCAL-scoped `headroom` MCP for this project, empty if none
+  local cj root; cj=$(claude_json_path); root=$(mcp_project_root)
+  [ -f "$cj" ] || return 0
+  jq -r --arg r "$root" '.projects[$r].mcpServers.headroom.command // empty' "$cj" 2>/dev/null
+}
+mcp_add() {  # mcp_add <engine path> — the server NAME must precede -e: -e is variadic
+  # and swallows every following bare token, so `-e A=1 headroom` is rejected by
+  # the real CLI with "Invalid environment variable format: headroom".
+  ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+    run_bounded 20 claude mcp add -s user headroom \
+      -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 -- "$1" mcp serve ) >"$TMPD/mcp-add.out" 2>&1
+}
+mcp_add_hint() {  # the same command, for the user to run by hand
+  printf 'claude mcp add -s user headroom -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 -- "%s" mcp serve' "$1"
+}
 # cli_healed guards the one self-repair retry below: a dead shim the doctor
 # itself wrote is removed under --fix and the whole check re-runs once, so the
 # same run can rewrite it instead of telling the user to reinstall a healthy
@@ -850,27 +893,6 @@ if is_windows; then
 elif ! command -v headroom >/dev/null 2>&1; then
   mcp_need=1
 fi
-real_file() {  # real_file <path> — follow symlinks to the file itself (bash-3.2 safe, no readlink -f)
-  local p=$1 l n=0
-  while [ -L "$p" ] && [ "$n" -lt 20 ]; do
-    l=$(readlink "$p") || break
-    case $l in /*) p=$l ;; *) p=$(dirname "$p")/$l ;; esac
-    n=$((n+1))
-  done
-  printf '%s\n' "$(cd "$(dirname "$p")" 2>/dev/null && pwd -P || dirname "$p")/$(basename "$p")"
-}
-mcp_get_cmd() {  # the Command: of an existing USER-scoped `headroom` MCP, empty if none
-  local out
-  out=$( ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; run_bounded 10 claude mcp get headroom ) 2>/dev/null) || return 0
-  printf '%s\n' "$out" | grep -q 'Scope:[[:space:]]*User' || return 0
-  printf '%s\n' "$out" | sed -n 's/^[[:space:]]*Command:[[:space:]]*//p' | head -1
-}
-mcp_add() {
-  ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-    run_bounded 20 claude mcp add -s user \
-      -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 \
-      headroom -- "$1" mcp serve ) >/dev/null 2>&1
-}
 if [ "$mcp_need" -eq 1 ]; then
   if is_windows; then
     mcp_why="the bundled bare-name entry still spawns too, so a headroom.* in a project directory can still run -- keep check 2b-win clean"
@@ -900,7 +922,7 @@ if [ "$mcp_need" -eq 1 ]; then
   mcp_state=unregistered
   if ! command -v claude >/dev/null 2>&1; then
     if [ -n "$mcp_abs" ]; then
-      mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
+      mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: $(mcp_add_hint "$mcp_abs")"
     else
       mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; fix the engine first, then re-run /headroom-usage-indicator:doctor --fix"
     fi
@@ -916,11 +938,10 @@ if [ "$mcp_need" -eq 1 ]; then
     say skip "MCP registration by absolute path (no headroom CLI resolved yet — fix the engine first)"
     mcp_state=skip
   else
-    mcp_old=$(mcp_get_cmd)
+    mcp_old=$(mcp_user_cmd)
     # An existing registration that still STARTS is kept, even when it names a
     # different path than this run resolved (a hand-registered venv, a PATH fix
-    # since the last run). Re-adding under the same name is refused by the real
-    # CLI, which is how 2c used to stay `fixable` forever.
+    # since the last run). The real CLI refuses to add a name that exists.
     if [ -n "$mcp_old" ] && shim_runs "$(unix_path "$mcp_old")"; then
       say ok "MCP registered by absolute path ($mcp_old) as a user-scoped server — $mcp_why"
       mcp_state=ok
@@ -932,11 +953,15 @@ if [ "$mcp_need" -eq 1 ]; then
         ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; run_bounded 10 claude mcp remove headroom -s user ) >/dev/null 2>&1
         mcp_repl=" (replaced a dead entry: $mcp_old)"
       fi
-      if mcp_add "$mcp_abs"; then
+      # Trust the config file, not the exit status: success means the entry is
+      # there, naming the path we asked for.
+      if mcp_add "$mcp_abs" && [ "$(mcp_user_cmd)" = "$mcp_abs" ]; then
         say fixed "registered the headroom MCP by absolute path ($mcp_abs) as a user-scoped server$mcp_repl — $mcp_why; restart Claude Code"
         mcp_state=ok
       else
-        say fixable "could not register the MCP by absolute path (\`claude mcp add\` failed); run it by hand: claude mcp add -s user headroom -- \"$mcp_abs\" mcp serve"
+        mcp_err=$(head -1 "$TMPD/mcp-add.out" 2>/dev/null)
+        [ -n "$mcp_old" ] && [ -z "$(mcp_user_cmd)" ] && mcp_err="${mcp_err:+$mcp_err; }the dead entry $mcp_old was removed first"
+        say fixable "could not register the MCP by absolute path (\`claude mcp add\` failed${mcp_err:+: $mcp_err}); run it by hand: $(mcp_add_hint "$mcp_abs")"
       fi
     elif [ -n "$mcp_old" ]; then
       say fixable "the user-scoped headroom MCP points at $mcp_old, which does not start; --fix replaces it with $mcp_abs"
@@ -946,14 +971,27 @@ if [ "$mcp_need" -eq 1 ]; then
       say fixable "\`headroom\` is not on PATH, so the bundled bare-name MCP cannot start; --fix registers the engine by absolute path via \`claude mcp add -s user\`"
     fi
   fi
-  # POSIX, and neither remedy landed: the MCP is down. This is the FAIL 2b used to
-  # print for an off-PATH shim, moved here because 2c is what can still repair it.
+  # A LOCAL-scoped `headroom` for this project wins over the user-scoped one. A
+  # dead one silently defeats everything above; never remove it for the user.
+  if command -v claude >/dev/null 2>&1; then
+    mcp_loc=$(mcp_local_cmd)
+    if [ -n "$mcp_loc" ] && ! shim_runs "$(unix_path "$mcp_loc")"; then
+      say fixable "a local-scoped headroom MCP for this project ($mcp_loc) takes precedence over the user-scoped one and does not start — remove it: claude mcp remove headroom -s local"
+      [ "$mcp_state" = ok ] && mcp_state=shadowed
+    elif [ -n "$mcp_loc" ]; then
+      say note "a local-scoped headroom MCP for this project ($mcp_loc) takes precedence over the user-scoped one"
+    fi
+  fi
+  # POSIX: 2c ran because `headroom` is off PATH, so the bundled MCP is down
+  # unless a registration landed. After --fix that is an outage, not advice.
   if ! is_windows && [ "$mcp_state" = blocked ]; then
     if [ "${posix_shim_off_path:-0}" -eq 1 ]; then
       say FAIL "headroom shimmed to $(shim_target) but $SHIM_DIR is not on PATH, and $mcp_msg — the bundled MCP cannot start until one of them is done; or $(path_hint)"
     else
       say fixable "$mcp_msg — or put headroom on PATH: $(path_hint)"
     fi
+  elif ! is_windows && [ "$FIX" -eq 1 ] && [ "$mcp_state" != ok ] && [ "$mcp_state" != skip ]; then
+    say FAIL "\`headroom\` is not on PATH and no working MCP registration landed, so the bundled MCP cannot start — see the lines above, or $(path_hint)"
   fi
 fi
 

@@ -131,7 +131,7 @@ if [ ! -x "$HCAT" ]; then
 fi
 [ -x "$HCAT" ] || exit 0
 # Pick the first IMPORTABLE candidate, not merely the first EXECUTABLE one --
-# doctor.sh:162-166 has always walked the list this way, and resolve_engine_python
+# doctor.sh check 2 has always walked the list this way, and resolve_engine_python
 # stops at the first -x hit. A stray `python` beside the `headroom` console script
 # (pyenv/asdf/mise shims, uv's default install, or ~/.local/bin once /doctor --fix
 # puts its own shim there) is executable but cannot import headroom, so the gate
