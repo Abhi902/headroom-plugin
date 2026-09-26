@@ -159,7 +159,7 @@ try:
     result = compress([{"role": "tool", "content": raw}])
 except Exception as e:
     print(f"hcat: compression failed: {e}", file=sys.stderr)
-    _note_error("runtime", f"hcat: compression failed: {e} — run /headroom-usage-indicator:doctor")
+    _note_error("runtime", f"hcat: compression failed: {str(e)[:120]} — run /headroom-usage-indicator:doctor")
     sys.exit(4)
 _clear_error()
 

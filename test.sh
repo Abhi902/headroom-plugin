@@ -404,6 +404,20 @@ readme_content=$(cat "$ROOT/README.md" 2>/dev/null)
 check "README: broken-badge table names real doctor command" \
       "a clean \`/headroom-usage-indicator:doctor\` run" "$readme_content"
 
+# 25c. invariant: no bare "/doctor" command reference anywhere in the nudge and
+# doc surfaces -- catches a regression on any line (not just the pinned ones
+# above) and any brand-new bare nudge. The status-line badge's short
+# "run /doctor" form is the one deliberate exception (width-budgeted), so its
+# verbatim quotes (after the badge's " · ") are stripped first, as is every
+# qualified name. Paths (doctor.sh, skills/doctor/, installer/doctor) don't match.
+for f in README.md bin/hcat scripts/doctor.sh scripts/hcat-gate.sh \
+         scripts/session-probe.sh skills/headroom-usage-indicator/SKILL.md \
+         skills/doctor/SKILL.md; do
+  stray=$(sed -e 's#headroom-usage-indicator:doctor##g' -e 's#· run /doctor##g' "$ROOT/$f" \
+          | grep -nE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|$)')
+  check_eq "no bare /doctor command in $f" "" "$stray"
+done
+
 # --- 26-28. hcat-gate (PreToolUse Read gate)
 GATE="$ROOT/scripts/hcat-gate.sh"
 export HEADROOM_STATE_DIR="$TMP/state-gate"
@@ -1410,6 +1424,15 @@ printf '%s runtime hcat: compression failed: boom\n' "$(date +%s)" > "$HEADROOM_
 out=$(HCAT_PYTHON=/usr/bin/true bash "$PROBE")
 check "health: probe surfaces recorded failure" "recent failure" "$out"
 check "health: probe recent-failure nudge names real doctor command" "headroom-usage-indicator:doctor" "$out"
+# a real recorded message already carries its own doctor pointer; the probe
+# line must name the command once, not twice (current and pre-rename wording)
+for rec in "engine engine python not executable (/x) — gate failing open; run /headroom-usage-indicator:doctor" \
+           "runtime hcat: compression failed: boom — run /doctor"; do
+  printf '%s %s\n' "$(date +%s)" "$rec" > "$HEADROOM_STATE_DIR/last-error"
+  out=$(HCAT_PYTHON=/usr/bin/true bash "$PROBE")
+  n=$(printf '%s' "$out" | grep -o 'run /[a-z:-]*doctor' | wc -l | tr -d ' ')
+  check_eq "health: probe names doctor once for '${rec%% *}' record" "1" "$n"
+done
 
 # probe: status line not wired yet → one-line setup nudge (the "I installed it,
 # why is there no badge?" case). Must be a setup line, not a breakage, and must
