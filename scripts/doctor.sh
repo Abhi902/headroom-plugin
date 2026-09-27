@@ -1003,11 +1003,13 @@ if [ "$mcp_need" -eq 1 ]; then
     # An existing registration that still STARTS is kept, even when it names a
     # different path than this run resolved (a hand-registered venv, a PATH fix
     # since the last run). The real CLI refuses to add a name that exists.
-    # ...but only an ABSOLUTE command is kept. A bare name on Windows is searched
-    # cwd-first -- the very hijack 2c exists to close -- and a relative path
-    # resolves against the project on every OS (both: "rel", shadowable). A bare
-    # name on POSIX is not shadowable, but 2c only runs there when `headroom` is
-    # off PATH, so it cannot start and is handled as a dead entry.
+    # ...but only a command a project file cannot shadow is kept: an absolute
+    # path, or a bare name on POSIX (PATH lookup only -- e.g. a hand-registered
+    # `uvx headroom-ai mcp serve`). A bare name on Windows is searched cwd-first
+    # -- the very hijack 2c exists to close -- and a relative path resolves
+    # against the project on every OS (both: "rel", shadowable). A bare
+    # `headroom` on POSIX cannot start here (2c runs there only off PATH), so it
+    # falls through as a dead entry.
     mcp_old_kind=none
     if [ -n "$mcp_old" ]; then
       case $mcp_old in
@@ -1020,6 +1022,9 @@ if [ "$mcp_need" -eq 1 ]; then
     fi
     if [ "$mcp_old_kind" = abs ] && shim_runs "$(unix_path "$mcp_old")"; then
       say ok "MCP registered by absolute path ($mcp_old) as a user-scoped server — $mcp_why"
+      mcp_state=ok
+    elif [ "$mcp_old_kind" = bare ] && shim_runs "$mcp_old"; then
+      say ok "MCP registered as a user-scoped server ($mcp_old, found on PATH) — $mcp_why"
       mcp_state=ok
     elif [ "$FIX" -eq 1 ]; then
       mcp_repl=""; mcp_stuck=0

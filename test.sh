@@ -5524,18 +5524,67 @@ check_eq "w28h: a wedged engine run exits 4" "4" "$rc"
 [ $((t1 - t0)) -lt 15 ]; pass_fail "w28h: ...within the bound ($((t1 - t0))s), not the child's 30s" $?
 check "w28h: ...saying it timed out and where the original is" "compression did not finish within 2s" "$out"
 [ -s "$W28H/state/last-error" ]; pass_fail "w28h: ...and records the outage for the badge" $?
+# the temp program must not import modules planted in TMPDIR (Python puts the
+# script's directory on sys.path): a json.py there must never run
+W28Ht="$W28H/tmpdir"; mkdir -p "$W28Ht"
+printf 'open(%s, "w").write("pwned")\nfrom json import *\n' "'$W28H/planted-ran'" > "$W28Ht/json.py"
+mkdir -p "$W28Ht/headroom"; printf 'open(%s, "w").write("pwned")\n' "'$W28H/planted-ran'" > "$W28Ht/headroom/__init__.py"
+TMPDIR="$W28Ht" HCAT_PYTHON="$(command -v python3)" HEADROOM_STATE_DIR="$W28H/state2" "$ROOT/bin/hcat" "$W28H/in.json" >/dev/null 2>&1
+[ ! -e "$W28H/planted-ran" ]; pass_fail "w28h: a module planted in TMPDIR is never imported by hcat's program" $?
+ls "$W28Ht" | grep -q '^hcat\.' && r=1 || r=0; pass_fail "w28h: ...and the private temp dir is removed afterwards" $r
 # a UNC-spelled user entry (what --fix writes for an engine on a share) is
 # absolute: kept when it starts, not re-flagged as shadowable on every run
 W28Hu="$W28H/unc"; mkdir -p "$W28Hu"
-jq -n '{mcpServers:{headroom:{type:"stdio",command:"//srv/share/venv/Scripts/headroom.exe",args:["mcp","serve"]}}}' > "$W28Hu/cj.json"
-printf '#!/bin/sh\nm=$1; shift; case "$m:$1" in -u://srv/*) printf "%%s\\n" "%s" ;; *) printf "%%s\\n" "$1" ;; esac\n' "$W21/venv/bin/headroom" > "$W28Hu/cyg"; chmod +x "$W28Hu/cyg"
+# (the BACKSLASH spelling is what win_path / cygpath -w emits for a share)
+jq -n --rawfile c "$(jraw '\\srv\share\venv\Scripts\headroom.exe')" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W28Hu/cj.json"
+cat > "$W28Hu/cyg" <<W28HCYG
+#!/bin/sh
+m=\$1; shift
+case "\$m:\$1" in
+  -u:[\\\\/][\\\\/]srv*) printf '%s\n' '$W21/venv/bin/headroom' ;;
+  *) printf '%s\n' "\$1" ;;
+esac
+W28HCYG
+chmod +x "$W28Hu/cyg"
 out=$(cd "$W28G" && DOCTOR_CYGPATH="$W28Hu/cyg" w28g_run "$W28Hu/cj.json" windows "$W21/stub:$W21/venv/bin:/usr/bin:/bin")
-check "w28h: a network-share user entry that starts is kept as absolute" "MCP registered by absolute path (//srv/share/venv/Scripts/headroom.exe)" "$out"
+check "w28h: a network-share user entry that starts is kept as absolute" 'MCP registered by absolute path (\\srv\share\venv\Scripts\headroom.exe)' "$out"
 check_absent "w28h: ...not re-flagged as shadowable" "which is not an absolute path" "$out"
 # a drive-RELATIVE spelling (C:headroom resolves against that drive's cwd) is not absolute
 jq -n '{mcpServers:{headroom:{type:"stdio",command:"C:headroom",args:["mcp","serve"]}}}' > "$W28Hu/drel.json"
 out=$(cd "$W28G" && w28g_run "$W28Hu/drel.json" windows "$W21/stub:$W21/venv/bin:/usr/bin:/bin")
 check "w28h: a drive-relative C:headroom entry is shadowable" "which is not an absolute path" "$out"
+
+# --- w28i. REGRESSION (PR #10 review round 19).
+# a WORKING bare launcher on POSIX (a hand-registered `uvx headroom-ai mcp serve`)
+# is kept, even though headroom itself is off PATH
+W28I="$W28/i"; mkdir -p "$W28I/bin"
+printf '#!/bin/sh\nexit 0\n' > "$W28I/bin/uvx"; chmod +x "$W28I/bin/uvx"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"uvx",args:["headroom-ai","mcp","serve"]}}}' > "$W28I/uvx.json"
+cp "$W28I/uvx.json" "$W28I/uvx.orig"
+out=$(cd "$W28G" && w28g_run "$W28I/uvx.json" unix "$W21/stub:$W28I/bin:/usr/bin:/bin" --fix)
+check "w28i: a working bare POSIX launcher is kept" "MCP registered as a user-scoped server (uvx, found on PATH)" "$out"
+if cmp -s "$W28I/uvx.json" "$W28I/uvx.orig"; then echo "ok - w28i: ...and --fix leaves it untouched"; PASS=$((PASS+1))
+else echo "FAIL - w28i: --fix rewrote a working bare launcher"; FAIL=$((FAIL+1)); fi
+# a flat legacy hcat (no scripts/lib) still bounds the compression run
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+  mkdir -p "$W28I/flat"; cp "$ROOT/bin/hcat" "$W28I/flat/hcat"
+  t0=$(date +%s)
+  out=$(HCAT_PYTHON="$W28H/python" HCAT_EXEC_TIMEOUT=2 HEADROOM_STATE_DIR="$W28I/state" bash "$W28I/flat/hcat" "$W28H/in.json" 2>&1); rc=$?
+  t1=$(date +%s)
+  check_eq "w28i: a flat hcat without the lib still exits 4 on a wedged engine" "4" "$rc"
+  [ $((t1 - t0)) -lt 15 ]; pass_fail "w28i: ...within the bound ($((t1 - t0))s)" $?
+else
+  skip_note "w28i: flat-hcat bound needs a timeout binary (none on this host)"
+fi
+# a malformed HCAT_EXEC_TIMEOUT falls back to 120s and the message says so
+w28i_norm=$(sed -n '/^_hcat_t=/{N;p;}' "$ROOT/bin/hcat")
+got=$(for v in abc 0 '' 7; do HCAT_EXEC_TIMEOUT=$v bash -c "$w28i_norm"'
+printf "%s " "$_hcat_t"'; done)
+check_eq "w28i: HCAT_EXEC_TIMEOUT abc/0/empty fall back to 120, a number is kept" "120 120 120 7 " "$got"
+# a stale TMPDIR (missing directory) falls back to /tmp instead of failing
+printf '[{"a":1},{"a":2},{"a":3}]\n' > "$W28I/in.json"
+out=$(TMPDIR="$W28I/no/such/dir" HCAT_PYTHON="$W28H/python" HCAT_EXEC_TIMEOUT=1 "$ROOT/bin/hcat" "$W28I/in.json" 2>&1)
+check_absent "w28i: a missing TMPDIR does not stop hcat" "cannot create a temp dir" "$out"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
