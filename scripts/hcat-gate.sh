@@ -206,20 +206,21 @@ else
   command -v headroom >/dev/null 2>&1 || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
   # jq being installed proves nothing about THIS file: bin/hcat's toon-lite tier
-  # renders only a uniform array of flat objects and exits 3 on anything else
-  # (CSV, logs, nested JSON). Ask the same question hcat will, or let it through.
+  # renders only a uniform array of flat objects that it shrinks by 5%, and exits
+  # 3 on anything else (CSV, logs, nested JSON, long-string rows). Ask hcat
+  # ITSELF (--toon-check) rather than a copy of its rule -- a copy had already
+  # drifted (it lacked the 5% test) and denied Reads hcat then refused.
   # Bounded like every other spawn on this path: the file is large by definition
   # (it tripped the gate), and a Read must never hang on its eligibility check.
-  toon_q='type=="array" and length>1
-         and all(.[]; type=="object" and (to_entries | all(.value | (type=="object" or type=="array") | not)))
-         and ((.[0] | keys_unsorted) as $k | all(.[]; keys_unsorted == $k))'
+  # Any answer but a clean 0 -- including an older hcat that rejects the flag
+  # with its usage error -- lets the Read through.
   if type _er_bounded >/dev/null 2>&1; then
-    _er_bounded "${ER_JQ_TIMEOUT:-5}" jq -e "$toon_q" "$fp" >/dev/null 2>&1 || exit 0
+    _er_bounded "${ER_JQ_TIMEOUT:-5}" "$HCAT" --toon-check "$fp" >/dev/null 2>&1 || exit 0
   else
     # a flat legacy copy without the lib: a timeout binary if there is one,
     # else fail OPEN (let the Read through) rather than parse unbounded
     t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null) || exit 0
-    "$t" -k 2 5 jq -e "$toon_q" "$fp" </dev/null >/dev/null 2>&1 || exit 0
+    "$t" -k 2 5 "$HCAT" --toon-check "$fp" </dev/null >/dev/null 2>&1 || exit 0
   fi
 fi
 

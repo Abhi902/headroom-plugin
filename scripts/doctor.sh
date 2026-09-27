@@ -388,6 +388,29 @@ is_own_shim() {  # is_own_shim <path> — is this the file THIS run would have w
   a=${1%.exe}; b=$(shim_target); b=${b%.exe}
   [ "$a" = "$b" ]
 }
+cli_in_workspace() {  # cli_in_workspace <cli> — exit 0 when <cli> must NOT be persisted globally
+  # The shim (2b) and the user-scoped registration (2c) outlive this project:
+  # every later session, in every project, spawns what they name. The CLI they
+  # are made from comes from resolve_headroom_cli, whose inputs (HCAT_PYTHON,
+  # UV_TOOL_DIR, PATH) are environment -- and environment can come from a
+  # PROJECT-scoped settings.json (the same channel _sl_bash_path_compute refuses
+  # for the status-line bash). So refuse a relative or unlocatable path, and one
+  # whose link OR target sits inside the project the doctor runs in.
+  local c t
+  c=$(_cli_canon "$1") || return 0
+  under_workspace "$(dirname "$c")" && return 0
+  t=$(_cli_canon "$(real_file "$c")") || return 0
+  under_workspace "$(dirname "$t")"
+}
+_cli_canon() {  # _cli_canon <path> — absolute, dir-canonical spelling; fails if relative/unlocatable
+  # Only a NATIVE spelling goes through unix_path (cygpath): the resolver already
+  # hands back POSIX paths, and those must never be re-spelled.
+  local u d
+  case $1 in [A-Za-z]:[\\/]*|*\\*) u=$(unix_path "$1") ;; *) u=$1 ;; esac
+  case $u in /*) ;; *) return 1 ;; esac
+  d=$(cd "$(dirname "$u")" 2>/dev/null && pwd -P) || return 1
+  printf '%s\n' "$d/${u##*/}"
+}
 shim_headroom() {  # shim_headroom <cli> — link/copy into SHIM_DIR; prints the shim path
   # rc 2 = a FOREIGN file already occupies the target. $SHIM_DIR (~/.local/bin by
   # default) is not doctor-owned territory: pipx, `uv tool install` and `pip
@@ -937,7 +960,10 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
     CLI_DEAD_PATH=$cli_now
     say FAIL "headroom on PATH at $cli_now does not run (\`$cli_now --help\` failed) — the bundled MCP spawns \`headroom\` by name and will fail to connect; reinstall the engine: $(reinstall_hint)$cli_own"
   fi
-elif cli_res=$(resolve_headroom_cli); then
+elif cli_res=$(resolve_headroom_cli) && cli_in_workspace "$cli_res"; then
+  CLI_FOREIGN_PATH=$cli_res
+  say FAIL "the resolved headroom CLI ($cli_res) is a relative path or lives inside this project — refusing to shim it into $SHIM_DIR, where every project would run it (HCAT_PYTHON, UV_TOOL_DIR or PATH may come from this project's settings); install the engine outside the project: $(reinstall_hint)"
+elif [ -n "$cli_res" ]; then
   if [ "$FIX" -eq 1 ]; then
     shim=$(shim_headroom "$cli_res"); shim_rc=$?
     if [ "$shim_rc" -eq 2 ]; then
@@ -990,6 +1016,12 @@ elif cli_res=$(resolve_headroom_cli); then
         say fixed "headroom shimmed to $shim (resolves on PATH) — restart Claude Code for the bundled MCP to connect this session"
       fi
     fi
+  elif ! is_windows && [ -L "$(shim_target)" ] && same_file "$(real_file "$(shim_target)")" "$(real_file "$cli_res")"; then
+    # An earlier --fix already shimmed it; only PATH is missing, and --fix
+    # cannot add that. Say what --fix said, never a `fixable` it can not clear:
+    # 2c judges the absolute-path registration that stands in for it.
+    posix_shim_off_path=1
+    say note "headroom is shimmed to $(shim_target) but $SHIM_DIR is not on PATH, so the bundled bare-name MCP cannot start — check 2c's absolute-path registration stands in for it (or: $(path_hint))"
   else
     say fixable "headroom CLI not on PATH (engine at $cli_res) — the bundled MCP spawns \`headroom\` by name; --fix shims it into $SHIM_DIR"
   fi
@@ -1048,6 +1080,10 @@ if [ "$mcp_need" -eq 1 ]; then
   # On Windows the shim is a copy and has no target; win_path gives the NATIVE
   # spelling Claude Code needs outside Git Bash (a no-op on a native path).
   mcp_abs=$(resolve_headroom_cli 2>/dev/null) || mcp_abs=""
+  # A user-scoped registration outlives this project, so it must never name a CLI
+  # that the project itself supplied (see cli_in_workspace).
+  mcp_foreign=0
+  if [ -n "$mcp_abs" ] && cli_in_workspace "$mcp_abs"; then mcp_foreign=$mcp_abs; mcp_abs=""; fi
   if [ -n "$mcp_abs" ]; then
     if is_windows; then mcp_abs=$(win_path "$mcp_abs"); else mcp_abs=$(real_file "$mcp_abs"); fi
   fi
@@ -1071,6 +1107,12 @@ if [ "$mcp_need" -eq 1 ]; then
     fi
     if is_windows; then say note "$mcp_msg — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it"
     else mcp_state=blocked; fi
+  elif [ "$mcp_foreign" != 0 ] && same_file "$mcp_foreign" "${CLI_FOREIGN_PATH:-}"; then
+    say skip "MCP registration by absolute path (the headroom CLI is inside this project — check 2b above already FAILed it)"
+    mcp_state=skip
+  elif [ "$mcp_foreign" != 0 ]; then
+    say FAIL "the resolved headroom CLI ($mcp_foreign) is a relative path or lives inside this project — refusing to register it as a user-scoped MCP, which every project would then spawn (HCAT_PYTHON, UV_TOOL_DIR or PATH may come from this project's settings); install the engine outside the project: $(reinstall_hint)"
+    mcp_state=skip
   elif [ "$mcp_dead" -eq 1 ] && [ "$mcp_dead_seen" -eq 1 ]; then
     say skip "MCP registration by absolute path (the headroom CLI does not start — check 2b above already FAILed it)"
     mcp_state=skip
@@ -1632,7 +1674,14 @@ $sl_merge_tail"
       sl_chain=""; sl_chain_ok=1
       sl_base_cmd=$(jq -r "$sl_base_sel
 | (\$base.command // \"\")" "$SETTINGS" 2>/dev/null) || sl_base_cmd=""
+      # ...but the chain runs the user's command under BASH, and that command was
+      # written for the native spawner: bash eats a backslash (C:\Users\me\sl.js
+      # -> C:Usersmesl.js) and leaves %VAR% unexpanded. Rewriting it for them is
+      # a guess about their shell, so refuse the merge and change nothing.
       if is_windows && [ -n "$sl_base_cmd" ]; then
+        case $sl_base_cmd in *\\*|*%*) sl_chain_ok=2 ;; esac
+      fi
+      if is_windows && [ -n "$sl_base_cmd" ] && [ "$sl_chain_ok" -eq 1 ]; then
         sl_chain_path="$CLAUDE_DIR/headroom-statusline-chain.sh"
         {
           cat <<'CHEOF'
@@ -1664,6 +1713,8 @@ CHEOF
         else
           say fixed "statusLine wired to $sl_disp (script copied, backup: settings.json.bak.*)"
         fi
+      elif [ "$sl_chain_ok" -eq 2 ]; then
+        say FAIL "your statusLine command ($sl_base_cmd) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — settings.json left untouched; to show both, rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), then re-run --fix"
       elif [ "$sl_chain_ok" -eq 0 ]; then
         say FAIL "could not write the status-line chain script to $CLAUDE_DIR/headroom-statusline-chain.sh — settings.json left untouched"
       else
@@ -1672,6 +1723,10 @@ CHEOF
     fi
   elif is_windows && [ -z "$(sl_bash_path)" ]; then
     say FAIL "statusLine is not wired to the headroom badge, and $(sl_no_bash_reason), then run --fix"
+  elif [ -n "$sl" ] && is_windows && case $sl in *\\*|*%*) true ;; *) false ;; esac; then
+    # the same refusal --fix makes (see the WINDOWS MERGE note): never offer a
+    # `fixable` that --fix will only FAIL
+    say FAIL "statusLine present without the headroom badge, and your command ($sl) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), then run --fix"
   elif [ -n "$sl" ]; then
     say fixable "statusLine present without the headroom badge — --fix appends it, preserving your command under _headroomStatusLineBackup"
   else

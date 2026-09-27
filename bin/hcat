@@ -11,7 +11,7 @@
 #             3 no engine python and no viable TOON-lite reformat
 #             4 the engine is broken: it resolved but cannot import
 #               headroom.compress (records `engine`), it did not finish within
-#               HCAT_EXEC_TIMEOUT seconds (default 120; records `engine`), or it
+#               HCAT_EXEC_TIMEOUT seconds (default 90; records `engine`), or it
 #               raised while compressing (records `runtime`)
 #
 # Python resolution lives in scripts/lib/engine-resolve.sh (one definition for
@@ -44,8 +44,8 @@ type note_error >/dev/null 2>&1 || note_error() { :; }
 # to keep the compression run from ever being unbounded where timeout exists)
 type _er_bounded >/dev/null 2>&1 || _er_bounded() {
   local s=$1 t r; shift
-  case $s in ''|*[!0-9]*) s=120 ;; esac
-  s=$((10#$s)); [ "$s" -gt 0 ] || s=120
+  case $s in ''|*[!0-9]*) s=90 ;; esac
+  s=$((10#$s)); [ "$s" -gt 0 ] || s=90
   t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
   [ -n "$t" ] || { "$@" </dev/null; return $?; }
   "$t" -k 2 "$s" "$@" </dev/null; r=$?
@@ -70,8 +70,14 @@ type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # parti
   return 1
 }
 
+# `hcat --toon-check <file>`: exit 0 when the engine-free TOON-lite tier would
+# render <file> (uniform flat array AND the 5% saving), 3 when it would not.
+# No output, no event, no badge. hcat-gate.sh asks this before it denies a Read
+# with no engine installed, so the gate and this tier can never disagree.
+TOON_CHECK=0
+if [ "${1:-}" = --toon-check ]; then TOON_CHECK=1; shift; fi
 if [ $# -ne 1 ] || [ -z "${1:-}" ]; then
-  echo "usage: hcat <file>" >&2
+  echo "usage: hcat <file>  (or: hcat --toon-check <file>)" >&2
   exit 2
 fi
 FILE=$1
@@ -85,7 +91,9 @@ fi
 # otherwise be chosen here and fail at import time with exit 4, while /doctor on
 # the same machine reported a healthy engine.
 PY=""; PY_BROKEN=""
-if type resolve_engine_python_validated >/dev/null 2>&1; then
+if [ "$TOON_CHECK" -eq 1 ]; then
+  :   # the question is only whether the engine-free tier can serve this file
+elif type resolve_engine_python_validated >/dev/null 2>&1; then
   # Dispatch on the status, do NOT collapse it with `||`. Status 2 means an
   # interpreter resolved but cannot import headroom -- a real outage. Folding it
   # into the empty/`not found` case made hcat print "headroom python not found",
@@ -128,6 +136,7 @@ if [ -z "$PY" ] || [ ! -x "$PY" ]; then
       raw_b=$(wc -c < "$FILE" | tr -d ' ')
       out_b=$(printf '%s\n' "$toon" | wc -c | tr -d ' ')
       if [ "$out_b" -lt $(( raw_b * 95 / 100 )) ] 2>/dev/null; then
+        [ "$TOON_CHECK" -eq 1 ] && exit 0
         lines=$(wc -l < "$FILE" | tr -d ' ')
         kb=$(LC_ALL=C awk -v b="$raw_b" 'BEGIN{printf "%.1f", b/1024}')
         tb=$(( raw_b / 4 )); [ "$tb" -gt 0 ] || tb=1   # ~4 bytes/token estimate
@@ -141,6 +150,7 @@ if [ -z "$PY" ] || [ ! -x "$PY" ]; then
       fi
     fi
   fi
+  [ "$TOON_CHECK" -eq 1 ] && exit 3
   # A never-installed engine is the ordinary idle state, NOT a breakage. A
   # resolved-but-broken one IS: say which interpreter, record it, and keep the
   # base's exit 4 so callers can still tell the two apart.
@@ -370,9 +380,12 @@ PYEOF
 _hcat_env="PYTHONIOENCODING=utf-8 PYTHONUTF8=1 PYTHONSAFEPATH=1 HF_HUB_OFFLINE=1 HEADROOM_UPDATE_CHECK=off"
 # one normalised bound, used for the run AND the message (a bad value would
 # otherwise be silently replaced inside _er_bounded and misreported here)
-_hcat_t=${HCAT_EXEC_TIMEOUT:-120}
-case $_hcat_t in ''|*[!0-9]*) _hcat_t=120 ;; esac
-_hcat_t=$((10#$_hcat_t)); [ "$_hcat_t" -gt 0 ] || _hcat_t=120   # 0 / 00 / 08
+# 90s, not 120: Claude Code's Bash tool kills a command at 120s by default, and
+# this clock only starts after the resolver's import probes -- at 120 the tool
+# always killed hcat first, so this message and the broken badge never showed.
+_hcat_t=${HCAT_EXEC_TIMEOUT:-90}
+case $_hcat_t in ''|*[!0-9]*) _hcat_t=90 ;; esac
+_hcat_t=$((10#$_hcat_t)); [ "$_hcat_t" -gt 0 ] || _hcat_t=90   # 0 / 00 / 08
 # shellcheck disable=SC2086  # the env assignments are split on purpose
 _er_bounded "$_hcat_t" env $_hcat_env "$PY" "$_hcat_py" "$FILE"; rc=$?
 if [ "$rc" -eq 124 ]; then

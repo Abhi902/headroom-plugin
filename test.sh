@@ -5645,12 +5645,12 @@ if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; th
 else
   skip_note "w28i: flat-hcat bound needs a timeout binary (none on this host)"
 fi
-# a malformed HCAT_EXEC_TIMEOUT falls back to 120s and the message says so
+# a malformed HCAT_EXEC_TIMEOUT falls back to 90s (under the Bash tool's 120s) and the message says so
 w28i_norm=$(sed -n '/^_hcat_t=/,/_hcat_t=\$((10#/p' "$ROOT/bin/hcat")
 case $w28i_norm in *'10#'*) ;; *) echo "FAIL - w28i: could not extract hcat's timeout normalisation"; FAIL=$((FAIL+1)) ;; esac
 got=$(for v in abc 0 00 '' 7 08; do HCAT_EXEC_TIMEOUT=$v bash -c "$w28i_norm"'
 printf "%s " "$_hcat_t"'; done)
-check_eq "w28i: HCAT_EXEC_TIMEOUT abc/0/00/empty fall back to 120; 7 and 08 are decimal" "120 120 120 120 7 8 " "$got"
+check_eq "w28i: HCAT_EXEC_TIMEOUT abc/0/00/empty fall back to 90; 7 and 08 are decimal" "90 90 90 90 7 8 " "$got"
 # the SHARED bound too: 0 must not mean "no limit" for the engine probes
 t0=$(date +%s)
 got=$(bash -c ". '$ER'; _er_bounded 0 sleep 30; echo \$?")
@@ -5888,6 +5888,129 @@ case $got in *'\r'*) echo "FAIL - w28k: a CRLF-writing jq leaves no \\r in the r
   *) echo "ok - w28k: a CRLF-writing jq leaves no \\r in the registered command"; PASS=$((PASS+1)) ;; esac
 got=$(PATH="$W28K/crjq:$PATH" HEADROOM_CLAUDE_JSON="$W28K/cr.json" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; mcp_user_cmd" | od -c | tr -d ' \n')
 check "w28k: ...and the command itself survives" "/opt/x/headroom" "$(printf '%s' "$got" | tr -d '\\\\')"
+
+# --- w29. REGRESSION (fresh full-PR review of 80729ea). One fixture per finding.
+W29="$W/w29"; mkdir -p "$W29"
+
+# #1: a CLI the PROJECT supplies (via HCAT_PYTHON, which a project-scoped
+# settings.json env can set) is never shimmed into ~/.local/bin or registered as
+# a user-scoped MCP -- both outlive the project and every later session spawns them.
+W29W="$W29/ws"; mkdir -p "$W29W/proj/tools" "$W29W/shim" "$W29W/state" "$W29W/cd"
+printf '#!/bin/sh\nexit 0\n'  > "$W29W/proj/tools/python";   chmod +x "$W29W/proj/tools/python"
+printf '#!/bin/sh\necho hr\n' > "$W29W/proj/tools/headroom"; chmod +x "$W29W/proj/tools/headroom"
+doc_settings_wired "$W29W/cd" > "$W29W/s.json"
+w29w_run() {  # w29w_run <HCAT_PYTHON> <cj.json>
+  (cd "$W29W/proj" && env HCAT_PYTHON="$1" DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$2" \
+      PATH="$W21/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$W29W/s.json" DOCTOR_CLAUDE_DIR="$W29W/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W29W/shim" HEADROOM_STATE_DIR="$W29W/state" \
+      bash "$DOCTOR" --fix 2>&1)
+}
+for w29_hp in tools/python "$W29W/proj/tools/python"; do
+  case $w29_hp in /*) w29_k=absolute ;; *) w29_k=relative ;; esac
+  rm -f "$W29W/shim/headroom" "$W29W/cj-$w29_k.json"
+  out=$(w29w_run "$w29_hp" "$W29W/cj-$w29_k.json")
+  check "w29: a project-supplied CLI ($w29_k HCAT_PYTHON) is refused, not shimmed" "refusing to shim it into $W29W/shim" "$out"
+  [ ! -e "$W29W/shim/headroom" ] && [ ! -L "$W29W/shim/headroom" ]
+  pass_fail "w29: ...no shim is written ($w29_k)" $?
+  check_eq "w29: ...and no user-scoped MCP is registered ($w29_k)" "" \
+           "$(jq -r '.mcpServers.headroom.command // empty' "$W29W/cj-$w29_k.json" 2>/dev/null)"
+  check_absent "w29: ...and 2c never claims it registered ($w29_k)" "registered the headroom MCP" "$out"
+done
+
+# #3: after a POSIX off-PATH --fix, a PLAIN run has nothing for --fix to do and
+# must not keep asking for it (the shim is there; only PATH is missing)
+W29P="$W29/posix"; mkdir -p "$W29P/venv/bin" "$W29P/cd" "$W29P/shim" "$W29P/state"
+printf '#!/bin/sh\nexit 0\n'  > "$W29P/venv/bin/python";   chmod +x "$W29P/venv/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W29P/venv/bin/headroom"; chmod +x "$W29P/venv/bin/headroom"
+doc_settings_wired "$W29P/cd" > "$W29P/s.json"
+w29p_run() {
+  env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W29P/cj.json" PATH="$W21/stub:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$W29P/s.json" DOCTOR_CLAUDE_DIR="$W29P/cd" DOCTOR_VENV_DIR="$W29P/venv" \
+      DOCTOR_SHIM_DIR="$W29P/shim" HEADROOM_STATE_DIR="$W29P/state" bash "$DOCTOR" ${1:-} 2>&1
+}
+out=$(w29p_run --fix)
+check "w29: the POSIX off-PATH --fix registers by absolute path" "registered the headroom MCP by absolute path" "$out"
+out=$(w29p_run)
+check "w29: a plain run after it notes the shim instead" "headroom is shimmed to $W29P/shim/headroom" "$out"
+check_absent "w29: ...and reports nothing fixable" "fixable" "$out"
+
+# #10: SessionStart accepts a bare-name user MCP that resolves on PATH, as doctor
+# 2c does (kind `bare`), instead of lighting a broken badge the doctor calls ok
+W29S="$W29/probe"; mkdir -p "$W29S/bin" "$W29S/home" "$W29S/state"
+printf '#!/bin/sh\nexit 0\n' > "$W29S/bin/uvx"; chmod +x "$W29S/bin/uvx"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"uvx",args:["headroom-ai","mcp","serve"]}}}' > "$W29S/cj.json"
+printf '{"session_id":"w29s"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W29S/home" HEADROOM_CLAUDE_JSON="$W29S/cj.json" \
+  DOCTOR_VENV_DIR="$W24P/venv" PATH="$W29S/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W29S/state" bash "$PROBE" >/dev/null
+[ ! -s "$W29S/state/last-error" ]; pass_fail "w29: a bare-name user MCP on PATH is not flagged broken at SessionStart" $?
+# ...but one that does NOT resolve still is
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"no-such-launcher",args:[]}}}' > "$W29S/cj2.json"
+printf '{"session_id":"w29s2"}' | env -u HCAT_PYTHON DOCTOR_OS=unix HOME="$W29S/home" HEADROOM_CLAUDE_JSON="$W29S/cj2.json" \
+  DOCTOR_VENV_DIR="$W24P/venv" PATH="$W29S/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W29S/state" bash "$PROBE" >/dev/null
+check "w29: ...while a bare name that does not resolve still lights it" "mcp" "$(cat "$W29S/state/last-error" 2>/dev/null)"
+
+# #2 + #8: the gate's two engine-less paths on a gate-eligible uniform array
+W29G="$W29/gate"; mkdir -p "$W29G/bin" "$W29G/broken/bin" "$W29G/home" "$W29G/state"
+# a headroom whose shebang names no interpreter: `command -v headroom` succeeds
+# but no candidate python exists (the gate's "no engine at all" branch)
+printf '#!/nonexistent/w29py\n' > "$W29G/bin/headroom"; chmod +x "$W29G/bin/headroom"
+printf '#!/bin/sh\nexit 1\n' > "$W29G/broken/bin/python"; chmod +x "$W29G/broken/bin/python"
+mkuniform "$W29G/uni.json"
+w29_gate() {  # w29_gate <file> <venv> <sid>
+  gate_input "$1" "$3" | env -u HCAT_PYTHON HOME="$W29G/home" DOCTOR_VENV_DIR="$2" \
+    PATH="$W29G/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W29G/state" bash "$GATE"
+}
+w29_denied() { printf '%s' "$1" | grep -q '"permissionDecision"[[:space:]]*:[[:space:]]*"deny"'; }
+# #2: resolved-but-broken engine (resolver status 2, NO HCAT_PYTHON) on a file the
+# toon tier COULD serve: it must still fail open and light the badge
+rm -f "$W29G/state/last-error"
+out=$(w29_gate "$W29G/uni.json" "$W29G/broken" w29g1)
+! w29_denied "$out"; pass_fail "w29: a broken engine lets a toon-eligible Read through (status-2 fail-open)" $?
+check "w29: ...and records the import failure" "import failed" "$(cat "$W29G/state/last-error" 2>/dev/null)"
+# #8 control: no engine at all, a uniform array hcat's toon tier renders -> denied
+out=$(w29_gate "$W29G/uni.json" "$W29G/none" w29g2)
+w29_denied "$out"; pass_fail "w29: no engine + a toon-renderable array is denied (pointed at hcat)" $?
+# #8: a uniform array whose rows are long strings saves < 5% as toon-lite, so hcat
+# exits 3 on it -- the gate must not deny it and point the user at that dead end
+jq -n '[range(0; 12) | {k: ("y" * 2000)}]' > "$W29G/long.json"
+HCAT_PYTHON=/nonexistent/python bash "$ROOT/bin/hcat" "$W29G/long.json" >/dev/null 2>&1
+check_eq "w29: (precondition) hcat refuses the long-string array with exit 3" "3" "$?"
+out=$(w29_gate "$W29G/long.json" "$W29G/none" w29g3)
+! w29_denied "$out"; pass_fail "w29: no engine + an array hcat cannot shrink 5% is allowed" $?
+check_eq "w29: hcat --toon-check agrees (3 on the long-string array)" "3" \
+  "$(PATH="$STUB:/usr/bin:/bin" bash "$ROOT/bin/hcat" --toon-check "$W29G/long.json" >/dev/null 2>&1; echo $?)"
+check_eq "w29: ...and 0 on the renderable one" "0" \
+  "$(PATH="$STUB:/usr/bin:/bin" bash "$ROOT/bin/hcat" --toon-check "$W29G/uni.json" >/dev/null 2>&1; echo $?)"
+check_eq "w29: --toon-check prints nothing" "" \
+  "$(PATH="$STUB:/usr/bin:/bin" bash "$ROOT/bin/hcat" --toon-check "$W29G/uni.json" 2>&1)"
+
+# #6: a Windows statusLine written for the native spawner (a backslash path) is
+# never pasted into the bash chain, where bash would eat the backslashes
+W29C="$W29/chain"; mkdir -p "$W29C/cd"
+for _b in bash bash.exe; do printf '#!/bin/sh\nexit 0\n' > "$W29C/cd/$_b"; chmod +x "$W29C/cd/$_b"; done
+jq -n '{statusLine:{type:"command",command:"node C:\\Users\\me\\sl.js"}}' > "$W29C/s.json"
+cp "$W29C/s.json" "$W29C/s.orig"
+w29_chain() {
+  env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" CYGPATH_UNIX_DIR="$W29C/cd" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$W29C/s.json" DOCTOR_CLAUDE_DIR="$W29C/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W29C/shim" \
+      HEADROOM_STATE_DIR="$W29C/state" bash "$DOCTOR" "$@" 2>&1
+}
+out=$(w29_chain)
+check "w29: a plain run reports the Windows-syntax statusLine as a FAIL" "uses Windows syntax" "$out"
+check_absent "w29: ...never as a fixable --fix would only refuse" "statusLine present without the headroom badge — --fix appends it" "$out"
+out=$(w29_chain --fix)
+check "w29: --fix refuses to chain a backslash statusLine" "uses Windows syntax (a \\ path or %VAR%)" "$out"
+cmp -s "$W29C/s.json" "$W29C/s.orig"; pass_fail "w29: ...and leaves settings.json untouched" $?
+[ ! -e "$W29C/cd/headroom-statusline-chain.sh" ]; pass_fail "w29: ...and writes no chain script" $?
+
+# #5 + #9: the plugin-namespaced headroom tools are headroom's OWN output -- dangi
+# never nudges on them, and the badge never counts them as a missed blob
+out=$(hook_input mcp__plugin_headroom-usage-indicator_headroom__headroom_retrieve 8192 w29-dangi | bash "$DANGI")
+check_absent "w29: dangi exempts the plugin-namespaced headroom tool" "additionalContext" "$out"
+big_result_event r29 mcp__plugin_headroom-usage-indicator_headroom__headroom_retrieve 5000 > "$W29/t_pretr.jsonl"
+mkdir -p "$W29/badge-state"
+out=$(HEADROOM_STATE_DIR="$W29/badge-state" badge "$W29/t_pretr.jsonl" claude-opus-4-8 sess-w29)
+check "w29: the badge excludes the plugin-namespaced headroom result" "not compressing yet" "$out"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

@@ -120,9 +120,11 @@ Each line is aligned `<status> - <what>`:
   - headroom CLI not on PATH (engine found, bare name unresolved) → the
     resolved `headroom` is shimmed into `~/.local/bin` (symlink; on Windows a
     copy named `headroom.exe`), then re-checked by name **and by execution** —
-    three `FAIL`s can come out of that re-check instead of a fix: (1) the shim
-    landed but `~/.local/bin` is not on PATH — the line carries the exact
-    one-line PATH addition for your shell (or the Windows user Path steps);
+    three `FAIL`s can come out of that re-check instead of a fix: (1) on
+    Windows, the shim landed but `~/.local/bin` is not on PATH — the line
+    carries the Windows user Path steps (on macOS/Linux this is only a `note`:
+    check 2c registers the engine by absolute path instead, and a later plain
+    `/doctor` keeps it a `note`, never a `fixable`);
     (2) the shim resolves by name but will not start (`headroom --help` fails),
     e.g. a uv trampoline copied away from the interpreter it resolves relative
     to — the doctor deletes the shim it just wrote (so the next run diagnoses

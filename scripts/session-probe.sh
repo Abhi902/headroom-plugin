@@ -113,7 +113,7 @@ done
 # a NUDGE-level proxy only -- a native process sees a different PATH, and
 # doctor.sh check 2b re-asks natively (cmd.exe /c where, MSYS dirs pruned) and is
 # the one to believe when the two disagree.
-user_mcp_by_path() {  # a user-scoped `headroom` MCP registered by an absolute path that exists
+user_mcp_by_path() {  # a user-scoped `headroom` MCP whose command exists: an absolute path, or a bare name on POSIX PATH
   # doctor.sh check 2c writes exactly this when `headroom` is off PATH, and the
   # doctor reports it `ok`. Flagging the same install broken every session
   # contradicted the doctor and could never clear. Only reached on the rare
@@ -131,8 +131,18 @@ user_mcp_by_path() {  # a user-scoped `headroom` MCP registered by an absolute p
   # (_er_bounded comes from the same lib claude_json_path does.)
   cmd=$(_er_bounded 2 jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null)
   case $? in 0) ;; 124) return 2 ;; *) return 1 ;; esac
-  case $cmd in /*|[A-Za-z]:[\\/]*) ;; *) return 1 ;; esac
-  f=$(unix_path "$cmd" 2>/dev/null) || f=$cmd
+  cmd=${cmd%$'\r'}   # a native jq.exe ends the line in CRLF (as mcp_user_cmd strips)
+  case $cmd in
+    /*|[A-Za-z]:[\\/]*) f=$(unix_path "$cmd" 2>/dev/null) || f=$cmd ;;
+    ''|*/*|*\\*) return 1 ;;
+    # A bare name on POSIX (e.g. a hand-registered `uvx headroom-ai mcp serve`):
+    # doctor 2c keeps it as kind `bare` and reports it ok when it resolves on
+    # PATH, so accept it here on the same terms. Windows searches the cwd first
+    # for a bare name -- 2c calls that shadowable, and so does this.
+    *) is_windows && return 1
+       f=$(command -v "$cmd" 2>/dev/null) || return 1
+       case $f in /*) ;; *) return 1 ;; esac ;;   # a builtin/function is no spawnable file
+  esac
   [ -f "$f" ] && [ -x "$f" ]
 }
 engine_off_path() {
