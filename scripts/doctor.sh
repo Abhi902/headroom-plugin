@@ -413,17 +413,17 @@ sl_native_syntax() {  # sl_native_syntax <cmd> — written for a non-POSIX spawn
   # path characters that looks like a path (scripts\sl.js, a\b\c -- never
   # cut -d\. or sed s/a\.b/).
   local rp='(^|[[:space:]"'"'"'=])([A-Za-z]:\\[A-Za-z0-9_.$ -]|\\\\[A-Za-z0-9]|(\.{1,2}|~)\\)'
-  local rr='[A-Za-z0-9_-]\\[A-Za-z0-9_][A-Za-z0-9_.-]*(\\|\.[A-Za-z0-9]+([[:space:]]|$))'
+  local rr='[A-Za-z0-9_-]\\(\.?[A-Za-z0-9_][A-Za-z0-9_.-]*\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+([[:space:];|&<>)]|$))'
   [[ $c =~ $rp ]] && return 0
   t=$(printf '%s' "$c" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
   [[ $t =~ $rr ]] && return 0
   # %NAME% as its own token: a start/space/quote/=/slash before it, and an
   # end/space/quote/;/slash -- or the next %NAME% -- after it (node %APPDATA%/x,
-  # "%USERPROFILE%\x", %HOMEDRIVE%%HOMEPATH%\x; never printf %%CPU%%), with a
+  # "%USERPROFILE%\x", %HOMEDRIVE%%HOMEPATH%\x; never printf %%CPU%% or %ld%%), with a
   # NAME of 2+ characters that is not one letter plus underscores. Runs of
   # strftime/printf specifiers (date +%Y%m%d, +%Y-%m-%dT%H:%M, %d_%H,
   # --format=%an%n, printf '%s_%s') are bash-legal and never match.
-  local re='(^|[[:space:]"'"'"'=/\\])%([A-Za-z_][A-Za-z0-9_]+)%($|[[:space:]"'"'"';/\\%])'
+  local re='(^|[[:space:]"'"'"'=/\\])%([A-Za-z_][A-Za-z0-9_]+)%($|[[:space:]"'"'"';/\\]|%[A-Za-z_])'
   t=$c
   while [[ $t =~ $re ]]; do
     n=${BASH_REMATCH[2]}
@@ -458,9 +458,12 @@ mcp_cmd_kind() {  # mcp_cmd_kind <registered command> — none | abs | rel | bar
     *) if is_windows; then echo rel; else echo bare; fi ;;
   esac
 }
-mcp_no_claude() {  # 2c: an entry must be added or replaced, but there is no `claude` CLI; sets mcp_state
+mcp_no_claude() {  # 2c: an entry must be added or replaced, but there is no `claude` CLI (POSIX: mcp_state=blocked)
+  local rm_first=""
+  # the add is refused while a (dead or shadowable) entry of that name exists
+  [ -n "${mcp_old:-}" ] && rm_first="claude mcp remove headroom -s user, then "
   if [ -n "$mcp_abs" ]; then
-    mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: $(mcp_add_hint "$mcp_abs")"
+    mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: $rm_first$(mcp_add_hint "$mcp_abs")"
   else
     mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; fix the engine first, then re-run /headroom-usage-indicator:doctor --fix"
   fi
@@ -1199,14 +1202,41 @@ if [ "$mcp_need" -eq 1 ]; then
   elif ! shim_runs "$(unix_path "$mcp_abs")"; then mcp_abs=""; mcp_dead=1
   fi
   mcp_state=unregistered
-  # An EXISTING user entry is always judged below by spawning it -- that needs no
-  # `claude` CLI. Only adding or replacing one does (mcp_no_claude, at the point
-  # where --fix would do either).
-  if [ "$mcp_foreign" != 0 ] && [ -z "$(mcp_user_cmd)" ] && ! command -v claude >/dev/null 2>&1; then
-    # nothing registered, and the only CLI there is must never be registered:
-    # "install claude, then --fix" would only reach the same refusal
+  # Judge an EXISTING user entry FIRST, by spawning it -- that needs no `claude`
+  # CLI and no working engine CLI of this run's own. An entry that still STARTS
+  # is kept, even when it names a different path than this run resolved (a
+  # hand-registered venv or `uvx headroom-ai mcp serve`, a PATH fix since the
+  # last run); a slow one is left alone. Every branch after that is about ADDING
+  # or REPLACING an entry.
+  # Only a command a project file cannot shadow is kept: an absolute path, or a
+  # bare name on POSIX (PATH lookup only). A bare name on Windows is searched
+  # cwd-first -- the very hijack 2c exists to close -- and a relative path
+  # resolves against the project on every OS (both: "rel", shadowable). A bare
+  # `headroom` on POSIX cannot start here (2c runs there only off PATH), so it
+  # falls through as a dead entry.
+  mcp_old=$(mcp_user_cmd)
+  mcp_old_kind=$(mcp_cmd_kind "$mcp_old")
+  mcp_old_rc=1
+  case $mcp_old_kind in
+    abs)  mcp_entry_runs "$(unix_path "$mcp_old")" mcp_user_args mcp_user_env; mcp_old_rc=$? ;;
+    bare) mcp_entry_runs "$mcp_old" mcp_user_args mcp_user_env; mcp_old_rc=$? ;;
+  esac
+  if [ "$mcp_old_rc" -eq 0 ] && [ "$mcp_old_kind" = abs ]; then
+    say ok "MCP registered by absolute path ($mcp_old) as a user-scoped server — $mcp_why"
+    mcp_state=ok
+  elif [ "$mcp_old_rc" -eq 0 ]; then
+    say ok "MCP registered as a user-scoped server ($mcp_old, found on PATH) — $mcp_why"
+    mcp_state=ok
+  elif [ "$mcp_old_rc" -eq 124 ]; then
+    # Too slow is not dead (a first `uvx` run downloads): never replace it
+    say note "the user-scoped headroom MCP ($mcp_old) did not answer within ${DOCTOR_SHIM_RUNS_TIMEOUT:-5}s — left as is (not confirmed working, not replaced); re-run the doctor once it has warmed up"
+    # unknown, not ok: no "registered" claim, and no outage FAIL either
+    mcp_state=slow
+  elif [ "$mcp_foreign" != 0 ]; then
+    # nothing working is registered, and the only CLI there is must never be
+    # (see cli_in_workspace) -- with or without a `claude` CLI to do it
     mcp_refuse_foreign
-  elif [ -z "$(mcp_user_cmd)" ] && ! command -v claude >/dev/null 2>&1; then
+  elif ! command -v claude >/dev/null 2>&1; then
     mcp_no_claude
   elif [ "$mcp_dead" -eq 1 ] && [ "$mcp_dead_seen" -eq 1 ]; then
     say skip "MCP registration by absolute path (the headroom CLI does not start — check 2b above already FAILed it)"
@@ -1214,83 +1244,46 @@ if [ "$mcp_need" -eq 1 ]; then
   elif [ "$mcp_dead" -eq 1 ]; then
     say fixable "the resolved headroom CLI does not start, so the MCP was not registered by absolute path; fix the engine (see check 2b) and re-run /headroom-usage-indicator:doctor --fix"
     mcp_state=dead
-  elif [ -z "$mcp_abs" ] && [ "$mcp_foreign" = 0 ]; then
+  elif [ -z "$mcp_abs" ]; then
     # Say SOMETHING. check 2 reports the engine, but it can be `ok` while
     # resolve_headroom_cli still returns nothing (HCAT_PYTHON set with the CLI
     # elsewhere), and then this was reported by nobody at all.
     say skip "MCP registration by absolute path (no headroom CLI resolved yet — fix the engine first)"
     mcp_state=skip
-  else
-    mcp_old=$(mcp_user_cmd)
-    # An existing registration that still STARTS is kept, even when it names a
-    # different path than this run resolved (a hand-registered venv, a PATH fix
-    # since the last run). The real CLI refuses to add a name that exists.
-    # ...but only a command a project file cannot shadow is kept: an absolute
-    # path, or a bare name on POSIX (PATH lookup only -- e.g. a hand-registered
-    # `uvx headroom-ai mcp serve`). A bare name on Windows is searched cwd-first
-    # -- the very hijack 2c exists to close -- and a relative path resolves
-    # against the project on every OS (both: "rel", shadowable). A bare
-    # `headroom` on POSIX cannot start here (2c runs there only off PATH), so it
-    # falls through as a dead entry.
-    mcp_old_kind=$(mcp_cmd_kind "$mcp_old")
-    mcp_old_rc=1
-    case $mcp_old_kind in
-      abs)  mcp_entry_runs "$(unix_path "$mcp_old")" mcp_user_args mcp_user_env; mcp_old_rc=$? ;;
-      bare) mcp_entry_runs "$mcp_old" mcp_user_args mcp_user_env; mcp_old_rc=$? ;;
-    esac
-    if [ "$mcp_old_rc" -eq 0 ] && [ "$mcp_old_kind" = abs ]; then
-      say ok "MCP registered by absolute path ($mcp_old) as a user-scoped server — $mcp_why"
-      mcp_state=ok
-    elif [ "$mcp_old_rc" -eq 0 ]; then
-      say ok "MCP registered as a user-scoped server ($mcp_old, found on PATH) — $mcp_why"
-      mcp_state=ok
-    elif [ "$mcp_old_rc" -eq 124 ]; then
-      # Too slow is not dead (a first `uvx` run downloads): never replace it
-      say note "the user-scoped headroom MCP ($mcp_old) did not answer within ${DOCTOR_SHIM_RUNS_TIMEOUT:-5}s — left as is (not confirmed working, not replaced); re-run the doctor once it has warmed up"
-      # unknown, not ok: no "registered" claim, and no outage FAIL either
-      mcp_state=slow
-    elif [ "$mcp_foreign" != 0 ]; then
-      # A working (or slow) existing entry was judged above and kept. Only here --
-      # where --fix would ADD or REPLACE one -- does the in-project CLI matter:
-      # never persist it (see cli_in_workspace).
-      mcp_refuse_foreign
-    elif ! command -v claude >/dev/null 2>&1; then
-      mcp_no_claude
-    elif [ "$FIX" -eq 1 ]; then
-      mcp_repl=""; mcp_stuck=0
-      if [ "$mcp_old_kind" = rel ]; then mcp_what=shadowable; else mcp_what=dead; fi
-      if [ -n "$mcp_old" ]; then
-        # A user-scoped entry is replaced when it no longer starts (dead weight)
-        # or when a project file could shadow it (rel, even if it starts); add
-        # would refuse the name while it exists. Check that the
-        # remove LANDED: if it did not, the add is refused and a by-hand add
-        # hint would fail exactly the same way.
-        ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; run_bounded 10 claude mcp remove headroom -s user ) >/dev/null 2>&1
-        if [ -n "$(mcp_user_cmd)" ]; then mcp_stuck=1
-        elif [ "$mcp_old_kind" = rel ]; then mcp_repl=" (replaced $mcp_old, which a project file could shadow)"
-        else mcp_repl=" (replaced a dead entry: $mcp_old)"; fi
-      fi
-      # Trust the config file, not the exit status: success means the entry is
-      # there, naming the path we asked for.
-      if [ "$mcp_stuck" -eq 1 ]; then
-        say fixable "could not remove the $mcp_what user-scoped headroom MCP ($mcp_old) — run: claude mcp remove headroom -s user, then re-run /headroom-usage-indicator:doctor --fix"
-      elif mcp_add "$mcp_abs" && [ "$(mcp_user_cmd)" = "$mcp_abs" ]; then
-        say fixed "registered the headroom MCP by absolute path ($mcp_abs) as a user-scoped server$mcp_repl — $mcp_why; restart Claude Code"
-        mcp_state=ok
-      else
-        mcp_err=$(head -1 "$TMPD/mcp-add.out" 2>/dev/null)
-        [ -n "$mcp_old" ] && [ -z "$(mcp_user_cmd)" ] && mcp_err="${mcp_err:+$mcp_err; }the $mcp_what entry $mcp_old was removed first"
-        say fixable "could not register the MCP by absolute path (\`claude mcp add\` failed${mcp_err:+: $mcp_err}); run it by hand: $(mcp_add_hint "$mcp_abs")"
-      fi
-    elif [ "$mcp_old_kind" = rel ]; then
-      say fixable "the user-scoped headroom MCP is registered as $mcp_old, which is not an absolute path — a headroom.* in the project directory could be spawned in its place; --fix replaces it with $mcp_abs"
-    elif [ -n "$mcp_old" ]; then
-      say fixable "the user-scoped headroom MCP points at $mcp_old, which does not start; --fix replaces it with $mcp_abs"
-    elif is_windows; then
-      say fixable "bundled MCP is registered by bare name only — a headroom.* dropped into a project directory could still be spawned before it; --fix adds a user-scoped server by absolute path via \`claude mcp add -s user\` (the bundled entry keeps spawning too)"
-    else
-      say fixable "\`headroom\` is not on PATH, so the bundled bare-name MCP cannot start; --fix registers the engine by absolute path via \`claude mcp add -s user\`"
+  elif [ "$FIX" -eq 1 ]; then
+    mcp_repl=""; mcp_stuck=0
+    if [ "$mcp_old_kind" = rel ]; then mcp_what=shadowable; else mcp_what=dead; fi
+    if [ -n "$mcp_old" ]; then
+      # A user-scoped entry is replaced when it no longer starts (dead weight)
+      # or when a project file could shadow it (rel, even if it starts); add
+      # would refuse the name while it exists. Check that the
+      # remove LANDED: if it did not, the add is refused and a by-hand add
+      # hint would fail exactly the same way.
+      ( export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'; run_bounded 10 claude mcp remove headroom -s user ) >/dev/null 2>&1
+      if [ -n "$(mcp_user_cmd)" ]; then mcp_stuck=1
+      elif [ "$mcp_old_kind" = rel ]; then mcp_repl=" (replaced $mcp_old, which a project file could shadow)"
+      else mcp_repl=" (replaced a dead entry: $mcp_old)"; fi
     fi
+    # Trust the config file, not the exit status: success means the entry is
+    # there, naming the path we asked for.
+    if [ "$mcp_stuck" -eq 1 ]; then
+      say fixable "could not remove the $mcp_what user-scoped headroom MCP ($mcp_old) — run: claude mcp remove headroom -s user, then re-run /headroom-usage-indicator:doctor --fix"
+    elif mcp_add "$mcp_abs" && [ "$(mcp_user_cmd)" = "$mcp_abs" ]; then
+      say fixed "registered the headroom MCP by absolute path ($mcp_abs) as a user-scoped server$mcp_repl — $mcp_why; restart Claude Code"
+      mcp_state=ok
+    else
+      mcp_err=$(head -1 "$TMPD/mcp-add.out" 2>/dev/null)
+      [ -n "$mcp_old" ] && [ -z "$(mcp_user_cmd)" ] && mcp_err="${mcp_err:+$mcp_err; }the $mcp_what entry $mcp_old was removed first"
+      say fixable "could not register the MCP by absolute path (\`claude mcp add\` failed${mcp_err:+: $mcp_err}); run it by hand: $(mcp_add_hint "$mcp_abs")"
+    fi
+  elif [ "$mcp_old_kind" = rel ]; then
+    say fixable "the user-scoped headroom MCP is registered as $mcp_old, which is not an absolute path — a headroom.* in the project directory could be spawned in its place; --fix replaces it with $mcp_abs"
+  elif [ -n "$mcp_old" ]; then
+    say fixable "the user-scoped headroom MCP points at $mcp_old, which does not start; --fix replaces it with $mcp_abs"
+  elif is_windows; then
+    say fixable "bundled MCP is registered by bare name only — a headroom.* dropped into a project directory could still be spawned before it; --fix adds a user-scoped server by absolute path via \`claude mcp add -s user\` (the bundled entry keeps spawning too)"
+  else
+    say fixable "\`headroom\` is not on PATH, so the bundled bare-name MCP cannot start; --fix registers the engine by absolute path via \`claude mcp add -s user\`"
   fi
   # A LOCAL-scoped `headroom` for this project wins over the user-scoped one. A
   # dead one silently defeats everything above; never remove it for the user.
@@ -1611,7 +1604,7 @@ else
         # "could not locate ... fix it by hand" and kept exiting 1 every run.
         # (A token containing * would over-match and persist a mangled command.)
         # With it quoted, the `= "$sl"` guard below is a real no-match check.
-        sl_new_cmd=${sl//"$sl_interp_missing"/$sl_good_bash}
+        sl_new_cmd=${sl//"$sl_interp_missing"/"$sl_good_bash"}
         if [ "$sl_new_cmd" = "$sl" ]; then
           say FAIL "could not locate '$sl_interp_missing' in the statusLine command to repoint it — fix statusLine.command in settings.json by hand"
         elif jq --arg c "$sl_new_cmd" '.statusLine.command = $c' \

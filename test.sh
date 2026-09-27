@@ -6332,6 +6332,45 @@ check_absent "w29b: ...never '-m venv .venv'" "-m venv .venv" "$got"
 got=$(w29_hint . .venv "$W29B/uvproj/uvt/headroom-ai/bin/headroom")
 check "w29b: with no usable venv either, only uv is offered" "outside it: uv tool install headroom-ai" "$got"
 
+# a WORKING user entry is judged first -- even when this run's own engine CLI is
+# dead and there is no claude CLI (it was reported dead / an outage FAIL before)
+W29BD="$W29B/deadcli"; mkdir -p "$W29BD/venv/bin" "$W29BD/state"
+printf '#!/bin/sh\nexit 0\n' > "$W29BD/venv/bin/python";   chmod +x "$W29BD/venv/bin/python"
+printf '#!/bin/sh\nexit 1\n' > "$W29BD/venv/bin/headroom"; chmod +x "$W29BD/venv/bin/headroom"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W29B/live.json" PATH="$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$W29P/s.json" DOCTOR_CLAUDE_DIR="$W29P/cd" DOCTOR_VENV_DIR="$W29BD/venv" \
+      DOCTOR_SHIM_DIR="$W29B/noshim2" HEADROOM_STATE_DIR="$W29BD/state" bash "$DOCTOR" --fix 2>&1)
+check "w29b: a working user entry is ok while this run's engine CLI is dead (no claude)" "MCP registered by absolute path ($W29P/venv/bin/headroom)" "$out"
+check_absent "w29b: ...and --fix raises no 'no working registration' FAIL" "no working MCP registration landed" "$out"
+out=$(env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W29B/live.json" PATH="$W21/stub:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$W29P/s.json" DOCTOR_CLAUDE_DIR="$W29P/cd" DOCTOR_VENV_DIR="$W29BD/venv" \
+      DOCTOR_SHIM_DIR="$W29B/noshim2" HEADROOM_STATE_DIR="$W29BD/state" bash "$DOCTOR" --fix 2>&1)
+check "w29b: ...likewise with the claude CLI present" "MCP registered by absolute path ($W29P/venv/bin/headroom)" "$out"
+# no claude CLI + a DEAD user entry: the remedy removes it before adding
+out=$(env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W29B/dead.json" PATH="$STUB:/usr/bin:/bin" \
+      DOCTOR_SETTINGS="$W29P/s.json" DOCTOR_CLAUDE_DIR="$W29P/cd" DOCTOR_VENV_DIR="$W29P/venv" \
+      DOCTOR_SHIM_DIR="$W29B/noshim3" HEADROOM_STATE_DIR="$W29BD/state" bash "$DOCTOR" 2>&1)
+check "w29b: without claude, a dead entry's remedy removes it before adding" "claude mcp remove headroom -s user, then claude mcp add" "$out"
+
+# a DOCTOR_CYGPATH planted inside the project (or relative) never decides homes
+mkdir -p "$W29W/proj/evil"
+printf '#!/bin/sh\n[ "$1" = "-F" ] && { echo "%s/profile"; exit 0; }\nexit 1\n' "$W29W/proj" > "$W29W/proj/evil/cygpath"; chmod +x "$W29W/proj/evil/cygpath"
+for w29_cy in "$W29W/proj/evil/cygpath" "evil/cygpath"; do
+  got=$(cd "$W29W/proj" && DOCTOR_OS=windows DOCTOR_CYGPATH="$w29_cy" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); under_workspace '$W29W/proj/tools'; echo rc=\$?")
+  check_eq "w29b: a project-planted DOCTOR_CYGPATH ($w29_cy) cannot erase the boundary" "rc=0" "$got"
+done
+for w29_c in 'printf "%ld%%" 5' 'git log -1 --format=%an%%'; do
+  jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/pp.json"
+  out=$(w29b_chain "$W29BC/pp.json" --fix)
+  check_absent "w29b: '$w29_c' is not refused as Windows syntax" "uses Windows syntax" "$out"
+done
+
+for w29_c in 'tools\sl.cmd|more' 'node node_modules\.bin\sl'; do
+  jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/rp.json"
+  out=$(w29b_chain "$W29BC/rp.json" --fix)
+  check "w29b: '$w29_c' is refused as Windows syntax" "uses Windows syntax" "$out"
+done
+
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
 [ "$FAIL" -eq 0 ]

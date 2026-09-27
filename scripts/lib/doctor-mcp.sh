@@ -123,7 +123,26 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # $USERPROFILE: that is environment, and a project's settings env could point
   # it at the project to erase this very boundary.
   local r h b hs kept="" uprof=""
-  uprof=$(native_profile_dir 2>/dev/null) || uprof=""
+  # ...and DOCTOR_CYGPATH (the test seam native_profile_dir honours) is
+  # environment too: never let a relative one, or one inside this project,
+  # decide which roots are homes.
+  local cyg_ok=1
+  if [ -n "${DOCTOR_CYGPATH:-}" ]; then
+    case $DOCTOR_CYGPATH in
+      /*) a=$(_dm_canon "$(dirname "$DOCTOR_CYGPATH")") || a=""
+          while [ -n "$a" ]; do
+            for r in "$r1" "$r2" "$r3"; do
+              [ -n "$r" ] && [ "$a" -ef "$r" ] && { cyg_ok=0; break 2; }
+            done
+            [ "$a" = / ] && break
+            b=${a%/*}; [ -n "$b" ] || b=/
+            [ "$b" = "$a" ] && break
+            a=$b
+          done ;;
+      *) cyg_ok=0 ;;
+    esac
+  fi
+  [ "$cyg_ok" -eq 1 ] && { uprof=$(native_profile_dir 2>/dev/null) || uprof=""; }
   # a RELATIVE HOME (HOME=. from a project's settings env) is canonicalised
   # against the cwd -- it must not turn the project itself into "a home"
   case ${HOME:-} in /*|[A-Za-z]:[\\/]*) hs=$home ;; *) hs="" ;; esac
