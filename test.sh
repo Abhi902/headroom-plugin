@@ -4913,10 +4913,12 @@ t1=$(date +%s)
 check_absent "w25: ...and the Read is let through, not denied" '"deny"' "$g"
 # ...and in a flat legacy copy WITHOUT the lib: bounded by a timeout binary where
 # /usr/bin has one (Linux), failing open at once where it has none (stock macOS)
-# (a sibling hcat to redirect to, and an empty HOME so its narrow built-in
+# (a sibling hcat to redirect to and ask, and an empty HOME so its narrow built-in
 #  resolver cannot find a real ~/.headroom-venv and skip the no-engine branch)
 mkdir -p "$W25G/legacy" "$W25G/lhome"; cp "$ROOT/scripts/hcat-gate.sh" "$W25G/legacy/"
-printf '#!/bin/sh\nexit 0\n' > "$W25G/legacy/hcat"; chmod +x "$W25G/legacy/hcat"
+# the REAL hcat (flat, no lib): the gate asks it --toon-check, and it is the one
+# that runs the (hanging) jq -- a stub answering 0 would make the gate deny
+cp "$ROOT/bin/hcat" "$W25G/legacy/hcat"; chmod +x "$W25G/legacy/hcat"
 t0=$(date +%s)
 g=$(gate_input "$W25G/flat.json" "w25g-legslow" | env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent HOME="$W25G/lhome" \
     PATH="$W25G/slowjq:$W25G/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W25G/state" bash "$W25G/legacy/hcat-gate.sh")
@@ -5831,7 +5833,8 @@ done
 printf '#!%s\nopen(my $f, ">", "%s") or exit 1; print $f "$_=$ENV{$_}\\n" for keys %%ENV;\n' "$(command -v perl)" "$W28K/probe-env" > "$W28K/envdump2"; chmod +x "$W28K/envdump2"
 jq -n --rawfile c "$(jraw "$W28K/envdump2")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{POSIXLY_CORRECT:"w28k-pc",TMOUT:"0.000001",EUID:"w28k-euid",RANDOM:"w28k-rnd",SECONDS:"w28k-sec",SHLVL:"w28k-lvl"}}}}' > "$W28K/special.json"
 : > "$W28K/probe-env"
-out=$(cd "$W28G" && w28g_run "$W28K/special.json" unix "$W21/stub:/usr/bin:/bin")
+# (a generous bound: perl's start-up on a loaded Windows runner outran 5s once)
+out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=30 w28g_run "$W28K/special.json" unix "$W21/stub:/usr/bin:/bin")
 check "w28k: an entry with special keys is judged as starting" "MCP registered by absolute path ($W28K/envdump2)" "$out"
 [ -s "$W28K/probe-env" ]; pass_fail "w28k: ...and its dumper actually ran" $?
 w28k_env=$(cat "$W28K/probe-env")
@@ -5930,9 +5933,15 @@ w29p_run() {
 }
 out=$(w29p_run --fix)
 check "w29: the POSIX off-PATH --fix registers by absolute path" "registered the headroom MCP by absolute path" "$out"
-out=$(w29p_run)
-check "w29: a plain run after it notes the shim instead" "headroom is shimmed to $W29P/shim/headroom" "$out"
-check_absent "w29: ...and reports nothing fixable" "fixable" "$out"
+# (the POSIX shim is a symlink; MSYS `ln -s` copies instead, so a Windows host
+#  running this POSIX simulation cannot build the state under test)
+if [ -L "$W29P/shim/headroom" ]; then
+  out=$(w29p_run)
+  check "w29: a plain run after it notes the shim instead" "headroom is shimmed to $W29P/shim/headroom" "$out"
+  check_absent "w29: ...and reports nothing fixable" "fixable" "$out"
+else
+  skip_note "w29: plain-run-after-fix needs a real symlink shim (this host's ln -s copies)"
+fi
 
 # #10: SessionStart accepts a bare-name user MCP that resolves on PATH, as doctor
 # 2c does (kind `bare`), instead of lighting a broken badge the doctor calls ok
