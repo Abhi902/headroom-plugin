@@ -410,18 +410,20 @@ sl_native_syntax() {  # sl_native_syntax <cmd> — written for a non-POSIX spawn
   # A native PATH, not every backslash: printf '\n' and sed 's/\s//' are
   # bash-legal. At a token start: drive-qualified (C:\Users), UNC (\\host\...),
   # dot- or home-relative (.\x, ~\x); and, outside quotes, a backslash BETWEEN
-  # path characters (scripts\sl.js).
+  # path characters that looks like a path (scripts\sl.js, a\b\c -- never
+  # cut -d\. or sed s/a\.b/).
   local rp='(^|[[:space:]"'"'"'=])([A-Za-z]:\\[A-Za-z0-9_.$ -]|\\\\[A-Za-z0-9]|(\.{1,2}|~)\\)'
-  local rr='[A-Za-z0-9_.-]\\[A-Za-z0-9_.-]'
+  local rr='[A-Za-z0-9_-]\\[A-Za-z0-9_][A-Za-z0-9_.-]*(\\|\.[A-Za-z0-9]+([[:space:]]|$))'
   [[ $c =~ $rp ]] && return 0
   t=$(printf '%s' "$c" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
   [[ $t =~ $rr ]] && return 0
-  # %NAME% as its own token: a start/space/quote/=/slash before it and an
-  # end/space/quote/;/slash after it (node %APPDATA%/x, "%USERPROFILE%\x"), with a
+  # %NAME% as its own token: a start/space/quote/=/slash before it, and an
+  # end/space/quote/;/slash -- or the next %NAME% -- after it (node %APPDATA%/x,
+  # "%USERPROFILE%\x", %HOMEDRIVE%%HOMEPATH%\x; never printf %%CPU%%), with a
   # NAME of 2+ characters that is not one letter plus underscores. Runs of
   # strftime/printf specifiers (date +%Y%m%d, +%Y-%m-%dT%H:%M, %d_%H,
   # --format=%an%n, printf '%s_%s') are bash-legal and never match.
-  local re='(^|[[:space:]"'"'"'=/\\])%([A-Za-z_][A-Za-z0-9_]+)%($|[[:space:]"'"'"';/\\])'
+  local re='(^|[[:space:]"'"'"'=/\\])%([A-Za-z_][A-Za-z0-9_]+)%($|[[:space:]"'"'"';/\\%])'
   t=$c
   while [[ $t =~ $re ]]; do
     n=${BASH_REMATCH[2]}
@@ -456,16 +458,14 @@ mcp_cmd_kind() {  # mcp_cmd_kind <registered command> — none | abs | rel | bar
     *) if is_windows; then echo rel; else echo bare; fi ;;
   esac
 }
-mcp_user_entry_alive() {  # a user-scoped headroom entry exists and starts (or is merely slow)
-  local c rc
-  c=$(mcp_user_cmd)
-  case $(mcp_cmd_kind "$c") in
-    abs)  c=$(unix_path "$c") ;;
-    bare) ;;
-    *)    return 1 ;;
-  esac
-  mcp_entry_runs "$c" mcp_user_args mcp_user_env; rc=$?
-  [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]
+mcp_no_claude() {  # 2c: an entry must be added or replaced, but there is no `claude` CLI; sets mcp_state
+  if [ -n "$mcp_abs" ]; then
+    mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: $(mcp_add_hint "$mcp_abs")"
+  else
+    mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; fix the engine first, then re-run /headroom-usage-indicator:doctor --fix"
+  fi
+  if is_windows; then say note "$mcp_msg — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it"
+  else mcp_state=blocked; fi
 }
 mcp_refuse_foreign() {  # 2c: the one refusal of an in-project CLI ($mcp_foreign); sets mcp_state
   if same_file "$mcp_foreign" "${CLI_FOREIGN_PATH:-}"; then
@@ -485,7 +485,7 @@ foreign_cli_hint() {  # foreign_cli_hint <cli> — how to stop resolving an in-p
        && case $c in "${uvc%/x}"/*) true ;; *) false ;; esac; then
     how="unset UV_TOOL_DIR"
   elif same_file "$(dirname "$1")" "$VENV_DIR/bin" || same_file "$(dirname "$1")" "$VENV_DIR/Scripts"; then
-    how="unset DOCTOR_VENV_DIR (or point it at the venv created below)"
+    how="unset DOCTOR_VENV_DIR (or point it outside this project)"
   elif pc=$(command -v headroom 2>/dev/null) && same_file "$pc" "$1"; then
     how="take $(dirname "$1") off PATH"
   else
@@ -1199,22 +1199,15 @@ if [ "$mcp_need" -eq 1 ]; then
   elif ! shim_runs "$(unix_path "$mcp_abs")"; then mcp_abs=""; mcp_dead=1
   fi
   mcp_state=unregistered
-  if [ "$mcp_foreign" != 0 ] && ! command -v claude >/dev/null 2>&1 && ! mcp_user_entry_alive; then
-    # nothing (live) registered, and the only CLI there is must never be
-    # registered: "install claude, then --fix" would only reach the same refusal
+  # An EXISTING user entry is always judged below by spawning it -- that needs no
+  # `claude` CLI. Only adding or replacing one does (mcp_no_claude, at the point
+  # where --fix would do either).
+  if [ "$mcp_foreign" != 0 ] && [ -z "$(mcp_user_cmd)" ] && ! command -v claude >/dev/null 2>&1; then
+    # nothing registered, and the only CLI there is must never be registered:
+    # "install claude, then --fix" would only reach the same refusal
     mcp_refuse_foreign
-  elif ! command -v claude >/dev/null 2>&1 && mcp_user_entry_alive; then
-    # the entry is judged by spawning it, which needs no `claude` CLI
-    say ok "MCP registered as a user-scoped server ($(mcp_user_cmd)) — $mcp_why"
-    mcp_state=ok
-  elif ! command -v claude >/dev/null 2>&1; then
-    if [ -n "$mcp_abs" ]; then
-      mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: $(mcp_add_hint "$mcp_abs")"
-    else
-      mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; fix the engine first, then re-run /headroom-usage-indicator:doctor --fix"
-    fi
-    if is_windows; then say note "$mcp_msg — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it"
-    else mcp_state=blocked; fi
+  elif [ -z "$(mcp_user_cmd)" ] && ! command -v claude >/dev/null 2>&1; then
+    mcp_no_claude
   elif [ "$mcp_dead" -eq 1 ] && [ "$mcp_dead_seen" -eq 1 ]; then
     say skip "MCP registration by absolute path (the headroom CLI does not start — check 2b above already FAILed it)"
     mcp_state=skip
@@ -1261,6 +1254,8 @@ if [ "$mcp_need" -eq 1 ]; then
       # where --fix would ADD or REPLACE one -- does the in-project CLI matter:
       # never persist it (see cli_in_workspace).
       mcp_refuse_foreign
+    elif ! command -v claude >/dev/null 2>&1; then
+      mcp_no_claude
     elif [ "$FIX" -eq 1 ]; then
       mcp_repl=""; mcp_stuck=0
       if [ "$mcp_old_kind" = rel ]; then mcp_what=shadowable; else mcp_what=dead; fi

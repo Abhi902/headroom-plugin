@@ -123,10 +123,7 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # $USERPROFILE: that is environment, and a project's settings env could point
   # it at the project to erase this very boundary.
   local r h b hs kept="" uprof=""
-  if type is_windows >/dev/null 2>&1 && is_windows && type _er_cygpath >/dev/null 2>&1; then
-    uprof=$(_er_cygpath -F 40 2>/dev/null) || uprof=""
-    case $uprof in /*) ;; *) uprof="" ;; esac
-  fi
+  uprof=$(native_profile_dir 2>/dev/null) || uprof=""
   # a RELATIVE HOME (HOME=. from a project's settings env) is canonicalised
   # against the cwd -- it must not turn the project itself into "a home"
   case ${HOME:-} in /*|[A-Za-z]:[\\/]*) hs=$home ;; *) hs="" ;; esac

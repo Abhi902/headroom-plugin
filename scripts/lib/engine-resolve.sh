@@ -271,4 +271,15 @@ claude_json_path() {  # the Claude Code config that holds user- and local-scoped
   else printf '%s\n' "${HOME:-}/.claude.json"; fi
 }
 win_path()  { _er_cygpath -w "$1" 2>/dev/null || printf '%s\n' "$1"; }   # /c/x → C:\x
+native_profile_dir() {  # the Windows user profile as a POSIX path, from the OS; fails elsewhere
+  # CSIDL_PROFILE via `cygpath -F 40` -- never $USERPROFILE, which is environment
+  # (a project's settings env can set it). And the cygpath at its install path,
+  # not whatever PATH finds first (PATH can be seeded too); DOCTOR_CYGPATH stays
+  # the test seam.
+  is_windows || return 1
+  local c=${DOCTOR_CYGPATH:-/usr/bin/cygpath} p
+  [ -x "$c" ] || return 1
+  p=$("$c" -F 40 2>/dev/null) || return 1
+  case $p in /*) printf '%s\n' "$p" ;; *) return 1 ;; esac
+}
 unix_path() { _er_cygpath -u "$1" 2>/dev/null || printf '%s\n' "$1"; }   # C:\x → /c/x

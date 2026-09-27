@@ -219,8 +219,10 @@ command but never removes it itself.
 Be accurate about what it achieves: it adds a SECOND server. On Windows the
 bundled bare-name entry is still spawned, so a `headroom.exe` in a project
 directory still runs — never tell the user this registration closes that. When
-the `claude` CLI is not on PATH it is skipped with a `note` (Windows) or reported
-with the PATH alternative (macOS/Linux).
+the `claude` CLI is not on PATH, an existing user-scoped entry is still judged
+by starting it (`ok` when it starts, a `note` when it does not answer in time);
+only adding or replacing one needs the CLI, and that is skipped with a `note`
+(Windows) or reported with the PATH alternative (macOS/Linux).
 
 **If `--fix` still ends in a registration `FAIL` on macOS/Linux** (`headroom` is
 off PATH and no working MCP registration landed, or a dead local-scoped entry is

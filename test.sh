@@ -6222,10 +6222,13 @@ check_absent "w29b: a printf \\n escape is not refused as Windows syntax" "uses 
 # USERPROFILE is environment -- a project's settings env can point it at the
 # project. It must never erase the boundary (POSIX, and Windows with a cygpath
 # that is the only source of the native profile)
+# (an IDENTITY cygpath for this: the shared fake rewrites every -u path to
+#  /c/fake/<name>, which would hide a USERPROFILE read; it answers nothing to -F)
+mkdir -p "$W29B/idcyg"; printf '#!/bin/sh\n[ "$1" = "-u" ] && { printf "%%s\\n" "$2"; exit 0; }\nexit 1\n' > "$W29B/idcyg/cygpath"; chmod +x "$W29B/idcyg/cygpath"
 for w29_up in "$W29W/proj" "$W29W/proj/sub/x"; do
   got=$(cd "$W29W/proj" && USERPROFILE="$w29_up" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); under_workspace '$W29W/proj/tools'; echo rc=\$?")
   check_eq "w29b: USERPROFILE=$w29_up does not exempt the project (unix)" "rc=0" "$got"
-  got=$(cd "$W29W/proj" && USERPROFILE="$w29_up" DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); under_workspace '$W29W/proj/tools'; echo rc=\$?")
+  got=$(cd "$W29W/proj" && USERPROFILE="$w29_up" DOCTOR_OS=windows DOCTOR_CYGPATH="$W29B/idcyg/cygpath" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); under_workspace '$W29W/proj/tools'; echo rc=\$?")
   check_eq "w29b: ...nor on Windows (profile from cygpath -F 40 only)" "rc=0" "$got"
 done
 # end to end: HCAT_PYTHON into the project + USERPROFILE=the project -> still refused
@@ -6239,7 +6242,7 @@ jq -n --rawfile c "$(jraw "$W29P/venv/bin/headroom")" '{mcpServers:{headroom:{ty
 out=$(env -u HCAT_PYTHON DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W29B/live.json" PATH="$STUB:/usr/bin:/bin" \
       DOCTOR_SETTINGS="$W29P/s.json" DOCTOR_CLAUDE_DIR="$W29P/cd" DOCTOR_VENV_DIR="$W29P/venv" \
       DOCTOR_SHIM_DIR="$W29B/noshim" HEADROOM_STATE_DIR="$W29P/state" bash "$DOCTOR" --fix 2>&1)
-check "w29b: a working user entry is ok without the claude CLI" "MCP registered as a user-scoped server ($W29P/venv/bin/headroom)" "$out"
+check "w29b: a working user entry is ok without the claude CLI" "MCP registered by absolute path ($W29P/venv/bin/headroom)" "$out"
 check_absent "w29b: ...and --fix raises no outage FAIL" "the bundled MCP cannot start" "$out"
 # a relative backslash statusLine is native syntax; %d_%H-style runs are not
 jq -n --arg c 'node scripts\sl.js' '{statusLine:{type:"command",command:$c}}' > "$W29BC/relbs.json"
@@ -6278,6 +6281,8 @@ out=$(cd "$W29B/proj" && env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_SHIM_RUNS_T
       PATH="$W29B/proj/bin:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$W21/s.json" DOCTOR_CLAUDE_DIR="$W21/cd" \
       DOCTOR_VENV_DIR="$W21/venv" DOCTOR_SHIM_DIR="$W21/shim" HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" 2>&1)
 check_absent "w29b: no claude CLI + a slow user entry is not refused" "refusing to register" "$out"
+check "w29b: ...it gets the slow note, as with claude on PATH" "did not answer within" "$out"
+check_absent "w29b: ...never an ok it has not earned" "MCP registered" "$out"
 # UNC and dot-relative arms
 for w29_c in 'node \\srv\share\sl.js' '.\sl.cmd'; do
   jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/p.json"
@@ -6285,6 +6290,47 @@ for w29_c in 'node \\srv\share\sl.js' '.\sl.cmd'; do
   out=$(w29b_chain "$W29BC/p.json" --fix)
   check "w29b: '$w29_c' is refused as Windows syntax" "uses Windows syntax" "$out"
 done
+
+# joined %VAR%%VAR% tokens are native syntax too
+jq -n --arg c 'node %HOMEDRIVE%%HOMEPATH%\sl.js' '{statusLine:{type:"command",command:$c}}' > "$W29BC/joined.json"
+out=$(w29b_chain "$W29BC/joined.json" --fix)
+check "w29b: %HOMEDRIVE%%HOMEPATH% is refused as Windows syntax" "uses Windows syntax" "$out"
+# the native profile comes from `cygpath -F 40` and a root that holds it is
+# dropped (a fake cygpath answering -F 40 with the fixture proj's parent)
+mkdir -p "$W29B/fcyg"
+printf '#!/bin/sh\n[ "$1" = "-F" ] && { echo "%s/profile"; exit 0; }\nexec "%s" "$@"\n' "$W29W" "$W/cygpath" > "$W29B/fcyg/cygpath"; chmod +x "$W29B/fcyg/cygpath"
+got=$(cd "$W29W" && DOCTOR_OS=windows DOCTOR_CYGPATH="$W29B/fcyg/cygpath" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); under_workspace '$W29W/proj'; echo rc=\$?")
+check_eq "w29b: a cwd holding the OS-reported profile is not a project boundary" "rc=1" "$got"
+
+for w29_c in 'printf %%CPU%%' 'cut -d\. -f1' 'sed s/a\.b/c/'; do
+  jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/neg.json"
+  out=$(w29b_chain "$W29BC/neg.json" --fix)
+  check_absent "w29b: '$w29_c' is not refused as Windows syntax" "uses Windows syntax" "$out"
+done
+# a cygpath seeded first on PATH (a project's settings env can do that) is never
+# the source of the native profile: only the installed one (or the test seam)
+got=$(cd "$W29W" && env -u DOCTOR_CYGPATH DOCTOR_OS=windows PATH="$W29B/fcyg:/usr/bin:/bin" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); under_workspace '$W29W/proj'; echo rc=\$?")
+check_eq "w29b: a PATH-seeded cygpath cannot erase the boundary" "rc=0" "$got"
+
+# the path arms also fire inside quotes (a quoted Windows path is still native)
+for w29_c in 'node "C:\Program Files\sl.js"' "node '\\\\srv\\share\\sl.js'" 'node ".\sl.js"'; do
+  jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/q.json"
+  case $(jq -r .statusLine.command "$W29BC/q.json") in *'\'*) ;; *) echo "FAIL - w29b: quoted-path fixture lost its backslash (fixture broken)"; FAIL=$((FAIL+1)) ;; esac
+  out=$(w29b_chain "$W29BC/q.json" --fix)
+  check "w29b: quoted $w29_c is refused as Windows syntax" "uses Windows syntax" "$out"
+done
+# foreign_cli_hint never proposes a venv that resolves inside the project
+w29_hint() {  # w29_hint <HOME> <VENV_DIR> <cli>
+  (cd "$W29B/uvproj" && env -u HCAT_PYTHON -u UV_TOOL_DIR DOCTOR_OS=unix HOME="$1" PATH="/usr/bin:/bin" \
+    bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); VENV_DIR='$2'
+      $(sed -n '/^_cli_canon() {/,/^}/p;/^foreign_cli_hint() {/,/^}/p' "$DOCTOR")
+      foreign_cli_hint '$3'")
+}
+got=$(w29_hint "$W29BH/home" .venv "$W29B/uvproj/uvt/headroom-ai/bin/headroom")
+check "w29b: a relative VENV_DIR falls back to the HOME venv" "$W29BH/home/.headroom-venv" "$got"
+check_absent "w29b: ...never '-m venv .venv'" "-m venv .venv" "$got"
+got=$(w29_hint . .venv "$W29B/uvproj/uvt/headroom-ai/bin/headroom")
+check "w29b: with no usable venv either, only uv is offered" "outside it: uv tool install headroom-ai" "$got"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
