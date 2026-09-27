@@ -15,12 +15,12 @@ jobs:
       # The floor has to sit close enough that losing a whole engine-gated group
       # trips it on EACH runner -- the largest such group is 15 assertions -- so
       # it is set PER OS (one shared value is only tight on the lower runner).
-      # Review round 22: the round-21 run measured 1015 on macOS / 1013 on ubuntu;
-      # +8 since gives ~1023 / ~1021, so the floors sit above 1023 - 15 = 1008
-      # and 1021 - 15 = 1006. RAISE
+      # Review round 23: the round-22 run measured 1023 on macOS / 1021 on ubuntu;
+      # +9 since gives ~1032 / ~1030, so the floors sit above 1032 - 15 = 1017
+      # and 1030 - 15 = 1015. RAISE
       # these whenever fixtures are added -- at 810 the floor had drifted ~65 below
       # the real count and would have let four such groups vanish green.
-      MIN_FIXTURES: ${{ matrix.os == 'macos-latest' && 1009 || 1007 }}
+      MIN_FIXTURES: ${{ matrix.os == 'macos-latest' && 1018 || 1016 }}
     steps:
       - uses: actions/checkout@v7
       - name: deps
@@ -54,6 +54,29 @@ jobs:
         run: |
           set -o pipefail
           ./test.sh 2>&1 | tee suite.log
+      - name: MCP entry readers under jq 1.6
+        # Ubuntu 22.04 / Debian 12 still ship jq 1.6, where `contains("\u0000")`
+        # is true for EVERY string -- a NUL gate written that way judged every
+        # registered MCP entry dead while this runner's jq 1.7 stayed green.
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/jq16"
+          curl -fsSL -o "$RUNNER_TEMP/jq16/jq" https://github.com/jqlang/jq/releases/download/jq-1.6/jq-linux64
+          chmod +x "$RUNNER_TEMP/jq16/jq"
+          PATH="$RUNNER_TEMP/jq16:$PATH" jq --version
+          cj="$RUNNER_TEMP/cj.json"
+          printf '%s' '{"mcpServers":{"headroom":{"command":"/x/headroom","args":["mcp","serve"],"env":{"K":"v"}}}}' > "$cj"
+          ok=$(PATH="$RUNNER_TEMP/jq16:$PATH" HEADROOM_CLAUDE_JSON="$cj" bash -c \
+            '. scripts/lib/engine-resolve.sh; . scripts/lib/doctor-mcp.sh; mcp_user_args | tr "\0" " "; mcp_user_env >/dev/null && echo env-ok')
+          echo "readers under jq 1.6: $ok"
+          [ "$ok" = "mcp serve env-ok" ] || { echo "::error::ordinary args/env refused or mangled under jq 1.6"; exit 1; }
+          printf '%s' '{"mcpServers":{"headroom":{"command":"/x/headroom","args":["a\u0000b"]}}}' > "$cj"
+          if PATH="$RUNNER_TEMP/jq16:$PATH" HEADROOM_CLAUDE_JSON="$cj" bash -c \
+               '. scripts/lib/engine-resolve.sh; . scripts/lib/doctor-mcp.sh; mcp_user_args >/dev/null'; then
+            echo "::error::a NUL inside an arg was not refused under jq 1.6"; exit 1
+          fi
+          echo "jq 1.6: ordinary entries pass, a NUL is refused"
       - name: engine coverage gate
         # Same assertion the Windows job carries, on all three platforms now. The
         # lesson from F8 is that the dangerous failure is not a red test, it is
@@ -79,11 +102,11 @@ jobs:
           # block, and the grep counts zero and passes. The floor notices the
           # collapse regardless of how the skip is spelled.
           ran=$( { grep -oE '^[0-9]+ passed, [0-9]+ failed' suite.log || true; } | tail -1 | awk '{print $1+$3}' )
-          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-1007}" ]; then
-            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-1007}) — coverage collapsed"
+          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-1016}" ]; then
+            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-1016}) — coverage collapsed"
             exit 1
           fi
-          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-1007})"
+          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-1016})"
           grep -E '^[0-9]+ passed' suite.log | tail -1
   windows:
     runs-on: windows-latest
@@ -94,10 +117,9 @@ jobs:
       # (721 passed + 53 failed); it was 726 while the probe was POSIX-only, so a
       # regression of that fix lands at ~726 and must be caught. 760 sits above
       # that and leaves room for ordinary churn. RAISE as coverage grows.
-      # 999 executed on the round-21 run; round 22 adds ~7 that run on Windows
-      # (the argv spy may skip without a ps that takes -o), so 991 trips on a
-      # lost 15-assertion group.
-      MIN_FIXTURES: "991"
+      # 1006 executed on the round-22 run; round 23 adds 9 that run on Windows
+      # (~1015), so 1001 trips on a lost 15-assertion group.
+      MIN_FIXTURES: "1001"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking

@@ -474,9 +474,11 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
   # Only the loader/search-path variables stay on the `env` argv, so they reach
   # the probed command but never the timeout/watchdog wrapper itself (a PATH
   # without coreutils would otherwise leave the probe unbounded).
-  local -a e=() argv_env=(); local kv k
+  local -a e=() argv_env=(); local kv k t=${DOCTOR_SHIM_RUNS_TIMEOUT:-5}
   while [ $# -gt 0 ] && [ "$1" != -- ]; do e+=("$1"); shift; done
   shift
+  # the bound is fixed BEFORE the entry's env is exported: an entry must not be
+  # able to widen the doctor's own probe window
   (
     export HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1
     # Git Bash rewrites POSIX-looking ARGS (/c -> C:/) when it starts a native
@@ -485,13 +487,17 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
     for kv in ${e[@]+"${e[@]}"}; do
       k=${kv%%=*}
       case $k in
-        PATH|LD_*|DYLD_*) argv_env+=("$kv") ;;
-        ''|[0-9]*|*[!A-Za-z0-9_]*) ;;          # not an identifier: cannot be exported
+        # the doctor's own knobs (and the bound helper's) never come from an
+        # entry; they go to the probed command's argv env only
+        DOCTOR_*|ER_*|_ER_*) argv_env+=("$kv") ;;
+        [Pp][Aa][Tt][Hh]|LD_*|DYLD_*) argv_env+=("$kv") ;;
+        '') ;;
+        [0-9]*|*[!A-Za-z0-9_]*) argv_env+=("$kv") ;;   # not an identifier: `env` still passes it
         *) # shellcheck disable=SC2163  # $kv is a whole KEY=VALUE pair, exported as such
            export "$kv" ;;
       esac
     done
-    run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
+    run_bounded "$t" \
       env ${argv_env[@]+"${argv_env[@]}"} "$@" --help >/dev/null 2>&1
   )
 }
@@ -1077,7 +1083,7 @@ if [ "$mcp_need" -eq 1 ]; then
       mcp_state=ok
     elif [ "$mcp_old_rc" -eq 124 ]; then
       # Too slow is not dead (a first `uvx` run downloads): never replace it
-      say note "the user-scoped headroom MCP ($mcp_old) did not answer within ${DOCTOR_SHIM_RUNS_TIMEOUT:-5}s — left as is; re-run the doctor once it has warmed up"
+      say note "the user-scoped headroom MCP ($mcp_old) did not answer within ${DOCTOR_SHIM_RUNS_TIMEOUT:-5}s — left as is (not confirmed working, not replaced); re-run the doctor once it has warmed up"
       # unknown, not ok: no "registered" claim, and no outage FAIL either
       mcp_state=slow
     elif [ "$FIX" -eq 1 ]; then
@@ -1123,7 +1129,7 @@ if [ "$mcp_need" -eq 1 ]; then
     [ -n "$mcp_loc" ] && { mcp_entry_runs "$(unix_path "$mcp_loc")" mcp_local_args mcp_local_env; mcp_loc_rc=$?; }
     if [ -n "$mcp_loc" ] && [ "$mcp_loc_rc" -ne 0 ] && [ "$mcp_loc_rc" -ne 124 ]; then
       say fixable "a local-scoped headroom MCP for this project ($mcp_loc) takes precedence over the user-scoped one and does not start — remove it: claude mcp remove headroom -s local"
-      case $mcp_state in ok|slow) mcp_state=shadowed ;; esac
+      case $mcp_state in ok) mcp_state=shadowed ;; slow) mcp_state=shadowed; mcp_shadow_slow=1 ;; esac
     elif [ -n "$mcp_loc" ]; then
       say note "a local-scoped headroom MCP for this project ($mcp_loc) takes precedence over the user-scoped one"
     fi
@@ -1137,7 +1143,8 @@ if [ "$mcp_need" -eq 1 ]; then
       say fixable "$mcp_msg — or put headroom on PATH: $(path_hint)"
     fi
   elif ! is_windows && [ "$FIX" -eq 1 ] && [ "$mcp_state" = shadowed ]; then
-    say FAIL "the user-scoped registration works, but in this project the dead local-scoped headroom MCP ($mcp_loc) is spawned instead — remove it: claude mcp remove headroom -s local"
+    if [ "${mcp_shadow_slow:-0}" -eq 1 ]; then mcp_user_said="has not been confirmed working (see above)"; else mcp_user_said="works"; fi
+    say FAIL "the user-scoped registration $mcp_user_said, but in this project the dead local-scoped headroom MCP ($mcp_loc) is spawned instead — remove it: claude mcp remove headroom -s local"
   elif ! is_windows && [ "$FIX" -eq 1 ] && [ "$mcp_state" != ok ] && [ "$mcp_state" != skip ] && [ "$mcp_state" != slow ]; then
     say FAIL "\`headroom\` is not on PATH and no working MCP registration landed, so the bundled MCP cannot start — see the lines above, or $(path_hint)"
   fi

@@ -137,19 +137,31 @@ mcp_user_cmd() {  # the command of the USER-scoped `headroom` MCP, empty if none
 }
 _dm_jqj() {  # jq for the NUL-terminated (-j) readers: -b on a real MSYS/Cygwin host,
   # where a native jq.exe otherwise turns every \n INSIDE a value into \r\n
-  case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) jq -b "$@" ;; *) jq "$@" ;; esac
+  # (and only if this jq accepts -b: a non-WIN32 jq 1.6 build rejects it)
+  if [ -z "${_DM_JQ_B+x}" ]; then
+    _DM_JQ_B=""
+    case "$(uname -s 2>/dev/null)" in
+      MINGW*|MSYS*|CYGWIN*) jq -b -n 1 >/dev/null 2>&1 && _DM_JQ_B=-b ;;
+    esac
+  fi
+  jq ${_DM_JQ_B:+"$_DM_JQ_B"} "$@"
+}
+_dm_jq_items() {  # _dm_jq_items <filter yielding an array of strings> [file] — each item NUL-terminated
+  # A string holding NUL cannot be passed to a process (Claude Code's spawn
+  # refuses it) and would split the item here: fail instead, so the caller
+  # judges the entry "does not start" without running anything.
+  # explode, not contains("\u0000"): on jq 1.6 contains() of a NUL is true for EVERY string
+  _dm_jqj -j "($1) | if any(.[]; any(explode[]; . == 0)) then error(\"NUL\") else .[] + \"\\u0000\" end" "${@:2}" 2>/dev/null
 }
 mcp_user_args() {  # its args, each NUL-terminated (an arg may hold a newline)
   local cj; cj=$(claude_json_path)
   [ -f "$cj" ] || return 0
-  _dm_jqj -j '(.mcpServers.headroom.args // []) | map(tostring)
-          | if any(.[]; contains("\u0000")) then error("NUL") else .[] + "\u0000" end' "$cj" 2>/dev/null
+  _dm_jq_items '(.mcpServers.headroom.args // []) | map(tostring)' "$cj"
 }
 mcp_user_env() {  # its env block as KEY=VALUE, each NUL-terminated
   local cj; cj=$(claude_json_path)
   [ -f "$cj" ] || return 0
-  _dm_jqj -j '(.mcpServers.headroom.env // {}) | to_entries | map("\(.key)=\(.value|tostring)")
-          | if any(.[]; contains("\u0000")) then error("NUL") else .[] + "\u0000" end' "$cj" 2>/dev/null
+  _dm_jq_items '(.mcpServers.headroom.env // {}) | to_entries | map("\(.key)=\(.value|tostring)")' "$cj"
 }
 mcp_project_root() {  # the key the CLI files local-scoped servers under: the repository root, else $PWD
   local d r; d=$(_dm_canon "$PWD") || d=$PWD
@@ -180,12 +192,10 @@ mcp_local_cmd() {  # the command of a LOCAL-scoped `headroom` MCP for this proje
   _mcp_local_entry | head -1
 }
 mcp_local_args() {  # its args, each NUL-terminated
-  _mcp_local_entry | sed -n 2p | _dm_jqj -j 'map(tostring)
-          | if any(.[]; contains("\u0000")) then error("NUL") else .[] + "\u0000" end' 2>/dev/null
+  _mcp_local_entry | sed -n 2p | _dm_jq_items 'map(tostring)'
 }
 mcp_local_env() {  # its env block as KEY=VALUE, each NUL-terminated
-  _mcp_local_entry | sed -n 3p | _dm_jqj -j 'to_entries | map("\(.key)=\(.value|tostring)")
-          | if any(.[]; contains("\u0000")) then error("NUL") else .[] + "\u0000" end' 2>/dev/null
+  _mcp_local_entry | sed -n 3p | _dm_jq_items 'to_entries | map("\(.key)=\(.value|tostring)")'
 }
 # The server NAME must precede -e: -e is variadic and swallows every following
 # bare token, so `-e A=1 headroom` is rejected by the real CLI with "Invalid

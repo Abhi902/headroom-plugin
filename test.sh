@@ -5676,21 +5676,65 @@ check_absent "w28k: a slow local-scoped entry is not reported as failing to star
 out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28J/slow.json" unix "$W21/stub:/usr/bin:/bin")
 check_absent "w28k: a slow user entry is not claimed as registered" "MCP registered by absolute path ($W28J/abs/slow)" "$out"
 # entry env VALUES never appear on the probe's argv (ps shows argv to other users)
-printf '#!/bin/sh\nps -o args= -p $PPID 2>/dev/null > "%s"; ps -o args= -p $$ 2>/dev/null >> "%s"; exit 0\n' "$W28K/argv" "$W28K/argv" > "$W28K/spy"; chmod +x "$W28K/spy"
+# the spy records EVERY process's argv (the leak could sit in a timeout,
+# watchdog or env process above it, depending on which bound path runs)
+printf '#!/bin/sh\nps -A -o args= 2>/dev/null > "%s"; exit 0\n' "$W28K/argv" > "$W28K/spy"; chmod +x "$W28K/spy"
 jq -n --rawfile c "$(jraw "$W28K/spy")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{SECRET_TOKEN:"sk-w28k-do-not-leak"}}}}' > "$W28K/secret.json"
-: > "$W28K/argv"
-(cd "$W28G" && w28g_run "$W28K/secret.json" unix "$W21/stub:/usr/bin:/bin" >/dev/null)
-if [ -s "$W28K/argv" ]; then
-  check_absent "w28k: an entry's env values never reach the probe argv" "sk-w28k-do-not-leak" "$(cat "$W28K/argv")"
+# a recording `timeout` first on PATH: the bound's argv is exactly what `ps`
+# would show other users, on every host (no dependence on coreutils being there)
+mkdir -p "$W28K/tbin"
+printf '#!/bin/sh
+printf "%%s\n" "$*" >> "%s"
+shift 3
+exec "$@"
+' "$W28K/targv" > "$W28K/tbin/timeout"; chmod +x "$W28K/tbin/timeout"
+: > "$W28K/targv"
+(cd "$W28G" && w28g_run "$W28K/secret.json" unix "$W28K/tbin:$W21/stub:/usr/bin:/bin" >/dev/null)
+if [ -s "$W28K/targv" ]; then
+  check_absent "w28k: an entry's env values never reach the probe argv" "sk-w28k-do-not-leak" "$(cat "$W28K/targv")"
 else
-  skip_note "w28k: argv spy needs ps (not available here)"
+  echo "FAIL - w28k: the recording timeout never ran (fixture broken)"; FAIL=$((FAIL+1))
 fi
+# an entry cannot widen the doctor's own probe bound through its env block
+jq -n --rawfile c "$(jraw "$W28J/abs/slow")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"],env:{DOCTOR_SHIM_RUNS_TIMEOUT:"60"}}}}' > "$W28K/widen.json"
+t0=$(date +%s)
+out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28K/widen.json" unix "$W21/stub:/usr/bin:/bin")
+t1=$(date +%s)
+check "w28k: an entry's DOCTOR_SHIM_RUNS_TIMEOUT does not change the doctor's bound" "did not answer within 1s" "$out"
+[ $((t1 - t0)) -lt 25 ]; pass_fail "w28k: ...and the run stays bounded ($((t1 - t0))s)" $?
 # a NUL inside an arg is refused without running anything
 jq -n --rawfile c "$(jraw "$W28K/spy")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["a\u0000b"]}}}' > "$W28K/nul.json"
 rm -f "$W28K/argv"
 out=$(cd "$W28G" && w28g_run "$W28K/nul.json" unix "$W21/stub:/usr/bin:/bin")
 [ ! -e "$W28K/argv" ]; pass_fail "w28k: an entry with a NUL in an arg is never executed" $?
 
+# ...the same for a NUL in the ENV block, and for a LOCAL-scoped entry
+jq -n --rawfile c "$(jraw "$W28K/spy")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{A:"x\u0000y"}}}}' > "$W28K/nulenv.json"
+rm -f "$W28K/argv"
+(cd "$W28G" && w28g_run "$W28K/nulenv.json" unix "$W21/stub:/usr/bin:/bin" >/dev/null)
+[ ! -e "$W28K/argv" ]; pass_fail "w28k: an entry with a NUL in an env value is never executed" $?
+jq -n --arg k "$w28k_root" --rawfile c "$(jraw "$W28K/spy")" '{projects:{($k):{mcpServers:{headroom:{type:"stdio",command:$c,args:["a\u0000b"]}}}}}' > "$W28K/nullocal.json"
+rm -f "$W28K/argv"
+(cd "$W28K/proj" && w28g_run "$W28K/nullocal.json" unix "$W21/stub:/usr/bin:/bin" >/dev/null)
+[ ! -e "$W28K/argv" ]; pass_fail "w28k: a local-scoped entry with a NUL in an arg is never executed" $?
+# PATH from the entry reaches the probed command (on its env argv)
+mkdir -p "$W28K/pbin"; printf '#!/bin/sh\nexit 0\n' > "$W28K/pbin/onlyhere"; chmod +x "$W28K/pbin/onlyhere"
+jq -n --arg p "$W28K/pbin:/usr/bin:/bin" '{mcpServers:{headroom:{type:"stdio",command:"onlyhere",args:[],env:{PATH:$p}}}}' > "$W28K/path.json"
+out=$(cd "$W28G" && w28g_run "$W28K/path.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28k: an entry's own PATH is used to find a bare launcher" "MCP registered as a user-scoped server (onlyhere, found on PATH)" "$out"
+# a slow user entry never produces the "no working registration" outage FAIL
+out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28J/slow.json" unix "$W21/stub:/usr/bin:/bin" --fix)
+check_absent "w28k: a slow entry under --fix raises no outage FAIL" "no working MCP registration landed" "$out"
+# the NUL gate passes ordinary args and env (a gate that refuses EVERY string
+# -- contains("\u0000") on jq 1.6 -- would call a healthy entry dead)
+got=$(HEADROOM_CLAUDE_JSON="$W28J/absenv.json" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; mcp_user_args >/dev/null && mcp_user_env >/dev/null && echo pass || echo refused")
+check_eq "w28k: ordinary args/env pass the NUL gate" "pass" "$got"
+# a SLOW user entry shadowed by a dead local one: the FAIL never says it "works"
+jq -n --arg k "$w28k_root" --rawfile c "$(jraw "$W28J/abs/slow")" --rawfile d "$(jraw "$W28J/abs/launch")" \
+  '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}},projects:{($k):{mcpServers:{headroom:{type:"stdio",command:$d,args:["no-such-mod"]}}}}}' > "$W28K/slowshadow.json"
+out=$(cd "$W28K/proj" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28K/slowshadow.json" unix "$W21/stub:/usr/bin:/bin" --fix)
+check "w28k: a slow user entry shadowed by a dead local one is not called working" "the user-scoped registration has not been confirmed working (see above)" "$out"
+check_absent "w28k: ...never \"works\"" "the user-scoped registration works" "$out"
 # a native jq.exe writes CRLF in -r mode: the command reader strips the \r
 mkdir -p "$W28K/crjq"
 cat > "$W28K/crjq/jq" <<W28KJQ

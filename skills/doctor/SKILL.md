@@ -151,7 +151,10 @@ Each line is aligned `<status> - <what>`:
 - `note` — a supplementary caveat attached to the fixed/ok line just above it
   (e.g. that stale-copy deletion only scanned this project's `.claude`
   settings, not every project on disk); not counted toward the ok/fixable/
-  failed/skipped tally.
+  failed/skipped tally. Exception: a `note` that stands ALONE is the whole
+  result of its check — e.g. "the user-scoped headroom MCP … did not answer
+  within Ns" — so always relay it with its follow-up (re-run the doctor once
+  it has warmed up), even though it is not tallied.
 
 Summarize for the user in one or two sentences: what is healthy, what is
 broken, what the doctor could fix.
