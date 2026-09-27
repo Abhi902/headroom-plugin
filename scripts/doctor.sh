@@ -475,8 +475,11 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
   # watchdog wrapper never see it -- so no entry key (a bound variable, IFS,
   # EXECIGNORE, PATH, ...) can widen or break the bound. Identifier-shaped keys
   # are exported, so their values never reach argv (where `ps` shows them to
-  # other users); the exception is a key that is not a shell identifier (or one
-  # bash keeps readonly), which can only travel as an `env` arg and is visible.
+  # other users). The exceptions travel as visible `env` args: a key that is
+  # not a shell identifier, one bash refuses (readonly) or rewrites (RANDOM,
+  # SECONDS, ...), and the loader-steering POSIXLY_CORRECT / SHLVL. Keys
+  # starting with `-` and SHELLOPTS/BASHOPTS are dropped; a command starting
+  # with `-` is refused unexecuted.
   # A command path containing `=` is started through `sh -c 'exec "$0" "$@"'`,
   # so `env` never reads it as one more assignment; any other command is
   # exec'd by `env` directly, exactly as the entry's argv spawns it.
@@ -518,7 +521,10 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
           # dropped: a `-` key would be read by env as an option, and bash`s
           # readonly SHELLOPTS/BASHOPTS would steer the sh hop (noexec)
           ""|-*|SHELLOPTS|BASHOPTS) ;;
-          __hr_probe_kv|__hr_probe_k|[0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
+          # env sets these verbatim: POSIXLY_CORRECT exported here would put the
+          # loader in posix mode (a later readonly key then kills it), and bash
+          # decrements an exported SHLVL on exec
+          __hr_probe_kv|__hr_probe_k|POSIXLY_CORRECT|SHLVL|[0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
           # exported -- unless bash refuses it (readonly) or rewrites it on the
           # way (RANDOM, SECONDS, LINENO, ...): then env passes it verbatim
           *) if ! export "$__hr_probe_kv" 2>/dev/null || [ "${!__hr_probe_k}" != "${__hr_probe_kv#*=}" ]; then

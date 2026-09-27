@@ -5808,13 +5808,28 @@ jq -n --rawfile c "$(jraw "$W28K/a=b/launch")" '{mcpServers:{headroom:{type:"std
 out=$(cd "$W28G" && w28g_run "$W28K/eqpath.json" unix "$W21/stub:/usr/bin:/bin")
 check "w28k: a command path containing = is probed as a command" "MCP registered by absolute path ($W28K/a=b/launch)" "$out"
 # the loader's own loop-variable name, several non-identifier keys, and helper
-# names all reach the probed command with their values intact
-jq -n --rawfile c "$(jraw "$W28K/envdump")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{kv:"w28k-kv",__hr_probe_kv:"w28k-own",__hr_probe_k:"w28k-k","a-b":"w28k-ab","c.d":"w28k-cd",ni:"w28k-ni"}}}}' > "$W28K/manykeys.json"
+# names all reach the probed command with their values intact (__hr_probe_k's value is its own
+# name, so only the case entry -- not the value re-check -- keeps it from being
+# overwritten by the next key, zz)
+jq -n --rawfile c "$(jraw "$W28K/envdump")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{kv:"w28k-kv",__hr_probe_kv:"w28k-own",__hr_probe_k:"__hr_probe_k","a-b":"w28k-ab","c.d":"w28k-cd",ni:"w28k-ni",zz:"w28k-zz"}}}}' > "$W28K/manykeys.json"
 : > "$W28K/probe-env"
 (cd "$W28G" && w28g_run "$W28K/manykeys.json" unix "$W21/stub:/usr/bin:/bin" >/dev/null)
 w28k_env=$(cat "$W28K/probe-env")
-for kvp in kv=w28k-kv __hr_probe_kv=w28k-own __hr_probe_k=w28k-k a-b=w28k-ab c.d=w28k-cd ni=w28k-ni; do
+for kvp in kv=w28k-kv __hr_probe_kv=w28k-own __hr_probe_k=__hr_probe_k a-b=w28k-ab c.d=w28k-cd ni=w28k-ni zz=w28k-zz; do
   check "w28k: entry key ${kvp%%=*} reaches the probed command intact" "$kvp" "$w28k_env"
+done
+# keys bash refuses or rewrites (EUID, RANDOM, SECONDS), and the loader-steering
+# POSIXLY_CORRECT / SHLVL, still arrive verbatim -- POSIXLY_CORRECT goes first so
+# a posix-mode loader would die on the readonly EUID after it. The dumper is awk,
+# not a shell: bash would reset RANDOM/SECONDS/SHLVL itself and hide the result
+printf '#!%s -f\nBEGIN { for (k in ENVIRON) print k "=" ENVIRON[k] > "%s" }\n' "$(command -v awk)" "$W28K/probe-env" > "$W28K/awkdump"; chmod +x "$W28K/awkdump"
+jq -n --rawfile c "$(jraw "$W28K/awkdump")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{POSIXLY_CORRECT:"w28k-pc",EUID:"w28k-euid",RANDOM:"w28k-rnd",SECONDS:"w28k-sec",SHLVL:"w28k-lvl"}}}}' > "$W28K/special.json"
+: > "$W28K/probe-env"
+out=$(cd "$W28G" && w28g_run "$W28K/special.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28k: an entry with special keys is judged as starting" "MCP registered by absolute path ($W28K/awkdump)" "$out"
+w28k_env=$(cat "$W28K/probe-env")
+for kvp in POSIXLY_CORRECT=w28k-pc EUID=w28k-euid RANDOM=w28k-rnd SECONDS=w28k-sec SHLVL=w28k-lvl; do
+  check "w28k: special key ${kvp%%=*} reaches the probed command verbatim" "$kvp" "$w28k_env"
 done
 # EXECIGNORE alone (bash >= 4.4 honours it) must not unbound the probe either
 if [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }; then
