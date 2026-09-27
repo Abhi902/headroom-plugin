@@ -6119,7 +6119,7 @@ check "w29b: a %VAR% is refused" "uses Windows syntax" "$out"
 out=$(cd "$W29B/proj" && env -u HCAT_PYTHON DOCTOR_OS=windows HEADROOM_CLAUDE_JSON="$W29B/none2.json" \
       PATH="$W29B/proj/bin:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$W21/s.json" DOCTOR_CLAUDE_DIR="$W21/cd" \
       DOCTOR_VENV_DIR="$W21/venv" DOCTOR_SHIM_DIR="$W21/shim" HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" 2>&1)
-check "w29b: an in-project CLI without the claude CLI is refused" "must never be registered as a user-scoped MCP" "$out"
+check "w29b: an in-project CLI without the claude CLI is refused" "refusing to register it as a user-scoped MCP" "$out"
 check_absent "w29b: ...not offered as fix-the-engine-first" "fix the engine first" "$out"
 
 # SessionStart on Windows does NOT accept a bare-name user MCP (Windows searches
@@ -6141,6 +6141,81 @@ if [ -L "$W29P/shim/headroom" ]; then
 else
   skip_note "w29b: repointed-shim fixture needs real symlinks (this host's ln -s copies)"
 fi
+
+# under_workspace terminates on any HOME (a relative one used to loop forever in
+# the HOME-ancestor walk), and a relative HOME never makes the project "a home"
+w29_to=$(command -v timeout || command -v gtimeout || true)   # bound it where we can
+got=$(cd "$W29W/proj" && HOME=relnonexist ${w29_to:+"$w29_to" 10} bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); under_workspace /usr/bin; echo rc=\$?")
+check_eq "w29b: under_workspace returns (no hang) under a relative HOME" "rc=1" "$got"
+got=$(cd "$W29W/proj" && HOME=. ${w29_to:+"$w29_to" 10} bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); under_workspace '$W29W/proj/tools'; echo rc=\$?")
+check_eq "w29b: HOME=. (a project's settings env) does not exempt the project" "rc=0" "$got"
+
+# adjacent one-letter specifiers (date +%Y%m%d reads as %Y%...) are bash-legal:
+# only a 2+-character %NAME% is Windows syntax
+jq -n '{statusLine:{type:"command",command:"date +%Y%m%d"}}' > "$W29BC/adj.json"
+out=$(w29b_chain "$W29BC/adj.json" --fix)
+check_absent "w29b: adjacent strftime specifiers are not refused as Windows syntax" "uses Windows syntax" "$out"
+# a native-syntax BACKUP with no statusLine: the plain run FAILs as --fix does
+jq -n '{_headroomStatusLineBackup:{type:"command",command:"node C:\\Users\\me\\sl.js"}}' > "$W29BC/bakonly.json"
+out=$(w29b_chain "$W29BC/bakonly.json")
+check "w29b: a native-syntax backup alone is refused by a plain run" "uses Windows syntax" "$out"
+check_absent "w29b: ...never offered as fixable" "statusLine not wired — --fix" "$out"
+
+jq -n '{statusLine:{type:"command",command:"date +%H%M%S"}}' > "$W29BC/adj2.json"
+out=$(w29b_chain "$W29BC/adj2.json" --fix)
+check_absent "w29b: date +%H%M%S is not refused as Windows syntax" "uses Windows syntax" "$out"
+# in-project CLI, no claude CLI, and only a DEAD user entry: still the refusal,
+# never "fix the engine first" (a live entry would be left alone)
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"/nonexistent/w29-dead",args:[]}}}' > "$W29B/dead.json"
+out=$(cd "$W29B/proj" && env -u HCAT_PYTHON DOCTOR_OS=windows HEADROOM_CLAUDE_JSON="$W29B/dead.json" \
+      PATH="$W29B/proj/bin:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$W21/s.json" DOCTOR_CLAUDE_DIR="$W21/cd" \
+      DOCTOR_VENV_DIR="$W21/venv" DOCTOR_SHIM_DIR="$W21/shim" HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" 2>&1)
+check "w29b: in-project CLI + dead entry + no claude CLI is refused" "refusing to register it as a user-scoped MCP" "$out"
+check_absent "w29b: ...never \"fix the engine first\"" "fix the engine first" "$out"
+
+# a SLOW existing user entry is kept (noted, not replaced) beside an in-project CLI
+jq -n --rawfile c "$(jraw "$W28J/abs/slow")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W29B/slow.json"
+out=$(cd "$W29B/proj" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W29B/slow.json" windows "$W29B/proj/bin:$W21/stub:/usr/bin:/bin" --fix)
+check "w29b: a slow user entry beside an in-project CLI is left as is" "did not answer within" "$out"
+check_absent "w29b: ...and not refused" "refusing to register" "$out"
+# no claude CLI + a WORKING existing entry: nothing to refuse
+out=$(cd "$W29B/proj" && env -u HCAT_PYTHON DOCTOR_OS=windows HEADROOM_CLAUDE_JSON="$W29B/keep.json" \
+      PATH="$W29B/proj/bin:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$W21/s.json" DOCTOR_CLAUDE_DIR="$W21/cd" \
+      DOCTOR_VENV_DIR="$W21/venv" DOCTOR_SHIM_DIR="$W21/shim" HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" 2>&1)
+check_absent "w29b: no claude CLI + a working user entry is not refused" "refusing to register" "$out"
+# no claude CLI + the in-project CLI already FAILed by 2b: one FAIL, 2c only skips
+out=$(cd "$W29W/proj" && env HCAT_PYTHON=tools/python DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W29B/nc.json" \
+      PATH="$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$W29W/s.json" DOCTOR_CLAUDE_DIR="$W29W/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W29W/shim" HEADROOM_STATE_DIR="$W29W/state" bash "$DOCTOR" 2>&1)
+check_eq "w29b: 2b's refusal is reported once" "1" "$(printf '%s\n' "$out" | grep -c 'lives inside this project')"
+check "w29b: ...and 2c only points at it" "check 2b above already FAILed it" "$out"
+# the remedy names the setting that actually steered the CLI into the project
+mkdir -p "$W29B/uvproj/uvt/headroom-ai/bin" "$W29B/uvproj/ubin"
+printf '#!/bin/sh\nexit 0\n'  > "$W29B/uvproj/uvt/headroom-ai/bin/python";   chmod +x "$W29B/uvproj/uvt/headroom-ai/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W29B/uvproj/uvt/headroom-ai/bin/headroom"; chmod +x "$W29B/uvproj/uvt/headroom-ai/bin/headroom"
+printf '#!/bin/sh\n[ "$1 $2" = "tool dir" ] && { echo "$UV_TOOL_DIR"; exit 0; }\nexit 1\n' > "$W29B/uvproj/ubin/uv"; chmod +x "$W29B/uvproj/ubin/uv"
+got=$(cd "$W29B/uvproj" && env -u HCAT_PYTHON UV_TOOL_DIR="$W29B/uvproj/uvt" DOCTOR_OS=unix PATH="$W29B/uvproj/ubin:/usr/bin:/bin" \
+      DOCTOR_VENV_DIR="$NOVENV" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); VENV_DIR='$NOVENV'
+        $(sed -n '/^_cli_canon() {/,/^}/p;/^foreign_cli_hint() {/,/^}/p' "$DOCTOR")
+        foreign_cli_hint '$W29B/uvproj/uvt/headroom-ai/bin/headroom'")
+check "w29b: a UV_TOOL_DIR-sourced in-project CLI is blamed on UV_TOOL_DIR" "unset UV_TOOL_DIR" "$got"
+got=$(cd "$W29B/uvproj" && env -u HCAT_PYTHON -u UV_TOOL_DIR DOCTOR_OS=unix HOME="$W29BH/home" PATH="/usr/bin:/bin" \
+      bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); VENV_DIR='$W29B/uvproj/uvt/headroom-ai'
+        $(sed -n '/^_cli_canon() {/,/^}/p;/^foreign_cli_hint() {/,/^}/p' "$DOCTOR")
+        foreign_cli_hint '$W29B/uvproj/uvt/headroom-ai/bin/headroom'")
+check "w29b: a DOCTOR_VENV_DIR-sourced one is blamed on DOCTOR_VENV_DIR" "point DOCTOR_VENV_DIR outside this project" "$got"
+check_absent "w29b: ...and never suggests the in-project venv again" "$W29B/uvproj/uvt/headroom-ai/bin/python -m pip" "$got"
+# a native jq.exe's CRLF never reaches the chained command
+jq -n '{statusLine:{type:"command",command:"printf CRLFOK"}}' > "$W29BC/cr.json"
+out=$(PATH="$W28K/crjq:$PATH" w29b_chain "$W29BC/cr.json" --fix)
+case $(cat "$W29BC/cd/headroom-statusline-chain.sh" 2>/dev/null) in
+  *"$(printf '\r')"*) echo "FAIL - w29b: the chain script carries no CR from a CRLF jq"; FAIL=$((FAIL+1)) ;;
+  *) echo "ok - w29b: the chain script carries no CR from a CRLF jq"; PASS=$((PASS+1)) ;; esac
+# bash-legal backslashes are not "Windows syntax": only native PATH spellings are
+jq -n --arg c "printf '%s\\n' hi" '{statusLine:{type:"command",command:$c}}' > "$W29BC/esc.json"
+case $(jq -r .statusLine.command "$W29BC/esc.json") in *'\'*) ;; *) echo "FAIL - w29b: esc fixture lost its backslash (fixture broken)"; FAIL=$((FAIL+1)) ;; esac
+out=$(w29b_chain "$W29BC/esc.json" --fix)
+check_absent "w29b: a printf \\n escape is not refused as Windows syntax" "uses Windows syntax" "$out"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

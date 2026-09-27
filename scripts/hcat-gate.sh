@@ -192,8 +192,9 @@ if [ -n "$py" ]; then
   # a name-squatted `headroom` on PyPI (see doctor.sh/bin/hcat).
   #
   # SKIP it when resolve_engine_python_validated already probed this exact
-  # candidate: this runs on every gated Read (before the per-session dedup
-  # below), so repeating the resolver's own bounded probe doubled the spawns
+  # candidate: this runs on every FIRST gated Read of a file (the per-session
+  # dedup above short-circuits retries), so repeating the resolver's own bounded
+  # probe doubled the spawns
   # the shared resolver was introduced to bound. What is left -- an
   # HCAT_PYTHON override, or the legacy narrow resolver -- is bounded too.
   if [ -z "$py_validated" ]; then

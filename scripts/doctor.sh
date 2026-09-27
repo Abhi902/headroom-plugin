@@ -406,9 +406,14 @@ sl_base_command() {  # the command check 7 --fix would chain ahead of the badge 
 | (\$base.command // \"\")" "$SETTINGS" 2>/dev/null | tr -d '\r'   # a native jq.exe writes CRLF
 }
 sl_native_syntax() {  # sl_native_syntax <cmd> — written for a non-POSIX spawner (a \ path, %VAR%)
-  # %NAME% only: a bare % is bash-legal (date +%H:%M, printf '%s') and must pass
-  local re='%[A-Za-z_][A-Za-z0-9_]*%'
-  case $1 in *\\*) return 0 ;; esac
+  # %NAME% only, NAME of 2+ characters: a bare % is bash-legal (date +%H:%M,
+  # printf '%s'), and so are ADJACENT one-letter specifiers (date +%Y%m%d reads
+  # as %Y% ...); Windows environment variable names are never one letter
+  local re='%[A-Za-z_][A-Za-z0-9_]+%'
+  # A native PATH, not every backslash: printf '\n' and sed 's/\s//' are
+  # bash-legal. Drive-qualified (C:\...), UNC (\\host\...) or dot-relative (.\x).
+  local rp='(^|[^A-Za-z0-9])[A-Za-z]:\\|\\\\[A-Za-z0-9]|(^|[[:space:]"'"'"'=])\.{1,2}\\'
+  [[ $1 =~ $rp ]] && return 0
   [[ $1 =~ $re ]]
 }
 cli_in_workspace() {  # cli_in_workspace <cli> — exit 0 when <cli> must NOT be persisted globally
@@ -425,21 +430,46 @@ cli_in_workspace() {  # cli_in_workspace <cli> — exit 0 when <cli> must NOT be
   t=$(_cli_canon "$(real_file "$c")") || return 0
   under_workspace "$(dirname "$t")"
 }
+mcp_user_entry_alive() {  # a user-scoped headroom entry exists and starts (or is merely slow)
+  local c rc
+  c=$(mcp_user_cmd); [ -n "$c" ] || return 1
+  case $c in /*|[A-Za-z]:[\\/]*|[\\/][\\/]*) c=$(unix_path "$c") ;; */*|*\\*) return 1 ;;
+    *) is_windows && return 1 ;; esac
+  mcp_entry_runs "$c" mcp_user_args mcp_user_env; rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]
+}
+mcp_refuse_foreign() {  # 2c: the one refusal of an in-project CLI ($mcp_foreign); sets mcp_state
+  if same_file "$mcp_foreign" "${CLI_FOREIGN_PATH:-}"; then
+    say skip "MCP registration by absolute path (the headroom CLI is inside this project — check 2b above already FAILed it)"
+  else
+    say FAIL "the resolved headroom CLI ($mcp_foreign) is a relative path or lives inside this project — refusing to register it as a user-scoped MCP, which every project would then spawn (HCAT_PYTHON, UV_TOOL_DIR or PATH may come from this project's settings) — $(foreign_cli_hint "$mcp_foreign")"
+  fi
+  mcp_state=skip
+}
 foreign_cli_hint() {  # foreign_cli_hint <cli> — how to stop resolving an in-project CLI, and where to install instead
   # Never reinstall_hint: that names the resolved (in-project) interpreter, so
   # following it rebuilds the very engine this refuses.
-  local how venv=$VENV_DIR venv_c py
+  local how venv=$VENV_DIR venv_c py uvc c pc
   if [ -n "${HCAT_PYTHON:-}" ]; then
     how="unset HCAT_PYTHON (or point it at an engine outside this project)"
-  elif [ -n "${UV_TOOL_DIR:-}" ] && case $1 in "$UV_TOOL_DIR"/*) true ;; *) false ;; esac; then
+  elif [ -n "${UV_TOOL_DIR:-}" ] && uvc=$(_cli_canon "$UV_TOOL_DIR/x") && c=$(_cli_canon "$1") \
+       && case $c in "${uvc%/x}"/*) true ;; *) false ;; esac; then
     how="unset UV_TOOL_DIR"
-  else
+  elif same_file "$(dirname "$1")" "$VENV_DIR/bin" || same_file "$(dirname "$1")" "$VENV_DIR/Scripts"; then
+    how="point DOCTOR_VENV_DIR outside this project"
+  elif pc=$(command -v headroom 2>/dev/null) && same_file "$pc" "$1"; then
     how="take $(dirname "$1") off PATH"
+  else
+    how="stop pointing the engine settings (HCAT_PYTHON, UV_TOOL_DIR, PATH, DOCTOR_VENV_DIR) into this project"
   fi
   # the default venv, unless it too sits inside this project
   if venv_c=$(_cli_canon "$venv/x") && under_workspace "$(dirname "$venv_c")"; then venv="${HOME:-~}/.headroom-venv"; fi
-  if is_windows; then py="$venv/Scripts/python.exe"; else py="$venv/bin/python"; fi
-  printf '%s, then install the engine outside it: python3 -m venv %s && %s -m pip install "headroom-ai[all]" (or: uv tool install headroom-ai)' "$how" "$venv" "$py"
+  if venv_c=$(_cli_canon "$venv/x") && under_workspace "$(dirname "$venv_c")"; then
+    printf '%s, then install the engine outside it: uv tool install headroom-ai' "$how"; return
+  fi
+  local mk
+  if is_windows; then py="$venv/Scripts/python.exe"; mk="py -3"; else py="$venv/bin/python"; mk=python3; fi
+  printf '%s, then install the engine outside it: %s -m venv %s && %s -m pip install "headroom-ai[all]" (or: uv tool install headroom-ai)' "$how" "$mk" "$venv" "$py"
 }
 _cli_canon() {  # _cli_canon <path> — absolute, dir-canonical spelling; fails if relative/unlocatable
   # Only a NATIVE spelling goes through unix_path (cygpath): the resolver already
@@ -1138,15 +1168,10 @@ if [ "$mcp_need" -eq 1 ]; then
   elif ! shim_runs "$(unix_path "$mcp_abs")"; then mcp_abs=""; mcp_dead=1
   fi
   mcp_state=unregistered
-  if [ "$mcp_foreign" != 0 ] && [ -z "$(mcp_user_cmd)" ] && ! command -v claude >/dev/null 2>&1; then
-    # nothing registered, and the only CLI there is must never be registered:
-    # "install claude, then --fix" would only reach the same refusal
-    if same_file "$mcp_foreign" "${CLI_FOREIGN_PATH:-}"; then
-      say skip "MCP registration by absolute path (the headroom CLI is inside this project — check 2b above already FAILed it)"
-    else
-      say FAIL "the resolved headroom CLI ($mcp_foreign) is a relative path or lives inside this project — it must never be registered as a user-scoped MCP (HCAT_PYTHON, UV_TOOL_DIR or PATH may come from this project's settings) — $(foreign_cli_hint "$mcp_foreign")"
-    fi
-    mcp_state=skip
+  if [ "$mcp_foreign" != 0 ] && ! command -v claude >/dev/null 2>&1 && ! mcp_user_entry_alive; then
+    # nothing (live) registered, and the only CLI there is must never be
+    # registered: "install claude, then --fix" would only reach the same refusal
+    mcp_refuse_foreign
   elif ! command -v claude >/dev/null 2>&1; then
     if [ -n "$mcp_abs" ]; then
       mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: $(mcp_add_hint "$mcp_abs")"
@@ -1209,12 +1234,7 @@ if [ "$mcp_need" -eq 1 ]; then
       # A working (or slow) existing entry was judged above and kept. Only here --
       # where --fix would ADD or REPLACE one -- does the in-project CLI matter:
       # never persist it (see cli_in_workspace).
-      if same_file "$mcp_foreign" "${CLI_FOREIGN_PATH:-}"; then
-        say skip "MCP registration by absolute path (the headroom CLI is inside this project — check 2b above already FAILed it)"
-      else
-        say FAIL "the resolved headroom CLI ($mcp_foreign) is a relative path or lives inside this project — refusing to register it as a user-scoped MCP, which every project would then spawn (HCAT_PYTHON, UV_TOOL_DIR or PATH may come from this project's settings) — $(foreign_cli_hint "$mcp_foreign")"
-      fi
-      mcp_state=skip
+      mcp_refuse_foreign
     elif [ "$FIX" -eq 1 ]; then
       mcp_repl=""; mcp_stuck=0
       if [ "$mcp_old_kind" = rel ]; then mcp_what=shadowable; else mcp_what=dead; fi
@@ -1664,10 +1684,10 @@ else
     # the badge) -- but the badge command itself comes from sl_hr_cmd, not a
     # hardcoded `bash "<path>"`: POSIX gets `bash "<path>"`, Windows gets
     # `"<bash.exe>" "<C:\...>"`. The SKILL.md installer stays POSIX-only.
-    # the ONE definition of "which command is chained ahead of the badge" (an
-    # existing _headroomStatusLineBackup wins, else a non-headroom statusLine).
-    # Shared by the base EXTRACTION below (which the Windows chain script needs)
-    # and by the merge program, so the two can never disagree about the base.
+    # "which command is chained ahead of the badge" has ONE definition,
+    # sl_base_sel_prog: shared by the base EXTRACTION below (the Windows chain
+    # script), the merge program, and the plain run's Windows-syntax verdict
+    # (via sl_base_command), so none of the three can disagree about the base.
     sl_base_sel=$(sl_base_sel_prog)
     # $chain (empty on POSIX) is the pre-built command for a chain SCRIPT; when
     # it is set the inline POSIX chain is not written at all — see below.
@@ -1765,10 +1785,10 @@ CHEOF
     fi
   elif is_windows && [ -z "$(sl_bash_path)" ]; then
     say FAIL "statusLine is not wired to the headroom badge, and $(sl_no_bash_reason), then run --fix"
-  elif [ -n "$sl" ] && is_windows && sl_native_syntax "$(sl_base_command)"; then
+  elif is_windows && sl_base_now=$(sl_base_command) && [ -n "$sl_base_now" ] && sl_native_syntax "$sl_base_now"; then
     # the same refusal --fix makes (see the WINDOWS MERGE note): never offer a
     # `fixable` that --fix will only FAIL
-    say FAIL "statusLine present without the headroom badge, and your command ($(sl_base_command)) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), then run --fix"
+    say FAIL "statusLine present without the headroom badge, and your command ($sl_base_now) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), then run --fix"
   elif [ -n "$sl" ]; then
     say fixable "statusLine present without the headroom badge — --fix appends it, preserving your command under _headroomStatusLineBackup"
   else

@@ -116,16 +116,33 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # A root that CONTAINS $HOME (a cwd of /Users, C:\ or / itself) is no project
   # boundary either: taking it would put ~/.headroom-venv, ~/.local/bin and every
   # user-level install "inside the workspace". Drop such roots up front.
-  local r kept=""
+  # Only a root that really holds a home: never every drive root (a project at
+  # E:\ with no home on it is still a project). On Windows the user's files also
+  # live under the NATIVE profile (USERPROFILE), which an MSYS HOME of /home/me
+  # does not reveal -- walk both.
+  local r h b hs kept="" uprof=""
+  if [ -n "${USERPROFILE:-}" ] && command -v unix_path >/dev/null 2>&1; then
+    uprof=$(unix_path "$USERPROFILE" 2>/dev/null) || uprof=""
+    case $uprof in /*) ;; *) uprof="" ;; esac
+  fi
+  # a RELATIVE HOME (HOME=. from a project's settings env) is canonicalised
+  # against the cwd -- it must not turn the project itself into "a home"
+  case ${HOME:-} in /*|[A-Za-z]:[\\/]*) hs=$home ;; *) hs="" ;; esac
+  hs="$hs
+$uprof"
   for r in "$r1" "$r2" "$r3"; do
     { [ -z "$r" ] || [ "$r" = / ]; } && continue
-    case $r in /[A-Za-z]) continue ;; esac    # an MSYS drive root
-    a=$home
-    while :; do
-      [ "$a" -ef "$r" ] && continue 2
-      [ "$a" = / ] || [ -z "$a" ] && break
-      a=${a%/*}; [ -n "$a" ] || a=/
-    done
+    while IFS= read -r h; do
+      case $h in /*) ;; *) continue ;; esac
+      a=$h
+      while :; do
+        [ "$a" -ef "$r" ] && continue 3
+        [ "$a" = / ] || [ -z "$a" ] && break
+        b=${a%/*}; [ -n "$b" ] || b=/
+        [ "$b" = "$a" ] && break      # no parent left to strip: never loop
+        a=$b
+      done
+    done <<< "$hs"
     kept="$kept$r
 "
   done
