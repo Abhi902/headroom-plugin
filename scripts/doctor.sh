@@ -75,7 +75,7 @@ done
 if ! type engine_python_candidates >/dev/null 2>&1 || ! type under_workspace >/dev/null 2>&1 \
    || ! type resolve_engine_python_validated >/dev/null 2>&1 || ! type claude_json_path >/dev/null 2>&1 \
    || ! type headroom_hijack_file >/dev/null 2>&1 || ! type _er_bounded >/dev/null 2>&1 \
-   || ! type is_network_path >/dev/null 2>&1; then
+   || ! type is_network_path >/dev/null 2>&1 || ! type mcp_user_args >/dev/null 2>&1; then
   echo "doctor: scripts/lib/engine-resolve.sh or doctor-mcp.sh missing or stale — partial plugin checkout; reinstall the plugin" >&2
   exit 1
 fi
@@ -449,6 +449,15 @@ run_bounded() {  # run_bounded <seconds> <cmd> [args...] — the command's own s
   # mandatory) already owns the coreutils-timeout-else-watchdog logic, with the
   # sub-second polling and the untrusted-input guards this copy never had.
   _er_bounded "$@"
+}
+mcp_bare_runs() {  # mcp_bare_runs <launcher> — the WHOLE registered command starts
+  # A bare launcher (uvx, python3, pipx) proves nothing by starting on its own:
+  # `python3 --help` succeeds whatever `-m <module>` it is registered with. Probe
+  # the registered argv, with --help appended, exactly as Claude Code would spawn it.
+  local -a a=(); local l
+  while IFS= read -r l; do a+=("$l"); done < <(mcp_user_args)
+  run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
+    env HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 "$1" ${a[@]+"${a[@]}"} --help >/dev/null 2>&1
 }
 shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves
   # Name resolution alone proves nothing: uv's relocatable trampolines resolve the
@@ -1023,7 +1032,7 @@ if [ "$mcp_need" -eq 1 ]; then
     if [ "$mcp_old_kind" = abs ] && shim_runs "$(unix_path "$mcp_old")"; then
       say ok "MCP registered by absolute path ($mcp_old) as a user-scoped server — $mcp_why"
       mcp_state=ok
-    elif [ "$mcp_old_kind" = bare ] && shim_runs "$mcp_old"; then
+    elif [ "$mcp_old_kind" = bare ] && mcp_bare_runs "$mcp_old"; then
       say ok "MCP registered as a user-scoped server ($mcp_old, found on PATH) — $mcp_why"
       mcp_state=ok
     elif [ "$FIX" -eq 1 ]; then

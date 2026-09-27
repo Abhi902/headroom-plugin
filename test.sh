@@ -5529,9 +5529,33 @@ check "w28h: ...saying it timed out and where the original is" "compression did 
 W28Ht="$W28H/tmpdir"; mkdir -p "$W28Ht"
 printf 'open(%s, "w").write("pwned")\nfrom json import *\n' "'$W28H/planted-ran'" > "$W28Ht/json.py"
 mkdir -p "$W28Ht/headroom"; printf 'open(%s, "w").write("pwned")\n' "'$W28H/planted-ran'" > "$W28Ht/headroom/__init__.py"
-TMPDIR="$W28Ht" HCAT_PYTHON="$(command -v python3)" HEADROOM_STATE_DIR="$W28H/state2" "$ROOT/bin/hcat" "$W28H/in.json" >/dev/null 2>&1
-[ ! -e "$W28H/planted-ran" ]; pass_fail "w28h: a module planted in TMPDIR is never imported by hcat's program" $?
-ls "$W28Ht" | grep -q '^hcat\.' && r=1 || r=0; pass_fail "w28h: ...and the private temp dir is removed afterwards" $r
+w28h_py=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)
+if [ -n "$w28h_py" ] && "$w28h_py" -c 'import json' >/dev/null 2>&1; then
+  TMPDIR="$W28Ht" HCAT_PYTHON="$w28h_py" HEADROOM_STATE_DIR="$W28H/state2" "$ROOT/bin/hcat" "$W28H/in.json" >/dev/null 2>&1
+  [ ! -e "$W28H/planted-ran" ]; pass_fail "w28h: a module planted in TMPDIR is never imported by hcat's program" $?
+  # ...and WITHOUT PYTHONSAFEPATH (Python < 3.11 ignores it): the private 0700 dir
+  # alone must keep the plant off sys.path
+  printf '#!/bin/sh\nunset PYTHONSAFEPATH\nexec %s "$@"\n' "$w28h_py" > "$W28H/py-nosafe"; chmod +x "$W28H/py-nosafe"
+  rm -f "$W28H/planted-ran"
+  TMPDIR="$W28Ht" HCAT_PYTHON="$W28H/py-nosafe" HEADROOM_STATE_DIR="$W28H/state3" "$ROOT/bin/hcat" "$W28H/in.json" >/dev/null 2>&1
+  [ ! -e "$W28H/planted-ran" ]; pass_fail "w28h: ...even with PYTHONSAFEPATH unset (the private dir alone)" $?
+else
+  skip_note "w28h: planted-module fixtures need a python with json (none on this host)"
+fi
+# DURING a run the program sits in a private directory (not loose in TMPDIR);
+# AFTER it, nothing is left
+W28Hd="$W28H/tmpdir2"; mkdir -p "$W28Hd"
+TMPDIR="$W28Hd" HCAT_PYTHON="$W28H/python" HCAT_EXEC_TIMEOUT=4 HEADROOM_STATE_DIR="$W28H/state4" "$ROOT/bin/hcat" "$W28H/in.json" >/dev/null 2>&1 &
+w28h_pid=$!
+w28h_seen=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  for d in "$W28Hd"/hcat.*; do [ -d "$d" ] && [ -f "$d/hcat_prog.py" ] && w28h_seen=$d; done
+  [ -n "$w28h_seen" ] && break; sleep 0.2 2>/dev/null || sleep 1
+done
+wait "$w28h_pid" 2>/dev/null
+[ -n "$w28h_seen" ]; pass_fail "w28h: the running program lives in a private hcat.* directory" $?
+w28h_left=$(ls -A "$W28Hd" | grep -c '^hcat\.')
+check_eq "w28h: ...removed once hcat exits" "0" "$w28h_left"
 # a UNC-spelled user entry (what --fix writes for an engine on a share) is
 # absolute: kept when it starts, not re-flagged as shadowable on every run
 W28Hu="$W28H/unc"; mkdir -p "$W28Hu"
@@ -5558,13 +5582,20 @@ check "w28h: a drive-relative C:headroom entry is shadowable" "which is not an a
 # a WORKING bare launcher on POSIX (a hand-registered `uvx headroom-ai mcp serve`)
 # is kept, even though headroom itself is off PATH
 W28I="$W28/i"; mkdir -p "$W28I/bin"
-printf '#!/bin/sh\nexit 0\n' > "$W28I/bin/uvx"; chmod +x "$W28I/bin/uvx"
+# the stub starts only for the right package, like the real launcher
+printf '#!/bin/sh\n[ "$1" = headroom-ai ]\n' > "$W28I/bin/uvx"; chmod +x "$W28I/bin/uvx"
 jq -n '{mcpServers:{headroom:{type:"stdio",command:"uvx",args:["headroom-ai","mcp","serve"]}}}' > "$W28I/uvx.json"
 cp "$W28I/uvx.json" "$W28I/uvx.orig"
 out=$(cd "$W28G" && w28g_run "$W28I/uvx.json" unix "$W21/stub:$W28I/bin:/usr/bin:/bin" --fix)
 check "w28i: a working bare POSIX launcher is kept" "MCP registered as a user-scoped server (uvx, found on PATH)" "$out"
 if cmp -s "$W28I/uvx.json" "$W28I/uvx.orig"; then echo "ok - w28i: ...and --fix leaves it untouched"; PASS=$((PASS+1))
 else echo "FAIL - w28i: --fix rewrote a working bare launcher"; FAIL=$((FAIL+1)); fi
+# ...but a bare launcher is judged on its WHOLE registered command: one whose
+# target does not start (uvx <wrong package>) is replaced, not kept
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"uvx",args:["no-such-pkg","mcp","serve"]}}}' > "$W28I/uvxbad.json"
+out=$(cd "$W28G" && w28g_run "$W28I/uvxbad.json" unix "$W21/stub:$W28I/bin:/usr/bin:/bin")
+check "w28i: a bare launcher whose target does not start is reported dead" "points at uvx, which does not start" "$out"
+check_absent "w28i: ...never kept on the launcher alone" "found on PATH" "$out"
 # a flat legacy hcat (no scripts/lib) still bounds the compression run
 if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
   mkdir -p "$W28I/flat"; cp "$ROOT/bin/hcat" "$W28I/flat/hcat"
@@ -5577,14 +5608,24 @@ else
   skip_note "w28i: flat-hcat bound needs a timeout binary (none on this host)"
 fi
 # a malformed HCAT_EXEC_TIMEOUT falls back to 120s and the message says so
-w28i_norm=$(sed -n '/^_hcat_t=/{N;p;}' "$ROOT/bin/hcat")
-got=$(for v in abc 0 '' 7; do HCAT_EXEC_TIMEOUT=$v bash -c "$w28i_norm"'
+w28i_norm=$(sed -n '/^_hcat_t=/,/_hcat_t=\$((10#/p' "$ROOT/bin/hcat")
+case $w28i_norm in *'10#'*) ;; *) echo "FAIL - w28i: could not extract hcat's timeout normalisation"; FAIL=$((FAIL+1)) ;; esac
+got=$(for v in abc 0 00 '' 7 08; do HCAT_EXEC_TIMEOUT=$v bash -c "$w28i_norm"'
 printf "%s " "$_hcat_t"'; done)
-check_eq "w28i: HCAT_EXEC_TIMEOUT abc/0/empty fall back to 120, a number is kept" "120 120 120 7 " "$got"
+check_eq "w28i: HCAT_EXEC_TIMEOUT abc/0/00/empty fall back to 120; 7 and 08 are decimal" "120 120 120 120 7 8 " "$got"
+# the SHARED bound too: 0 must not mean "no limit" for the engine probes
+t0=$(date +%s)
+got=$(bash -c ". '$ER'; _er_bounded 0 sleep 30; echo \$?")
+t1=$(date +%s)
+check_eq "w28i: _er_bounded 0 still bounds (falls back to its 5s default)" "124" "$got"
+[ $((t1 - t0)) -lt 15 ]; pass_fail "w28i: ...in about 5s ($((t1 - t0))s)" $?
+got=$(bash -c ". '$ER'; _er_bounded 08 true; echo \$?")
+check_eq "w28i: _er_bounded 08 is decimal, not an octal error" "0" "$got"
 # a stale TMPDIR (missing directory) falls back to /tmp instead of failing
 printf '[{"a":1},{"a":2},{"a":3}]\n' > "$W28I/in.json"
 out=$(TMPDIR="$W28I/no/such/dir" HCAT_PYTHON="$W28H/python" HCAT_EXEC_TIMEOUT=1 "$ROOT/bin/hcat" "$W28I/in.json" 2>&1)
-check_absent "w28i: a missing TMPDIR does not stop hcat" "cannot create a temp dir" "$out"
+check "w28i: a missing TMPDIR falls back and the run still happens" "compression did not finish within 1s" "$out"
+check_absent "w28i: ...with no temp-dir error" "cannot create a temp dir" "$out"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

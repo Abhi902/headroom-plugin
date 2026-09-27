@@ -15,12 +15,12 @@ jobs:
       # The floor has to sit close enough that losing a whole engine-gated group
       # trips it on EACH runner -- the largest such group is 15 assertions -- so
       # it is set PER OS (one shared value is only tight on the lower runner).
-      # Review round 19: 1003 on macOS, ~999 on ubuntu (the round-18 run measured
-      # 995 / 991, +8 since), so the floors sit above 1003 - 15 = 988 and
-      # 999 - 15 = 984. RAISE
+      # Review round 20: the round-19 run measured 1001 on macOS / 999 on ubuntu;
+      # +8 since gives ~1009 / ~1007, so the floors sit above 1009 - 15 = 994
+      # and 1007 - 15 = 992. RAISE
       # these whenever fixtures are added -- at 810 the floor had drifted ~65 below
       # the real count and would have let four such groups vanish green.
-      MIN_FIXTURES: ${{ matrix.os == 'macos-latest' && 989 || 985 }}
+      MIN_FIXTURES: ${{ matrix.os == 'macos-latest' && 995 || 993 }}
     steps:
       - uses: actions/checkout@v7
       - name: deps
@@ -79,11 +79,11 @@ jobs:
           # block, and the grep counts zero and passes. The floor notices the
           # collapse regardless of how the skip is spelled.
           ran=$( { grep -oE '^[0-9]+ passed, [0-9]+ failed' suite.log || true; } | tail -1 | awk '{print $1+$3}' )
-          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-985}" ]; then
-            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-985}) — coverage collapsed"
+          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-993}" ]; then
+            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-993}) — coverage collapsed"
             exit 1
           fi
-          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-985})"
+          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-993})"
           grep -E '^[0-9]+ passed' suite.log | tail -1
   windows:
     runs-on: windows-latest
@@ -94,9 +94,10 @@ jobs:
       # (721 passed + 53 failed); it was 726 while the probe was POSIX-only, so a
       # regression of that fix lands at ~726 and must be caught. 760 sits above
       # that and leaves room for ordinary churn. RAISE as coverage grows.
-      # 977 executed on the round-18 run; round 19 adds 8 that run on Windows
-      # (~985), so 971 trips on a lost 15-assertion group.
-      MIN_FIXTURES: "971"
+      # 985 executed on the round-19 run; round 20 adds ~7 that run on Windows
+      # (~992, fewer if the planted-module pair skips), so 976 trips on a lost
+      # 15-assertion group.
+      MIN_FIXTURES: "976"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking

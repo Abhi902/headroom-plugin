@@ -45,6 +45,7 @@ type note_error >/dev/null 2>&1 || note_error() { :; }
 type _er_bounded >/dev/null 2>&1 || _er_bounded() {
   local s=$1 t r; shift
   case $s in ''|*[!0-9]*) s=120 ;; esac
+  s=$((10#$s)); [ "$s" -gt 0 ] || s=120
   t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
   [ -n "$t" ] || { "$@" </dev/null; return $?; }
   "$t" -k 2 "$s" "$@" </dev/null; r=$?
@@ -370,7 +371,8 @@ _hcat_env="PYTHONIOENCODING=utf-8 PYTHONUTF8=1 PYTHONSAFEPATH=1 HF_HUB_OFFLINE=1
 # one normalised bound, used for the run AND the message (a bad value would
 # otherwise be silently replaced inside _er_bounded and misreported here)
 _hcat_t=${HCAT_EXEC_TIMEOUT:-120}
-case $_hcat_t in ''|*[!0-9]*|0) _hcat_t=120 ;; esac
+case $_hcat_t in ''|*[!0-9]*) _hcat_t=120 ;; esac
+_hcat_t=$((10#$_hcat_t)); [ "$_hcat_t" -gt 0 ] || _hcat_t=120   # 0 / 00 / 08
 # shellcheck disable=SC2086  # the env assignments are split on purpose
 _er_bounded "$_hcat_t" env $_hcat_env "$PY" "$_hcat_py" "$FILE"; rc=$?
 if [ "$rc" -eq 124 ]; then

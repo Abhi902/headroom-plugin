@@ -133,6 +133,11 @@ mcp_user_cmd() {  # the command of the USER-scoped `headroom` MCP, empty if none
   [ -f "$cj" ] || return 0
   jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null
 }
+mcp_user_args() {  # its args, one per line (NUL-free JSON strings), empty if none
+  local cj; cj=$(claude_json_path)
+  [ -f "$cj" ] || return 0
+  jq -r '(.mcpServers.headroom.args // [])[] | tostring' "$cj" 2>/dev/null
+}
 mcp_project_root() {  # the key the CLI files local-scoped servers under: the repository root, else $PWD
   local d r; d=$(_dm_canon "$PWD") || d=$PWD
   r=$(workspace_root "$d"); printf '%s\n' "${r:-$d}"

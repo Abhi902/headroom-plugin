@@ -73,7 +73,11 @@ _er_bounded() {  # _er_bounded <secs> <cmd...> — coreutils timeout, else a wat
   # secs arrives from the environment (ER_PY_TIMEOUT / ER_UV_TIMEOUT), and bash
   # evaluates a variable's CONTENTS inside $(( )) -- `a[$(cmd)]` runs cmd. Only
   # a plain integer may reach the arithmetic below or the timeout binary.
+  # ...and a plain POSITIVE decimal: `timeout 0` means "no limit", and a leading
+  # zero (08) is octal to $(( )) -- an error, or a different number. The digit
+  # check above makes the 10# conversion safe to evaluate.
   case $secs in ''|*[!0-9]*) secs=5 ;; esac
+  secs=$((10#$secs)); [ "$secs" -gt 0 ] || secs=5
   # -k: a child that ignores SIGTERM is SIGKILLed 2s later, the guarantee the
   # watchdog below already gives. GNU coreutils (Linux, Git for Windows, brew
   # gtimeout) all accept it.
