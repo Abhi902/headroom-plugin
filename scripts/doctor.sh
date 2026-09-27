@@ -483,6 +483,8 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
   local -a _sp_e=(); local _sp_t=${DOCTOR_SHIM_RUNS_TIMEOUT:-5} _sp_f _sp_env _sp_sh _sp_bash
   while [ $# -gt 0 ] && [ "$1" != -- ]; do _sp_e+=("$1"); shift; done
   shift
+  # a command starting with `-` would be read by env as an option, never run
+  case $1 in -*) return 1 ;; esac
   (
     export HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1
     # Git Bash rewrites POSIX-looking ARGS (/c -> C:/) when it starts a native
@@ -504,17 +506,24 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
     printf '%s\0' "${_sp_e[@]}" > "$_sp_f" || exit 1
     # The loader keeps everything it needs in its POSITIONAL parameters, which an
     # exported entry key cannot overwrite: "$@" = env, [non-identifier pairs],
-    # [trampoline], cmd, args, --help. Its one variable, __hr_probe_kv, is
-    # re-read every iteration; a key of that name travels as an `env` arg so its
-    # value survives. A key starting with `-` would be read by env as an
+    # [trampoline], cmd, args, --help. Its variables (__hr_probe_kv/_k) are
+    # re-set every iteration; a key of either name travels as an `env` arg so
+    # its value survives. A key starting with `-` would be read by env as an
     # option, so it is dropped.
     # shellcheck disable=SC2016  # the script is for the loader bash
     run_bounded "$_sp_t" "$_sp_bash" -c '
       while IFS= read -r -d "" __hr_probe_kv; do
-        case ${__hr_probe_kv%%=*} in
-          ""|-*) ;;
-          __hr_probe_kv|[0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
-          *) export "$__hr_probe_kv" 2>/dev/null || set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
+        __hr_probe_k=${__hr_probe_kv%%=*}
+        case $__hr_probe_k in
+          # dropped: a `-` key would be read by env as an option, and bash`s
+          # readonly SHELLOPTS/BASHOPTS would steer the sh hop (noexec)
+          ""|-*|SHELLOPTS|BASHOPTS) ;;
+          __hr_probe_kv|__hr_probe_k|[0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
+          # exported -- unless bash refuses it (readonly) or rewrites it on the
+          # way (RANDOM, SECONDS, LINENO, ...): then env passes it verbatim
+          *) if ! export "$__hr_probe_kv" 2>/dev/null || [ "${!__hr_probe_k}" != "${__hr_probe_kv#*=}" ]; then
+               set -- "$1" "$__hr_probe_kv" "${@:2}"
+             fi ;;
         esac
       done < "$0"
       exec "$@"' "$_sp_f" "${_sp_run[@]}" "$@" --help >/dev/null 2>&1

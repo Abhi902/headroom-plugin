@@ -4909,6 +4909,18 @@ g=$(gate_input "$W25G/flat.json" "w25g-slow" | env -u HCAT_PYTHON DOCTOR_VENV_DI
 t1=$(date +%s)
 [ $((t1 - t0)) -lt 15 ]; pass_fail "w25: a hanging eligibility parse is bounded ($((t1 - t0))s)" $?
 check_absent "w25: ...and the Read is let through, not denied" '"deny"' "$g"
+# ...and in a flat legacy copy WITHOUT the lib: bounded by a timeout binary where
+# /usr/bin has one (Linux), failing open at once where it has none (stock macOS)
+# (a sibling hcat to redirect to, and an empty HOME so its narrow built-in
+#  resolver cannot find a real ~/.headroom-venv and skip the no-engine branch)
+mkdir -p "$W25G/legacy" "$W25G/lhome"; cp "$ROOT/scripts/hcat-gate.sh" "$W25G/legacy/"
+printf '#!/bin/sh\nexit 0\n' > "$W25G/legacy/hcat"; chmod +x "$W25G/legacy/hcat"
+t0=$(date +%s)
+g=$(gate_input "$W25G/flat.json" "w25g-legslow" | env -u HCAT_PYTHON DOCTOR_VENV_DIR=/nonexistent HOME="$W25G/lhome" \
+    PATH="$W25G/slowjq:$W25G/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W25G/state" bash "$W25G/legacy/hcat-gate.sh")
+t1=$(date +%s)
+[ $((t1 - t0)) -lt 15 ]; pass_fail "w25: a legacy (no-lib) gate is bounded too ($((t1 - t0))s)" $?
+check_absent "w25: ...and lets the Read through" '"deny"' "$g"
 
 # --- w26. REGRESSION (PR #10 review round 7). One fixture per finding.
 W26="$W/w26"; mkdir -p "$W26"
@@ -5757,11 +5769,10 @@ got=$(HEADROOM_CLAUDE_JSON="$W28J/absenv.json" bash -c ". '$ER'; . '$ROOT/script
 check_eq "w28k: ordinary args/env pass the NUL gate" "pass" "$got"
 # a Windows-style mixed-case `Path` key is routed like PATH: onto the probe's
 # env argv (Windows treats it as PATH), never exported into the doctor's shell
-# the dumper is python, not sh: dash (Linux /bin/sh) silently drops environment
-# entries whose name is not an identifier, which would hide what the doctor passed
-w28k_py=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)
-printf '#!%s\nimport os\nopen(%s, "w").write("".join("%%s=%%s\\n" %% kv for kv in os.environ.items()))\n' \
-  "$w28k_py" "'$W28K/probe-env'" > "$W28K/envdump"; chmod +x "$W28K/envdump"
+# the dumper is bash, not sh or python: dash (Linux /bin/sh) silently drops
+# environment entries whose name is not an identifier, and CPython on Windows
+# uppercases every key -- either would hide what the doctor actually passed
+printf '#!%s\n/usr/bin/env > "%s"\nexit 0\n' "$BASHBIN" "$W28K/probe-env" > "$W28K/envdump"; chmod +x "$W28K/envdump"
 jq -n --rawfile c "$(jraw "$W28K/envdump")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{Path:"/w28k-mixed-case-path"}}}}' > "$W28K/path2.json"
 : > "$W28K/targv"; : > "$W28K/probe-env"
 (cd "$W28G" && w28g_run "$W28K/path2.json" unix "$W28K/tbin:$W21/stub:/usr/bin:/bin" >/dev/null)
@@ -5798,11 +5809,11 @@ out=$(cd "$W28G" && w28g_run "$W28K/eqpath.json" unix "$W21/stub:/usr/bin:/bin")
 check "w28k: a command path containing = is probed as a command" "MCP registered by absolute path ($W28K/a=b/launch)" "$out"
 # the loader's own loop-variable name, several non-identifier keys, and helper
 # names all reach the probed command with their values intact
-jq -n --rawfile c "$(jraw "$W28K/envdump")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{kv:"w28k-kv",__hr_probe_kv:"w28k-own","a-b":"w28k-ab","c.d":"w28k-cd",ni:"w28k-ni"}}}}' > "$W28K/manykeys.json"
+jq -n --rawfile c "$(jraw "$W28K/envdump")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{kv:"w28k-kv",__hr_probe_kv:"w28k-own",__hr_probe_k:"w28k-k","a-b":"w28k-ab","c.d":"w28k-cd",ni:"w28k-ni"}}}}' > "$W28K/manykeys.json"
 : > "$W28K/probe-env"
 (cd "$W28G" && w28g_run "$W28K/manykeys.json" unix "$W21/stub:/usr/bin:/bin" >/dev/null)
 w28k_env=$(cat "$W28K/probe-env")
-for kvp in kv=w28k-kv __hr_probe_kv=w28k-own a-b=w28k-ab c.d=w28k-cd ni=w28k-ni; do
+for kvp in kv=w28k-kv __hr_probe_kv=w28k-own __hr_probe_k=w28k-k a-b=w28k-ab c.d=w28k-cd ni=w28k-ni; do
   check "w28k: entry key ${kvp%%=*} reaches the probed command intact" "$kvp" "$w28k_env"
 done
 # EXECIGNORE alone (bash >= 4.4 honours it) must not unbound the probe either
@@ -5820,6 +5831,15 @@ fi
 jq -n '{mcpServers:{headroom:{type:"stdio",command:"/nonexistent/w28k-dead",args:[],env:{SHELLOPTS:"noexec"}}}}' > "$W28K/noexec.json"
 out=$(cd "$W28G" && w28g_run "$W28K/noexec.json" unix "$W21/stub:/usr/bin:/bin")
 check "w28k: SHELLOPTS=noexec cannot make a dead entry look started" "points at /nonexistent/w28k-dead, which does not start" "$out"
+# ...nor through the sh hop a `=` path takes
+mkdir -p "$W28K/c=d"
+jq -n --rawfile c "$(jraw "$W28K/c=d/missing")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{SHELLOPTS:"noexec"}}}}' > "$W28K/noexec2.json"
+out=$(cd "$W28G" && w28g_run "$W28K/noexec2.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28k: SHELLOPTS=noexec cannot fake a start through the = trampoline" "which does not start" "$out"
+# a command starting with `-` is never handed to env (it would be read as an option)
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"-S",args:["echo","x"]}}}' > "$W28K/dash.json"
+out=$(cd "$W28G" && w28g_run "$W28K/dash.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28k: a command starting with - is judged as not starting" "points at -S, which does not start" "$out"
 # the probe's private env file is removed as soon as the probe returns
 w28k_probe_fns=$(sed -n '/^run_bounded() {/,/^}/p;/^_start_probe() {/,/^}/p' "$DOCTOR")
 mkdir -p "$W28K/ptmp"
