@@ -477,7 +477,7 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
   # are exported, so their values never reach argv (where `ps` shows them to
   # other users). The exceptions travel as visible `env` args: a key that is
   # not a shell identifier, one bash refuses (readonly) or rewrites (RANDOM,
-  # SECONDS, ...), and the loader-steering POSIXLY_CORRECT / TMOUT / SHLVL. Keys
+  # SECONDS, ...), and the loader-steering POSIXLY_CORRECT / SHLVL. Keys
   # starting with `-` and SHELLOPTS/BASHOPTS are dropped; a command starting
   # with `-` is refused unexecuted.
   # A command path containing `=` is started through `sh -c 'exec "$0" "$@"'`,
@@ -520,11 +520,12 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
           # dropped: a `-` key would be read by env as an option, and bash`s
           # readonly SHELLOPTS/BASHOPTS would steer the sh hop (noexec)
           ""|-*|SHELLOPTS|BASHOPTS) ;;
-          # env sets these verbatim: POSIXLY_CORRECT exported here would put the
-          # loader in posix mode (a later readonly key then kills it), TMOUT
-          # would time out the loader`s own read, and bash decrements an exported
-          # SHLVL on exec
-          __hr_probe_kv|__hr_probe_k|POSIXLY_CORRECT|TMOUT|SHLVL|[0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
+          # env sets these verbatim: the loader`s own __hr_probe_kv/_k (the next
+          # read would overwrite an export), non-identifier keys (export refuses
+          # them), POSIXLY_CORRECT (it would put the loader in posix mode, where a
+          # later readonly key kills it), and SHLVL (bash decrements an exported
+          # one on exec). (TMOUT needs nothing: read ignores it on a regular file.)
+          __hr_probe_kv|__hr_probe_k|POSIXLY_CORRECT|SHLVL|[0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
           # exported -- unless bash refuses it (readonly) or rewrites it on the
           # way (RANDOM, SECONDS, LINENO, ...): then env passes it verbatim
           *) if ! export "$__hr_probe_kv" 2>/dev/null || [ "${!__hr_probe_k}" != "${__hr_probe_kv#*=}" ]; then

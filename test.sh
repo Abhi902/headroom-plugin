@@ -150,11 +150,13 @@ mkuniform() {  # mkuniform <path> [rows] — a uniform JSON array (gate-eligible
   jq -n --argjson n "${2:-900}" '[range(0; $n) | {id:., v:"xxxxxxxxxxxxxxxx"}]' > "$1"
 }
 
-NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+# a fresh timestamp per event: the badge shows its live dot only for events under
+# 60s old, and a slow runner (Windows) can reach a section minutes after start
+now_ts() { date -u +%Y-%m-%dT%H:%M:%S.000Z; }
 
 compress_event() {  # compress_event <tool-use-id> <tokens-saved> — one compress + linked result
   printf '%s\n%s\n' \
-    "{\"timestamp\":\"$NOW\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"$1\",\"name\":\"mcp__headroom__headroom_compress\"}]}}" \
+    "{\"timestamp\":\"$(now_ts)\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"$1\",\"name\":\"mcp__headroom__headroom_compress\"}]}}" \
     "{\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"$1\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"tokens_saved\\\": $2}\"}]}]}}"
 }
 
@@ -587,7 +589,7 @@ hcat_event() {  # hcat_event <tool-use-id> <before-tok> <after-tok> [pad-bytes]
   local pad=""
   [ -n "${4:-}" ] && pad=$(head -c "$4" /dev/zero | tr '\0' 'y')
   printf '%s\n%s\n' \
-    "{\"timestamp\":\"$NOW\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"$1\",\"name\":\"Bash\",\"input\":{\"command\":\"hcat \\\"/tmp/x.json\\\"\"}}]}}" \
+    "{\"timestamp\":\"$(now_ts)\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"$1\",\"name\":\"Bash\",\"input\":{\"command\":\"hcat \\\"/tmp/x.json\\\"\"}}]}}" \
     "{\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"$1\",\"content\":[{\"type\":\"text\",\"text\":\"── hcat: /tmp/x.json · 10 lines · 5.0 KB · ~$2 tok → ~$3 tok (60.0% saved) · original on disk\\n$pad\"}]}]}}"
 }
 
@@ -612,7 +614,7 @@ check "hcat badge: mixed count" "2×"   "$out"
 
 # a persisted big output buries the receipt mid-text after a preview banner
 printf '%s\n%s\n' \
-  "{\"timestamp\":\"$NOW\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"h5\",\"name\":\"Bash\",\"input\":{\"command\":\"hcat \\\"/tmp/z.json\\\"\"}}]}}" \
+  "{\"timestamp\":\"$(now_ts)\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"h5\",\"name\":\"Bash\",\"input\":{\"command\":\"hcat \\\"/tmp/z.json\\\"\"}}]}}" \
   '{"message":{"content":[{"type":"tool_result","tool_use_id":"h5","content":[{"type":"text","text":"Output too large (32.1KB). Full output saved.\nPreview (first 2KB):\n── hcat: /tmp/z.json · 9 lines · 8.0 KB · ~2000 tok → ~800 tok (60.0% saved) · original on disk\n..."}]}]}}' \
   > "$TMP/t_persist.jsonl"
 out=$(badge "$TMP/t_persist.jsonl" claude-opus-4-8 sess-hpers)
@@ -620,7 +622,7 @@ check "hcat badge: persisted preview receipt counted" "1.2k" "$out"
 
 # passthrough receipts (no "→") are not compressions
 printf '%s\n%s\n' \
-  "{\"timestamp\":\"$NOW\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"h4\",\"name\":\"Bash\",\"input\":{\"command\":\"hcat \\\"/tmp/y.txt\\\"\"}}]}}" \
+  "{\"timestamp\":\"$(now_ts)\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"h4\",\"name\":\"Bash\",\"input\":{\"command\":\"hcat \\\"/tmp/y.txt\\\"\"}}]}}" \
   '{"message":{"content":[{"type":"tool_result","tool_use_id":"h4","content":[{"type":"text","text":"── hcat: /tmp/y.txt · 3 lines · 0.1 KB · passthrough (compression would save 0.0%)\nshort prose line"}]}]}}' \
   > "$TMP/t_pass.jsonl"
 out=$(badge "$TMP/t_pass.jsonl" claude-opus-4-8 sess-hp)
@@ -1032,7 +1034,7 @@ quote_event() {  # quote_event <id> <bash-command> [pad-bytes] — result quotes
   local pad=""
   [ -n "${3:-}" ] && pad=$(head -c "$3" /dev/zero | tr '\0' 'y')
   printf '%s\n%s\n' \
-    "{\"timestamp\":\"$NOW\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"$1\",\"name\":\"Bash\",\"input\":{\"command\":\"$2\"}}]}}" \
+    "{\"timestamp\":\"$(now_ts)\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"$1\",\"name\":\"Bash\",\"input\":{\"command\":\"$2\"}}]}}" \
     "{\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"$1\",\"content\":[{\"type\":\"text\",\"text\":\"── hcat: /x.json · ~9999999 tok → ~1 tok (100.0% saved)\\n$pad\"}]}]}}"
 }
 quote_event q1 "grep -rn hcat-header notes" > "$TMP/t_rquote.jsonl"
@@ -1054,7 +1056,7 @@ check "review: big quoted receipt counts as missed" "1 big blob uncompressed" "$
 
 # non-Bash receipts never count (Read of a file that starts with a receipt line)
 printf '%s\n%s\n' \
-  "{\"timestamp\":\"$NOW\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"q3\",\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/notes.txt\"}}]}}" \
+  "{\"timestamp\":\"$(now_ts)\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"q3\",\"name\":\"Read\",\"input\":{\"file_path\":\"/tmp/notes.txt\"}}]}}" \
   '{"message":{"content":[{"type":"tool_result","tool_use_id":"q3","content":[{"type":"text","text":"── hcat: /x.json · ~9999999 tok → ~1 tok (100.0% saved)"}]}]}}' \
   > "$TMP/t_rquote_read.jsonl"
 out=$(badge "$TMP/t_rquote_read.jsonl" claude-opus-4-8 sess-rq3)
@@ -1063,7 +1065,7 @@ check "review: non-Bash receipt not counted" "not compressing yet" "$out"
 # genuine invocations still count in every real spelling
 genuine_event() {  # genuine_event <id> <bash-command> — real receipt, 1000→400
   printf '%s\n%s\n' \
-    "{\"timestamp\":\"$NOW\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"$1\",\"name\":\"Bash\",\"input\":{\"command\":\"$2\"}}]}}" \
+    "{\"timestamp\":\"$(now_ts)\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"$1\",\"name\":\"Bash\",\"input\":{\"command\":\"$2\"}}]}}" \
     "{\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"$1\",\"content\":[{\"type\":\"text\",\"text\":\"── hcat: /tmp/x.json · 10 lines · 5.0 KB · ~1000 tok → ~400 tok (60.0% saved) · original on disk\"}]}]}}"
 }
 genuine_event ga "/Users/abhi/.claude/hcat \\\"/tmp/x.json\\\"" > "$TMP/t_rlegacy.jsonl"
@@ -1088,7 +1090,7 @@ rewritten_event() {  # rewritten_event <tool-use-id> <recorded-command> <rewritt
   # assertion below would pass even unpatched and prove nothing.
   local pad=""
   [ -n "${4:-}" ] && pad=$(head -c "$4" /dev/zero | tr '\0' 'y')
-  jq -cn --arg id "$1" --arg orig "$2" --arg now "$NOW" \
+  jq -cn --arg id "$1" --arg orig "$2" --arg now "$(now_ts)" \
     '{timestamp:$now,message:{content:[{type:"tool_use",id:$id,name:"Bash",input:{command:$orig}}]}}'
   jq -cn --arg id "$1" --arg new "$3" \
     '{type:"attachment",attachment:{type:"hook_success",hookName:"PreToolUse:Bash",
@@ -1115,7 +1117,7 @@ check_absent "rewrite: not scored as an uncompressed blob" "uncompressed" "$out"
 # `updatedInput.command` (jq test() throws on non-strings, killing the whole
 # program) slipped past the first version of these tests.
 poison_event() {  # poison_event <id> <attachment-json-line>
-  jq -cn --arg id "$1" --arg now "$NOW" \
+  jq -cn --arg id "$1" --arg now "$(now_ts)" \
     '{timestamp:$now,message:{content:[{type:"tool_use",id:$id,name:"Bash",input:{command:"cat /tmp/x.json"}}]}}'
   printf '%s\n' "$2"
   jq -cn --arg id "$1" \
@@ -1172,7 +1174,7 @@ neg_case "non-string command (array)"  sess-gw8 gw8 "$(gate_att gw8 hook_success
 pass_event() {  # pass_event <id> <command> [pad-bytes] — passthrough receipt, no arrow
   local pad=""
   [ -n "${3:-}" ] && pad=$(head -c "$3" /dev/zero | tr '\0' 'y')
-  jq -cn --arg id "$1" --arg cmd "$2" --arg now "$NOW" \
+  jq -cn --arg id "$1" --arg cmd "$2" --arg now "$(now_ts)" \
     '{timestamp:$now,message:{content:[{type:"tool_use",id:$id,name:"Bash",input:{command:$cmd}}]}}'
   jq -cn --arg id "$1" --arg pad "$pad" \
     '{message:{content:[{type:"tool_result",tool_use_id:$id,content:[{type:"text",
@@ -1184,7 +1186,7 @@ out=$(badge "$TMP/t_pass_big.jsonl" claude-opus-4-8 sess-pt1)
 check        "passthrough: a large passthrough is counted as a miss" "uncompressed" "$out"
 check_absent "passthrough: it banks no savings"                      "●"            "$out"
 # gate-rewritten cat whose hcat passed through: same rule, same answer
-{ jq -cn --arg now "$NOW" '{timestamp:$now,message:{content:[{type:"tool_use",id:"pt2",name:"Bash",input:{command:"cat /tmp/y.txt"}}]}}'
+{ jq -cn --arg now "$(now_ts)" '{timestamp:$now,message:{content:[{type:"tool_use",id:"pt2",name:"Bash",input:{command:"cat /tmp/y.txt"}}]}}'
   gate_att pt2 hook_success PreToolUse '"hcat \"/tmp/y.txt\""'
   jq -cn --arg pad "$(head -c 6000 /dev/zero | tr '\0' 'y')" \
     '{message:{content:[{type:"tool_result",tool_use_id:"pt2",content:[{type:"text",
@@ -1202,7 +1204,7 @@ check        "passthrough: and still banks its savings"                  "6.0k" 
 # stdout that is not JSON at all must hit `try fromjson catch null` and be
 # skipped cleanly, never abort the pass (the genuine event proves it rendered).
 { hcat_event keep2 1000 400
-  jq -cn --arg now "$NOW" '{timestamp:$now,message:{content:[{type:"tool_use",id:"mf1",name:"Bash",input:{command:"cat /tmp/x.json"}}]}}'
+  jq -cn --arg now "$(now_ts)" '{timestamp:$now,message:{content:[{type:"tool_use",id:"mf1",name:"Bash",input:{command:"cat /tmp/x.json"}}]}}'
   jq -cn '{type:"attachment",attachment:{type:"hook_success",hookName:"PreToolUse:Bash",hookEvent:"PreToolUse",toolUseID:"mf1",stderr:"",exitCode:0,stdout:"this is not json {{{"}}'
   jq -cn '{message:{content:[{type:"tool_result",tool_use_id:"mf1",content:[{type:"text",text:"── hcat: /tmp/x.json · 10 lines · 5.0 KB · ~1000 tok → ~400 tok (60.0% saved) · original on disk"}]}]}}'
 } > "$TMP/t_malformed.jsonl"
@@ -1222,7 +1224,7 @@ check_absent "rewrite: id in both halves is not doubled"   "2×"  "$out"
 check        "rewrite: id in both halves banks 600 once"   "600" "$out"
 
 # a legacy absolute-path rewrite (`/abs/hcat "file"`) must still be recognised
-{ jq -cn --arg now "$NOW" '{timestamp:$now,message:{content:[{type:"tool_use",id:"lg1",name:"Bash",input:{command:"cat /tmp/x.json"}}]}}'
+{ jq -cn --arg now "$(now_ts)" '{timestamp:$now,message:{content:[{type:"tool_use",id:"lg1",name:"Bash",input:{command:"cat /tmp/x.json"}}]}}'
   gate_att lg1 hook_success PreToolUse '"/Users/someone/.claude/hcat \"/tmp/x.json\""'
   jq -cn '{message:{content:[{type:"tool_result",tool_use_id:"lg1",content:[{type:"text",text:"── hcat: /tmp/x.json · 10 lines · 5.0 KB · ~1000 tok → ~400 tok (60.0% saved) · original on disk"}]}]}}'
 } > "$TMP/t_legacy_rw.jsonl"
@@ -2409,7 +2411,7 @@ trL="$TMP/t_ledger.jsonl"
 # (fillerA), leaving events.json as the surviving, named biggest miss.
 {
   compress_event lg1 500
-  printf '{"timestamp":"%s","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]}}\n' "$NOW"
+  printf '{"timestamp":"%s","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]}}\n' "$(now_ts)"
   jq -n '{message:{content:[{type:"tool_use",id:"lgf1",name:"Read",input:{file_path:"/var/data/fillerA.log"}}]}}'
   jq -n '{message:{content:[{type:"tool_result",tool_use_id:"lgf1",content:[{type:"text",text:("z"*5000)}]}]}}'
   jq -n '{message:{content:[{type:"tool_use",id:"lgm1",name:"Read",input:{file_path:"/var/data/events.json"}}]}}'
@@ -2571,7 +2573,7 @@ check_eq "fix/rewrite: multiline command untouched" "" "$out"
 
 # the badge still counts the OLD quoted rewrite form living in past transcripts
 printf '%s\n%s\n' \
-  "{\"timestamp\":\"$NOW\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"vq1\",\"name\":\"Bash\",\"input\":{\"command\":\"\\\"hcat\\\" \\\"/tmp/x.json\\\"\"}}]}}" \
+  "{\"timestamp\":\"$(now_ts)\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"vq1\",\"name\":\"Bash\",\"input\":{\"command\":\"\\\"hcat\\\" \\\"/tmp/x.json\\\"\"}}]}}" \
   "{\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"vq1\",\"content\":[{\"type\":\"text\",\"text\":\"── hcat: /tmp/x.json · 10 lines · 5.0 KB · ~900 tok → ~300 tok (66.7% saved) · original on disk\"}]}]}}" \
   > "$TMP/t_v271_legacy.jsonl"
 out=$(badge "$TMP/t_v271_legacy.jsonl" claude-opus-4-8 sess-v271a)
@@ -2579,7 +2581,7 @@ check "fix/attrib: legacy quoted rewrite counts" "600" "$out"
 
 # ...while a mid-command quoted "hcat" (grep over docs) still counts as nothing
 printf '%s\n%s\n' \
-  "{\"timestamp\":\"$NOW\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"vq2\",\"name\":\"Bash\",\"input\":{\"command\":\"grep \\\"hcat\\\" README.md\"}}]}}" \
+  "{\"timestamp\":\"$(now_ts)\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"vq2\",\"name\":\"Bash\",\"input\":{\"command\":\"grep \\\"hcat\\\" README.md\"}}]}}" \
   "{\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"vq2\",\"content\":[{\"type\":\"text\",\"text\":\"── hcat: /tmp/x.json · 10 lines · 5.0 KB · ~900 tok → ~300 tok (66.7% saved) · original on disk\"}]}]}}" \
   > "$TMP/t_v271_grep.jsonl"
 out=$(badge "$TMP/t_v271_grep.jsonl" claude-opus-4-8 sess-v271b)
@@ -5819,20 +5821,19 @@ for kvp in kv=w28k-kv __hr_probe_kv=w28k-own __hr_probe_k=__hr_probe_k a-b=w28k-
   check "w28k: entry key ${kvp%%=*} reaches the probed command intact" "$kvp" "$w28k_env"
 done
 # keys bash refuses or rewrites (EUID, RANDOM, SECONDS), and the loader-steering
-# POSIXLY_CORRECT / TMOUT / SHLVL, still arrive verbatim -- POSIXLY_CORRECT and
-# TMOUT go first, so a posix-mode loader would die on the readonly EUID after them
-# and a timed-out read would drop the keys after them. The dumper is perl,
+# POSIXLY_CORRECT / SHLVL, still arrive verbatim -- POSIXLY_CORRECT goes first so
+# a posix-mode loader would die on the readonly EUID after it. The dumper is perl,
 # not a shell (bash would reset RANDOM/SECONDS/SHLVL itself and hide the result)
 # and not awk (gawk reads the probe's trailing --help as its own option and
 # never runs the script); perl hands everything after the script to @ARGV
 printf '#!%s\nopen(my $f, ">", "%s") or exit 1; print $f "$_=$ENV{$_}\\n" for keys %%ENV;\n' "$(command -v perl)" "$W28K/probe-env" > "$W28K/envdump2"; chmod +x "$W28K/envdump2"
-jq -n --rawfile c "$(jraw "$W28K/envdump2")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{POSIXLY_CORRECT:"w28k-pc",TMOUT:"0.000001",EUID:"w28k-euid",RANDOM:"w28k-rnd",SECONDS:"w28k-sec",SHLVL:"w28k-lvl"}}}}' > "$W28K/special.json"
+jq -n --rawfile c "$(jraw "$W28K/envdump2")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{POSIXLY_CORRECT:"w28k-pc",EUID:"w28k-euid",RANDOM:"w28k-rnd",SECONDS:"w28k-sec",SHLVL:"w28k-lvl"}}}}' > "$W28K/special.json"
 : > "$W28K/probe-env"
 out=$(cd "$W28G" && w28g_run "$W28K/special.json" unix "$W21/stub:/usr/bin:/bin")
 check "w28k: an entry with special keys is judged as starting" "MCP registered by absolute path ($W28K/envdump2)" "$out"
 [ -s "$W28K/probe-env" ]; pass_fail "w28k: ...and its dumper actually ran" $?
 w28k_env=$(cat "$W28K/probe-env")
-for kvp in POSIXLY_CORRECT=w28k-pc TMOUT=0.000001 EUID=w28k-euid RANDOM=w28k-rnd SECONDS=w28k-sec SHLVL=w28k-lvl; do
+for kvp in POSIXLY_CORRECT=w28k-pc EUID=w28k-euid RANDOM=w28k-rnd SECONDS=w28k-sec SHLVL=w28k-lvl; do
   check "w28k: special key ${kvp%%=*} reaches the probed command verbatim" "$kvp" "$w28k_env"
 done
 # EXECIGNORE alone (bash >= 4.4 honours it) must not unbound the probe either
