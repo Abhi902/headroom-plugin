@@ -189,8 +189,11 @@ via `claude mcp add -s user headroom -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFL
 It does this on Windows, and on macOS/Linux only when `headroom` is not on PATH
 (the bundled bare-name entry cannot start there). This writes to the user's
 Claude Code MCP configuration, which is OUTSIDE `~/.claude/settings.json` and
-outside the plugin — list it when asking for consent. A user-scoped entry that
-no longer starts is removed and re-added; one that still starts is left alone.
+outside the plugin — list it when asking for consent. An existing user-scoped
+entry that cannot be shadowed (an absolute path, or a bare name on macOS/Linux)
+is left alone while it still starts; one that no longer starts, or that a
+project file could shadow (any relative path, or a bare name on Windows), is
+removed and re-added with the absolute engine path.
 A local-scoped `headroom` for the current project wins over the user-scoped one;
 the doctor reports a dead one with the `claude mcp remove headroom -s local`
 command but never removes it itself.

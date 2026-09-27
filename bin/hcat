@@ -141,7 +141,14 @@ if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   exit 3
 fi
 
-PYTHONIOENCODING=utf-8 PYTHONUTF8=1 HF_HUB_OFFLINE=1 HEADROOM_UPDATE_CHECK=off exec "$PY" - "$FILE" <<'PYEOF'
+# The compression run is BOUNDED like every other engine spawn: the resolver can
+# hand back an interpreter it accepted only on a probe timeout (a cold import),
+# and an unbounded exec of a wedged one would hang the caller's Bash tool with no
+# receipt, no exit code and no badge. _er_bounded feeds the child /dev/null, so
+# the program goes through a temp file rather than a heredoc on stdin.
+_hcat_py=$(mktemp "${TMPDIR:-/tmp}/hcat.XXXXXX") || { echo "hcat: cannot create a temp file" >&2; exit 4; }
+trap 'rm -f "$_hcat_py"' EXIT
+cat > "$_hcat_py" <<'PYEOF'
 import atexit, json, os, signal, sys, time
 
 # POSIX advisory locking for the shared stats file. Windows has no fcntl, and
@@ -339,3 +346,17 @@ print(out, end="" if out.endswith("\n") else "\n")
 
 _append_event(before, after, saved_pct, "hcat")
 PYEOF
+# `env` (a real command, not a function): the timeout binary cannot run a function
+_hcat_env="PYTHONIOENCODING=utf-8 PYTHONUTF8=1 HF_HUB_OFFLINE=1 HEADROOM_UPDATE_CHECK=off"
+if type _er_bounded >/dev/null 2>&1; then
+  # shellcheck disable=SC2086  # the env assignments are split on purpose
+  _er_bounded "${HCAT_EXEC_TIMEOUT:-120}" env $_hcat_env "$PY" "$_hcat_py" "$FILE"; rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "hcat: compression did not finish within ${HCAT_EXEC_TIMEOUT:-120}s ($PY) — the original is on disk: Read $FILE with offset/limit, and run /headroom-usage-indicator:doctor" >&2
+    note_error engine "hcat: compression timed out ($PY) — run /headroom-usage-indicator:doctor"
+    exit 4
+  fi
+  exit "$rc"
+fi
+# shellcheck disable=SC2086
+env $_hcat_env "$PY" "$_hcat_py" "$FILE"   # partial legacy copy without the bound

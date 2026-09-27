@@ -2909,7 +2909,11 @@ W2EOF
 chmod +x "$W2/venv/Scripts/python.exe"
 printf '{"k":1}' > "$W2/tiny.json"
 out=$(env -u HCAT_PYTHON HOME="$W2/home" DOCTOR_VENV_DIR="$W2/venv" PATH="/usr/bin:/bin" bash "$HCAT" "$W2/tiny.json" 2>&1); rc=$?
-check "w2: hcat resolves Scripts/python.exe" "args=- $W2/tiny.json" "$out"
+# the program arrives as a temp script (the run is bounded, so not on stdin)
+case $out in
+  *"args="*"/hcat."*" $W2/tiny.json"*) echo "ok - w2: hcat resolves Scripts/python.exe (runs its temp program on the file)"; PASS=$((PASS+1)) ;;
+  *) echo "FAIL - w2: hcat resolves Scripts/python.exe (got: $out)"; FAIL=$((FAIL+1)) ;;
+esac
 check "w2: hcat sets PYTHONIOENCODING=utf-8" "ioenc=utf-8" "$out"
 check "w2: hcat sets PYTHONUTF8=1"           "utf8=1"      "$out"
 check_eq "w2: hcat exit 0" "0" "$rc"
@@ -5485,11 +5489,53 @@ out=$(cd "$W28G" && w28g_run "$W28G/bare.json" windows "$W21/stub:$W21/venv/bin:
 check "w28g: --fix replaces it with the absolute CLI" "(replaced headroom, which a project file could shadow)" "$out"
 check_eq "w28g: ...and the stored command is now absolute" \
          "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command' "$W28G/bare.json")"
+# a shadowable entry whose remove fails, or whose re-add fails, is named as
+# shadowable (it may still start), never as "dead"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"headroom",args:["mcp","serve"]}}}' > "$W28G/stuck.json"
+out=$(cd "$W28G" && CLAUDE_STUB_FAIL_REMOVE=1 w28g_run "$W28G/stuck.json" windows "$W21/stub:$W21/venv/bin:/usr/bin:/bin" --fix)
+check "w28g: a failed remove of a shadowable entry says so" "could not remove the shadowable user-scoped headroom MCP (headroom)" "$out"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"headroom",args:["mcp","serve"]}}}' > "$W28G/addfail.json"
+out=$(cd "$W28G" && CLAUDE_STUB_FAIL_ADD=1 w28g_run "$W28G/addfail.json" windows "$W21/stub:$W21/venv/bin:/usr/bin:/bin" --fix)
+check "w28g: a failed re-add after removing it names it shadowable" "the shadowable entry headroom was removed first" "$out"
+# a bare name on POSIX is not shadowable, but 2c only runs off PATH, where it
+# cannot start: reported as a dead entry, and --fix replaces it
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"headroom",args:["mcp","serve"]}}}' > "$W28G/pbare.json"
+out=$(cd "$W28G" && w28g_run "$W28G/pbare.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28g: a bare POSIX entry off PATH is reported as not starting" "points at headroom, which does not start" "$out"
+check_absent "w28g: ...not as shadowable" "which is not an absolute path" "$out"
+out=$(cd "$W28G" && w28g_run "$W28G/pbare.json" unix "$W21/stub:/usr/bin:/bin" --fix)
+check "w28g: ...and --fix replaces it as a dead entry" "(replaced a dead entry: headroom)" "$out"
 # a RELATIVE command is shadowable on POSIX too (it resolves against the cwd)
 jq -n '{mcpServers:{headroom:{type:"stdio",command:"venv/bin/headroom",args:["mcp","serve"]}}}' > "$W28G/rel.json"
 mkdir -p "$W28G/venv/bin"; cp "$W21/venv/bin/headroom" "$W28G/venv/bin/headroom"
 out=$(cd "$W28G" && w28g_run "$W28G/rel.json" unix "$W21/stub:/usr/bin:/bin")
 check "w28g: a relative user entry on POSIX is reported as shadowable" "which is not an absolute path" "$out"
+
+# --- w28h. REGRESSION (PR #10 review round 18).
+# hcat's compression run is bounded: a wedged interpreter (resolved, e.g. accepted
+# on a probe timeout) must not hang the caller -- exit 4, say so, record it.
+W28H="$W28/h"; mkdir -p "$W28H/state"
+printf '#!/bin/sh\nsleep 30\n' > "$W28H/python"; chmod +x "$W28H/python"
+printf '[{"a":1},{"a":2}]\n' > "$W28H/in.json"
+t0=$(date +%s)
+out=$(HCAT_PYTHON="$W28H/python" HCAT_EXEC_TIMEOUT=2 HEADROOM_STATE_DIR="$W28H/state" "$ROOT/bin/hcat" "$W28H/in.json" 2>&1); rc=$?
+t1=$(date +%s)
+check_eq "w28h: a wedged engine run exits 4" "4" "$rc"
+[ $((t1 - t0)) -lt 15 ]; pass_fail "w28h: ...within the bound ($((t1 - t0))s), not the child's 30s" $?
+check "w28h: ...saying it timed out and where the original is" "compression did not finish within 2s" "$out"
+[ -s "$W28H/state/last-error" ]; pass_fail "w28h: ...and records the outage for the badge" $?
+# a UNC-spelled user entry (what --fix writes for an engine on a share) is
+# absolute: kept when it starts, not re-flagged as shadowable on every run
+W28Hu="$W28H/unc"; mkdir -p "$W28Hu"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"//srv/share/venv/Scripts/headroom.exe",args:["mcp","serve"]}}}' > "$W28Hu/cj.json"
+printf '#!/bin/sh\nm=$1; shift; case "$m:$1" in -u://srv/*) printf "%%s\\n" "%s" ;; *) printf "%%s\\n" "$1" ;; esac\n' "$W21/venv/bin/headroom" > "$W28Hu/cyg"; chmod +x "$W28Hu/cyg"
+out=$(cd "$W28G" && DOCTOR_CYGPATH="$W28Hu/cyg" w28g_run "$W28Hu/cj.json" windows "$W21/stub:$W21/venv/bin:/usr/bin:/bin")
+check "w28h: a network-share user entry that starts is kept as absolute" "MCP registered by absolute path (//srv/share/venv/Scripts/headroom.exe)" "$out"
+check_absent "w28h: ...not re-flagged as shadowable" "which is not an absolute path" "$out"
+# a drive-RELATIVE spelling (C:headroom resolves against that drive's cwd) is not absolute
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"C:headroom",args:["mcp","serve"]}}}' > "$W28Hu/drel.json"
+out=$(cd "$W28G" && w28g_run "$W28Hu/drel.json" windows "$W21/stub:$W21/venv/bin:/usr/bin:/bin")
+check "w28h: a drive-relative C:headroom entry is shadowable" "which is not an absolute path" "$out"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
