@@ -216,7 +216,10 @@ else
   if type _er_bounded >/dev/null 2>&1; then
     _er_bounded "${ER_JQ_TIMEOUT:-5}" jq -e "$toon_q" "$fp" >/dev/null 2>&1 || exit 0
   else
-    jq -e "$toon_q" "$fp" >/dev/null 2>&1 || exit 0
+    # a flat legacy copy without the lib: a timeout binary if there is one,
+    # else fail OPEN (let the Read through) rather than parse unbounded
+    t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null) || exit 0
+    "$t" -k 2 5 jq -e "$toon_q" "$fp" </dev/null >/dev/null 2>&1 || exit 0
   fi
 fi
 

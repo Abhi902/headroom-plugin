@@ -473,11 +473,13 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
   # private (0600) file and loaded by a small bash that runs INSIDE the bound,
   # just before it execs the command. The doctor's own shell and the timeout /
   # watchdog wrapper never see it -- so no entry key (a bound variable, IFS,
-  # EXECIGNORE, PATH, ...) can widen or break the bound -- and the values are
-  # exported, never put on argv, where `ps` would show them to other users.
-  # (A key that is not a shell identifier can only travel as an `env` arg.)
-  # The command itself is started through `sh -c 'exec "$0" "$@"'`, so a path
-  # containing `=` is never read by `env` as one more assignment.
+  # EXECIGNORE, PATH, ...) can widen or break the bound. Identifier-shaped keys
+  # are exported, so their values never reach argv (where `ps` shows them to
+  # other users); the exception is a key that is not a shell identifier (or one
+  # bash keeps readonly), which can only travel as an `env` arg and is visible.
+  # A command path containing `=` is started through `sh -c 'exec "$0" "$@"'`,
+  # so `env` never reads it as one more assignment; any other command is
+  # exec'd by `env` directly, exactly as the entry's argv spawns it.
   local -a _sp_e=(); local _sp_t=${DOCTOR_SHIM_RUNS_TIMEOUT:-5} _sp_f _sp_env _sp_sh _sp_bash
   while [ $# -gt 0 ] && [ "$1" != -- ]; do _sp_e+=("$1"); shift; done
   shift
@@ -487,30 +489,35 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
     # exe; Claude Code passes them verbatim, so the probe must too (as mcp_add)
     export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
     _sp_env=$(command -v env) && _sp_sh=$(command -v sh) || exit 1
+    # the launch prefix: env itself, plus the trampoline only for a `=` path
+    local -a _sp_run=("$_sp_env")
+    # shellcheck disable=SC2016  # the script is for the trampoline sh
+    case $1 in *=*) _sp_run+=("$_sp_sh" -c 'exec "$0" "$@"') ;; esac
     if [ "${#_sp_e[@]}" -eq 0 ]; then
-      # shellcheck disable=SC2016  # the script is for the trampoline sh
-      run_bounded "$_sp_t" "$_sp_sh" -c 'exec "$0" "$@"' "$@" --help >/dev/null 2>&1
+      run_bounded "$_sp_t" "${_sp_run[@]}" "$@" --help >/dev/null 2>&1
       exit $?
     fi
     _sp_bash=$(command -v bash) || exit 1
     _sp_f=$(umask 077; mktemp "${TMPD:-${TMPDIR:-/tmp}}/probe-env.XXXXXX") || exit 1
     # shellcheck disable=SC2064  # expand the path now
     trap "rm -f '$_sp_f'" EXIT
-    printf '%s\0' "${_sp_e[@]}" > "$_sp_f"
+    printf '%s\0' "${_sp_e[@]}" > "$_sp_f" || exit 1
     # The loader keeps everything it needs in its POSITIONAL parameters, which an
     # exported entry key cannot overwrite: "$@" = env, [non-identifier pairs],
-    # sh -c 'exec "$0" "$@"', cmd, args, --help. A key starting with `-` would be
-    # read by env as an option, so it is dropped.
+    # [trampoline], cmd, args, --help. Its one variable, __hr_probe_kv, is
+    # re-read every iteration; a key of that name travels as an `env` arg so its
+    # value survives. A key starting with `-` would be read by env as an
+    # option, so it is dropped.
     # shellcheck disable=SC2016  # the script is for the loader bash
     run_bounded "$_sp_t" "$_sp_bash" -c '
-      while IFS= read -r -d "" kv; do
-        case ${kv%%=*} in
+      while IFS= read -r -d "" __hr_probe_kv; do
+        case ${__hr_probe_kv%%=*} in
           ""|-*) ;;
-          [0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$kv" "${@:2}" ;;
-          *) export "$kv" 2>/dev/null || set -- "$1" "$kv" "${@:2}" ;;
+          __hr_probe_kv|[0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
+          *) export "$__hr_probe_kv" 2>/dev/null || set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
         esac
       done < "$0"
-      exec "$@"' "$_sp_f" "$_sp_env" "$_sp_sh" -c 'exec "$0" "$@"' "$@" --help >/dev/null 2>&1
+      exec "$@"' "$_sp_f" "${_sp_run[@]}" "$@" --help >/dev/null 2>&1
   )
 }
 shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves
