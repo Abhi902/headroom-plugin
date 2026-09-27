@@ -460,16 +460,40 @@ mcp_entry_runs() {  # mcp_entry_runs <command> <args-fn> <env-fn> — a register
   # need the entry's own env (PYTHONPATH) to import. 124 = no answer within the
   # bound (a cold uvx download can), which callers must not read as "dead".
   local -a a=() e=(); local l
+  # A NUL inside an arg or env value cannot reach a real process (Claude Code's
+  # spawn refuses it) and would split the item here: the readers fail on one,
+  # and the entry is judged "does not start" WITHOUT running anything.
+  "$2" >/dev/null && "$3" >/dev/null || return 1
   while IFS= read -r -d '' l; do a+=("$l"); done < <("$2")
   while IFS= read -r -d '' l; do e+=("$l"); done < <("$3")
   _start_probe ${e[@]+"${e[@]}"} -- "$1" ${a[@]+"${a[@]}"}
 }
 _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts (with --help) within the bound
-  local -a e=()
+  # An entry's env block can hold secrets (API keys): those are EXPORTED in a
+  # subshell, never put on argv, where `ps` would show them to other local users.
+  # Only the loader/search-path variables stay on the `env` argv, so they reach
+  # the probed command but never the timeout/watchdog wrapper itself (a PATH
+  # without coreutils would otherwise leave the probe unbounded).
+  local -a e=() argv_env=(); local kv k
   while [ $# -gt 0 ] && [ "$1" != -- ]; do e+=("$1"); shift; done
   shift
-  run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
-    env HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 ${e[@]+"${e[@]}"} "$@" --help >/dev/null 2>&1
+  (
+    export HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1
+    # Git Bash rewrites POSIX-looking ARGS (/c -> C:/) when it starts a native
+    # exe; Claude Code passes them verbatim, so the probe must too (as mcp_add)
+    export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+    for kv in ${e[@]+"${e[@]}"}; do
+      k=${kv%%=*}
+      case $k in
+        PATH|LD_*|DYLD_*) argv_env+=("$kv") ;;
+        ''|[0-9]*|*[!A-Za-z0-9_]*) ;;          # not an identifier: cannot be exported
+        *) # shellcheck disable=SC2163  # $kv is a whole KEY=VALUE pair, exported as such
+           export "$kv" ;;
+      esac
+    done
+    run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
+      env ${argv_env[@]+"${argv_env[@]}"} "$@" --help >/dev/null 2>&1
+  )
 }
 shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves
   # Name resolution alone proves nothing: uv's relocatable trampolines resolve the
@@ -1054,7 +1078,8 @@ if [ "$mcp_need" -eq 1 ]; then
     elif [ "$mcp_old_rc" -eq 124 ]; then
       # Too slow is not dead (a first `uvx` run downloads): never replace it
       say note "the user-scoped headroom MCP ($mcp_old) did not answer within ${DOCTOR_SHIM_RUNS_TIMEOUT:-5}s — left as is; re-run the doctor once it has warmed up"
-      mcp_state=ok
+      # unknown, not ok: no "registered" claim, and no outage FAIL either
+      mcp_state=slow
     elif [ "$FIX" -eq 1 ]; then
       mcp_repl=""; mcp_stuck=0
       if [ "$mcp_old_kind" = rel ]; then mcp_what=shadowable; else mcp_what=dead; fi
@@ -1098,7 +1123,7 @@ if [ "$mcp_need" -eq 1 ]; then
     [ -n "$mcp_loc" ] && { mcp_entry_runs "$(unix_path "$mcp_loc")" mcp_local_args mcp_local_env; mcp_loc_rc=$?; }
     if [ -n "$mcp_loc" ] && [ "$mcp_loc_rc" -ne 0 ] && [ "$mcp_loc_rc" -ne 124 ]; then
       say fixable "a local-scoped headroom MCP for this project ($mcp_loc) takes precedence over the user-scoped one and does not start — remove it: claude mcp remove headroom -s local"
-      [ "$mcp_state" = ok ] && mcp_state=shadowed
+      case $mcp_state in ok|slow) mcp_state=shadowed ;; esac
     elif [ -n "$mcp_loc" ]; then
       say note "a local-scoped headroom MCP for this project ($mcp_loc) takes precedence over the user-scoped one"
     fi
@@ -1113,7 +1138,7 @@ if [ "$mcp_need" -eq 1 ]; then
     fi
   elif ! is_windows && [ "$FIX" -eq 1 ] && [ "$mcp_state" = shadowed ]; then
     say FAIL "the user-scoped registration works, but in this project the dead local-scoped headroom MCP ($mcp_loc) is spawned instead — remove it: claude mcp remove headroom -s local"
-  elif ! is_windows && [ "$FIX" -eq 1 ] && [ "$mcp_state" != ok ] && [ "$mcp_state" != skip ]; then
+  elif ! is_windows && [ "$FIX" -eq 1 ] && [ "$mcp_state" != ok ] && [ "$mcp_state" != skip ] && [ "$mcp_state" != slow ]; then
     say FAIL "\`headroom\` is not on PATH and no working MCP registration landed, so the bundled MCP cannot start — see the lines above, or $(path_hint)"
   fi
 fi

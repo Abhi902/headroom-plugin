@@ -5641,15 +5641,15 @@ check_absent "w28i: ...with no temp-dir error" "cannot create a temp dir" "$out"
 W28J="$W28/j"; mkdir -p "$W28J/abs" "$W28J/proj"
 # an absolute launcher that starts only for the right module, and only with NEED=yes
 printf '#!/bin/sh\ncase "$1" in --help) exit 0 ;; good-mod) [ "${NEED:-}" = yes ] ;; *) exit 1 ;; esac\n' > "$W28J/abs/launch"; chmod +x "$W28J/abs/launch"
-jq -n --arg c "$W28J/abs/launch" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["no-such-mod"],env:{NEED:"yes"}}}}' > "$W28J/absbad.json"
+jq -n --rawfile c "$(jraw "$W28J/abs/launch")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["no-such-mod"],env:{NEED:"yes"}}}}' > "$W28J/absbad.json"
 out=$(cd "$W28G" && w28g_run "$W28J/absbad.json" unix "$W21/stub:/usr/bin:/bin")
 check "w28j: an ABSOLUTE launcher whose target is missing is reported as not starting" "points at $W28J/abs/launch, which does not start" "$out"
-jq -n --arg c "$W28J/abs/launch" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["good-mod"],env:{NEED:"yes"}}}}' > "$W28J/absenv.json"
+jq -n --rawfile c "$(jraw "$W28J/abs/launch")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["good-mod"],env:{NEED:"yes"}}}}' > "$W28J/absenv.json"
 out=$(cd "$W28G" && w28g_run "$W28J/absenv.json" unix "$W21/stub:/usr/bin:/bin")
 check "w28j: an entry that needs its own env block to start is kept" "MCP registered by absolute path ($W28J/abs/launch)" "$out"
 # too slow is NOT dead: a cold launcher is left alone, even by --fix
 printf '#!/bin/sh\nsleep 30\n' > "$W28J/abs/slow"; chmod +x "$W28J/abs/slow"
-jq -n --arg c "$W28J/abs/slow" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W28J/slow.json"
+jq -n --rawfile c "$(jraw "$W28J/abs/slow")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W28J/slow.json"
 cp "$W28J/slow.json" "$W28J/slow.orig"
 out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28J/slow.json" unix "$W21/stub:/usr/bin:/bin" --fix)
 check "w28j: a registration that does not answer in time is noted, not called dead" "did not answer within 1s" "$out"
@@ -5660,6 +5660,50 @@ w28j_root=$(cd "$W28J/proj" && pwd -P)
 jq -n --arg k "$w28j_root" '{projects:{($k):{mcpServers:{headroom:{type:"stdio",command:"uvx",args:["no-such-pkg","mcp","serve"]}}}}}' > "$W28J/local.json"
 out=$(cd "$W28J/proj" && w28g_run "$W28J/local.json" unix "$W21/stub:$W28I/bin:/usr/bin:/bin")
 check "w28j: a local-scoped launcher whose target is missing is reported" "a local-scoped headroom MCP for this project (uvx) takes precedence over the user-scoped one and does not start" "$out"
+
+# --- w28k. REGRESSION (PR #10 review round 22).
+# the local-scoped entry is probed with ITS env block, and a slow one is not dead
+W28K="$W28/k"; mkdir -p "$W28K/proj"
+w28k_root=$(cd "$W28K/proj" && pwd -P)
+jq -n --arg k "$w28k_root" --rawfile c "$(jraw "$W28J/abs/launch")" '{projects:{($k):{mcpServers:{headroom:{type:"stdio",command:$c,args:["good-mod"],env:{NEED:"yes"}}}}}}' > "$W28K/localenv.json"
+out=$(cd "$W28K/proj" && w28g_run "$W28K/localenv.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28k: a local-scoped entry that needs its env block is not called dead" "a local-scoped headroom MCP for this project ($W28J/abs/launch) takes precedence over the user-scoped one" "$out"
+check_absent "w28k: ...and is not reported as failing to start" "and does not start" "$out"
+jq -n --arg k "$w28k_root" --rawfile c "$(jraw "$W28J/abs/slow")" '{projects:{($k):{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}}}' > "$W28K/localslow.json"
+out=$(cd "$W28K/proj" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28K/localslow.json" unix "$W21/stub:/usr/bin:/bin")
+check_absent "w28k: a slow local-scoped entry is not reported as failing to start" "and does not start" "$out"
+# a slow user entry is not claimed as registered
+out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28J/slow.json" unix "$W21/stub:/usr/bin:/bin")
+check_absent "w28k: a slow user entry is not claimed as registered" "MCP registered by absolute path ($W28J/abs/slow)" "$out"
+# entry env VALUES never appear on the probe's argv (ps shows argv to other users)
+printf '#!/bin/sh\nps -o args= -p $PPID 2>/dev/null > "%s"; ps -o args= -p $$ 2>/dev/null >> "%s"; exit 0\n' "$W28K/argv" "$W28K/argv" > "$W28K/spy"; chmod +x "$W28K/spy"
+jq -n --rawfile c "$(jraw "$W28K/spy")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:[],env:{SECRET_TOKEN:"sk-w28k-do-not-leak"}}}}' > "$W28K/secret.json"
+: > "$W28K/argv"
+(cd "$W28G" && w28g_run "$W28K/secret.json" unix "$W21/stub:/usr/bin:/bin" >/dev/null)
+if [ -s "$W28K/argv" ]; then
+  check_absent "w28k: an entry's env values never reach the probe argv" "sk-w28k-do-not-leak" "$(cat "$W28K/argv")"
+else
+  skip_note "w28k: argv spy needs ps (not available here)"
+fi
+# a NUL inside an arg is refused without running anything
+jq -n --rawfile c "$(jraw "$W28K/spy")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["a\u0000b"]}}}' > "$W28K/nul.json"
+rm -f "$W28K/argv"
+out=$(cd "$W28G" && w28g_run "$W28K/nul.json" unix "$W21/stub:/usr/bin:/bin")
+[ ! -e "$W28K/argv" ]; pass_fail "w28k: an entry with a NUL in an arg is never executed" $?
+
+# a native jq.exe writes CRLF in -r mode: the command reader strips the \r
+mkdir -p "$W28K/crjq"
+cat > "$W28K/crjq/jq" <<W28KJQ
+#!/bin/sh
+case " \$* " in *" -r "*) "$(command -v jq)" "\$@" | sed 's/\$/\r/' ;; *) exec "$(command -v jq)" "\$@" ;; esac
+W28KJQ
+chmod +x "$W28K/crjq/jq"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"/opt/x/headroom",args:["mcp"]}}}' > "$W28K/cr.json"
+got=$(PATH="$W28K/crjq:$PATH" HEADROOM_CLAUDE_JSON="$W28K/cr.json" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; mcp_user_cmd" | od -c | tr -d ' \n')
+case $got in *'\r'*) echo "FAIL - w28k: a CRLF-writing jq leaves no \\r in the registered command"; FAIL=$((FAIL+1)) ;;
+  *) echo "ok - w28k: a CRLF-writing jq leaves no \\r in the registered command"; PASS=$((PASS+1)) ;; esac
+got=$(PATH="$W28K/crjq:$PATH" HEADROOM_CLAUDE_JSON="$W28K/cr.json" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; mcp_user_cmd" | od -c | tr -d ' \n')
+check "w28k: ...and the command itself survives" "/opt/x/headroom" "$(printf '%s' "$got" | tr -d '\\\\')"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
