@@ -5059,7 +5059,7 @@ check_absent "w27: ...no second 'does not start' report" "the resolved headroom 
 mkdir -p "$W27/slowjq" "$W27/pstate" "$W27/phome"
 cat > "$W27/slowjq/jq" <<SLOWJQ
 #!/bin/sh
-case "\$*" in *mcpServers.headroom.command*) sleep 5 ;; esac
+case "\$*" in *mcpServers.headroom.command*) sleep 20 ;; esac
 exec "$(command -v jq)" "\$@"
 SLOWJQ
 chmod +x "$W27/slowjq/jq"
@@ -5068,7 +5068,9 @@ t0=$(date +%s)
 printf '{"session_id":"w27p"}' | env -u HCAT_PYTHON -u HEADROOM_CLAUDE_JSON -u CLAUDE_CONFIG_DIR DOCTOR_OS=unix HOME="$W27/phome" \
   DOCTOR_VENV_DIR="$W25F/venv" PATH="$W27/slowjq:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W27/pstate" bash "$PROBE" >/dev/null
 t1=$(date +%s)
-[ $((t1 - t0)) -lt 5 ]; pass_fail "w27: the SessionStart registration lookup is bounded ($((t1 - t0))s)" $?
+# the bound is 2s; the threshold leaves room for a slow runner's watchdog polling
+# while still far below the 20s an unbounded lookup would take
+[ $((t1 - t0)) -lt 10 ]; pass_fail "w27: the SessionStart registration lookup is bounded ($((t1 - t0))s)" $?
 [ ! -s "$W27/pstate/last-error" ]; pass_fail "w27: ...and a timeout does not light the broken badge" $?
 
 # claude_json_path: the legacy file under ~/.claude, with no CLAUDE_CONFIG_DIR
@@ -5582,8 +5584,9 @@ check "w28h: a drive-relative C:headroom entry is shadowable" "which is not an a
 # a WORKING bare launcher on POSIX (a hand-registered `uvx headroom-ai mcp serve`)
 # is kept, even though headroom itself is off PATH
 W28I="$W28/i"; mkdir -p "$W28I/bin"
-# the stub starts only for the right package, like the real launcher
-printf '#!/bin/sh\n[ "$1" = headroom-ai ]\n' > "$W28I/bin/uvx"; chmod +x "$W28I/bin/uvx"
+# like the real launcher: `uvx --help` alone always works, and a package run
+# works only for the right package -- so only a WHOLE-command probe tells them apart
+printf '#!/bin/sh\ncase "$1" in --help|headroom-ai) exit 0 ;; *) exit 1 ;; esac\n' > "$W28I/bin/uvx"; chmod +x "$W28I/bin/uvx"
 jq -n '{mcpServers:{headroom:{type:"stdio",command:"uvx",args:["headroom-ai","mcp","serve"]}}}' > "$W28I/uvx.json"
 cp "$W28I/uvx.json" "$W28I/uvx.orig"
 out=$(cd "$W28G" && w28g_run "$W28I/uvx.json" unix "$W21/stub:$W28I/bin:/usr/bin:/bin" --fix)
@@ -5596,6 +5599,11 @@ jq -n '{mcpServers:{headroom:{type:"stdio",command:"uvx",args:["no-such-pkg","mc
 out=$(cd "$W28G" && w28g_run "$W28I/uvxbad.json" unix "$W21/stub:$W28I/bin:/usr/bin:/bin")
 check "w28i: a bare launcher whose target does not start is reported dead" "points at uvx, which does not start" "$out"
 check_absent "w28i: ...never kept on the launcher alone" "found on PATH" "$out"
+# args are read NUL-delimited: one arg holding a newline stays ONE arg
+printf '#!/bin/sh\n[ "$1" = headroom-ai ] && [ "$2" = "a\nb" ] && [ $# -eq 3 ]\n' > "$W28I/bin/uvx2"; chmod +x "$W28I/bin/uvx2"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"uvx2",args:["headroom-ai","a\nb"]}}}' > "$W28I/nl.json"
+out=$(cd "$W28G" && w28g_run "$W28I/nl.json" unix "$W21/stub:$W28I/bin:/usr/bin:/bin")
+check "w28i: an arg containing a newline reaches the probe as one arg" "MCP registered as a user-scoped server (uvx2, found on PATH)" "$out"
 # a flat legacy hcat (no scripts/lib) still bounds the compression run
 if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
   mkdir -p "$W28I/flat"; cp "$ROOT/bin/hcat" "$W28I/flat/hcat"
@@ -5626,6 +5634,32 @@ printf '[{"a":1},{"a":2},{"a":3}]\n' > "$W28I/in.json"
 out=$(TMPDIR="$W28I/no/such/dir" HCAT_PYTHON="$W28H/python" HCAT_EXEC_TIMEOUT=1 "$ROOT/bin/hcat" "$W28I/in.json" 2>&1)
 check "w28i: a missing TMPDIR falls back and the run still happens" "compression did not finish within 1s" "$out"
 check_absent "w28i: ...with no temp-dir error" "cannot create a temp dir" "$out"
+
+# --- w28j. REGRESSION (PR #10 review round 21). Every registered entry (absolute
+# or bare, user or local scope) is probed as Claude Code spawns it: command,
+# args AND its env block; too slow is not dead.
+W28J="$W28/j"; mkdir -p "$W28J/abs" "$W28J/proj"
+# an absolute launcher that starts only for the right module, and only with NEED=yes
+printf '#!/bin/sh\ncase "$1" in --help) exit 0 ;; good-mod) [ "${NEED:-}" = yes ] ;; *) exit 1 ;; esac\n' > "$W28J/abs/launch"; chmod +x "$W28J/abs/launch"
+jq -n --arg c "$W28J/abs/launch" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["no-such-mod"],env:{NEED:"yes"}}}}' > "$W28J/absbad.json"
+out=$(cd "$W28G" && w28g_run "$W28J/absbad.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28j: an ABSOLUTE launcher whose target is missing is reported as not starting" "points at $W28J/abs/launch, which does not start" "$out"
+jq -n --arg c "$W28J/abs/launch" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["good-mod"],env:{NEED:"yes"}}}}' > "$W28J/absenv.json"
+out=$(cd "$W28G" && w28g_run "$W28J/absenv.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28j: an entry that needs its own env block to start is kept" "MCP registered by absolute path ($W28J/abs/launch)" "$out"
+# too slow is NOT dead: a cold launcher is left alone, even by --fix
+printf '#!/bin/sh\nsleep 30\n' > "$W28J/abs/slow"; chmod +x "$W28J/abs/slow"
+jq -n --arg c "$W28J/abs/slow" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W28J/slow.json"
+cp "$W28J/slow.json" "$W28J/slow.orig"
+out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28J/slow.json" unix "$W21/stub:/usr/bin:/bin" --fix)
+check "w28j: a registration that does not answer in time is noted, not called dead" "did not answer within 1s" "$out"
+if cmp -s "$W28J/slow.json" "$W28J/slow.orig"; then echo "ok - w28j: ...and --fix leaves it in place"; PASS=$((PASS+1))
+else echo "FAIL - w28j: --fix replaced a slow-but-live registration"; FAIL=$((FAIL+1)); fi
+# the LOCAL-scoped entry gets the same whole-command probe
+w28j_root=$(cd "$W28J/proj" && pwd -P)
+jq -n --arg k "$w28j_root" '{projects:{($k):{mcpServers:{headroom:{type:"stdio",command:"uvx",args:["no-such-pkg","mcp","serve"]}}}}}' > "$W28J/local.json"
+out=$(cd "$W28J/proj" && w28g_run "$W28J/local.json" unix "$W21/stub:$W28I/bin:/usr/bin:/bin")
+check "w28j: a local-scoped launcher whose target is missing is reported" "a local-scoped headroom MCP for this project (uvx) takes precedence over the user-scoped one and does not start" "$out"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

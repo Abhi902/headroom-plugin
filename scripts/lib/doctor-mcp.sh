@@ -131,34 +131,53 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
 mcp_user_cmd() {  # the command of the USER-scoped `headroom` MCP, empty if none
   local cj; cj=$(claude_json_path)
   [ -f "$cj" ] || return 0
-  jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null
+  # tr -d '\r': a native jq.exe (Windows) writes CRLF in -r mode; a stray \r
+  # would become part of the command it names
+  jq -r '.mcpServers.headroom.command // empty' "$cj" 2>/dev/null | tr -d '\r'
 }
-mcp_user_args() {  # its args, one per line (NUL-free JSON strings), empty if none
+mcp_user_args() {  # its args, each NUL-terminated (an arg may hold a newline)
   local cj; cj=$(claude_json_path)
   [ -f "$cj" ] || return 0
-  jq -r '(.mcpServers.headroom.args // [])[] | tostring' "$cj" 2>/dev/null
+  jq -j '(.mcpServers.headroom.args // [])[] | tostring + "\u0000"' "$cj" 2>/dev/null
+}
+mcp_user_env() {  # its env block as KEY=VALUE, each NUL-terminated
+  local cj; cj=$(claude_json_path)
+  [ -f "$cj" ] || return 0
+  jq -j '(.mcpServers.headroom.env // {}) | to_entries[] | "\(.key)=\(.value|tostring)\u0000"' "$cj" 2>/dev/null
 }
 mcp_project_root() {  # the key the CLI files local-scoped servers under: the repository root, else $PWD
   local d r; d=$(_dm_canon "$PWD") || d=$PWD
   r=$(workspace_root "$d"); printf '%s\n' "${r:-$d}"
 }
-mcp_local_cmd() {  # the command of a LOCAL-scoped `headroom` MCP for this project, empty if none
+_mcp_local_entry() {  # the LOCAL-scoped `headroom` for this project: command, then args and env as JSON lines
   # Matched by IDENTITY, not by key spelling: the CLI keys projects by its own
   # native path (C:/Users/... on Windows, possibly another case or an 8.3
   # name), while the root here is an MSYS path. unix_path + -ef matches both.
-  local cj root k c ku
+  local cj root k c aj ej ku
   cj=$(claude_json_path); root=$(mcp_project_root)
   [ -f "$cj" ] || return 0
-  # Raw key/command LINE PAIRS, not @tsv: @tsv escapes every backslash, which
-  # would double every separator in a native Windows command.
-  while IFS= read -r k && IFS= read -r c; do
+  # Raw key/command/args LINE TRIPLES, not @tsv: @tsv escapes every backslash,
+  # which would double every separator in a native Windows command. The args
+  # travel as one compact JSON line, so no value ever passes through argv here.
+  while IFS= read -r k && IFS= read -r c && IFS= read -r aj && IFS= read -r ej; do
     [ -n "$k" ] && [ -n "$c" ] || continue
     ku=$(unix_path "$k" 2>/dev/null) || ku=$k
-    if [ "$ku" = "$root" ] || [ "$ku" -ef "$root" ]; then printf '%s\n' "$c"; return 0; fi
+    if [ "$ku" = "$root" ] || [ "$ku" -ef "$root" ]; then printf '%s\n%s\n%s\n' "$c" "$aj" "$ej"; return 0; fi
   done < <(jq -r '(.projects // {}) | to_entries[]
                   | select(.value.mcpServers.headroom.command? // empty | length > 0)
-                  | .key, .value.mcpServers.headroom.command' "$cj" 2>/dev/null)
+                  | .key, .value.mcpServers.headroom.command,
+                    ((.value.mcpServers.headroom.args // []) | tojson),
+                    ((.value.mcpServers.headroom.env // {}) | tojson)' "$cj" 2>/dev/null | tr -d '\r')
   return 0
+}
+mcp_local_cmd() {  # the command of a LOCAL-scoped `headroom` MCP for this project, empty if none
+  _mcp_local_entry | head -1
+}
+mcp_local_args() {  # its args, each NUL-terminated
+  _mcp_local_entry | sed -n 2p | jq -j '.[]? | tostring + "\u0000"' 2>/dev/null
+}
+mcp_local_env() {  # its env block as KEY=VALUE, each NUL-terminated
+  _mcp_local_entry | sed -n 3p | jq -j 'to_entries[]? | "\(.key)=\(.value|tostring)\u0000"' 2>/dev/null
 }
 # The server NAME must precede -e: -e is variadic and swallows every following
 # bare token, so `-e A=1 headroom` is rejected by the real CLI with "Invalid

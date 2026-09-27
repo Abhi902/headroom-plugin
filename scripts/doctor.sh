@@ -46,7 +46,9 @@
 #   DOCTOR_SHIM_DIR    where --fix shims `headroom` (default ~/.local/bin)
 #   DOCTOR_DRIVE_ROOT  prefix for the Windows drive mount (default "" => /c/...)
 #   DOCTOR_CYGPATH     cygpath stub for tests (default: cygpath when present)
-#   DOCTOR_SHIM_RUNS_TIMEOUT  seconds a `headroom --help` probe may take (default 5)
+#   DOCTOR_SHIM_RUNS_TIMEOUT  seconds a start-up probe may take (default 5): the
+#                      shimmed `headroom --help`, and a registered MCP entry's
+#                      whole command (e.g. `uvx headroom-ai mcp serve --help`)
 #
 # Exit codes: 0 no FAILs · 1 at least one FAIL · 2 usage
 set -u
@@ -75,7 +77,9 @@ done
 if ! type engine_python_candidates >/dev/null 2>&1 || ! type under_workspace >/dev/null 2>&1 \
    || ! type resolve_engine_python_validated >/dev/null 2>&1 || ! type claude_json_path >/dev/null 2>&1 \
    || ! type headroom_hijack_file >/dev/null 2>&1 || ! type _er_bounded >/dev/null 2>&1 \
-   || ! type is_network_path >/dev/null 2>&1 || ! type mcp_user_args >/dev/null 2>&1; then
+   || ! type is_network_path >/dev/null 2>&1 || ! type mcp_user_args >/dev/null 2>&1 \
+   || ! type mcp_local_args >/dev/null 2>&1 || ! type mcp_user_env >/dev/null 2>&1 \
+   || ! type mcp_local_env >/dev/null 2>&1; then
   echo "doctor: scripts/lib/engine-resolve.sh or doctor-mcp.sh missing or stale — partial plugin checkout; reinstall the plugin" >&2
   exit 1
 fi
@@ -450,14 +454,22 @@ run_bounded() {  # run_bounded <seconds> <cmd> [args...] — the command's own s
   # sub-second polling and the untrusted-input guards this copy never had.
   _er_bounded "$@"
 }
-mcp_bare_runs() {  # mcp_bare_runs <launcher> — the WHOLE registered command starts
-  # A bare launcher (uvx, python3, pipx) proves nothing by starting on its own:
-  # `python3 --help` succeeds whatever `-m <module>` it is registered with. Probe
-  # the registered argv, with --help appended, exactly as Claude Code would spawn it.
-  local -a a=(); local l
-  while IFS= read -r l; do a+=("$l"); done < <(mcp_user_args)
+mcp_entry_runs() {  # mcp_entry_runs <command> <args-fn> <env-fn> — a registered entry STARTS
+  # Probe what Claude Code spawns, not the launcher alone: `python3 --help`
+  # succeeds whatever `-m <module>` it is registered with, and a `-m` target may
+  # need the entry's own env (PYTHONPATH) to import. 124 = no answer within the
+  # bound (a cold uvx download can), which callers must not read as "dead".
+  local -a a=() e=(); local l
+  while IFS= read -r -d '' l; do a+=("$l"); done < <("$2")
+  while IFS= read -r -d '' l; do e+=("$l"); done < <("$3")
+  _start_probe ${e[@]+"${e[@]}"} -- "$1" ${a[@]+"${a[@]}"}
+}
+_start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts (with --help) within the bound
+  local -a e=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do e+=("$1"); shift; done
+  shift
   run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
-    env HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 "$1" ${a[@]+"${a[@]}"} --help >/dev/null 2>&1
+    env HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 ${e[@]+"${e[@]}"} "$@" --help >/dev/null 2>&1
 }
 shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves
   # Name resolution alone proves nothing: uv's relocatable trampolines resolve the
@@ -469,8 +481,7 @@ shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just 
   # by this function's own reasoning that may be a squatter or a wedged binary —
   # so a hang here would hang the doctor (and the skill that runs it) forever.
   # `env` carries the engine vars because run_bounded is a function, not a command.
-  run_bounded "${DOCTOR_SHIM_RUNS_TIMEOUT:-5}" \
-    env HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1 "$1" --help >/dev/null 2>&1
+  _start_probe -- "$@"
 }
 reinstall_hint() {  # how to repair an engine whose `headroom` CLI is missing or broken
   # HCAT_PYTHON is authoritative with no fallback, so "$PY -m pip install …" would
@@ -1029,11 +1040,20 @@ if [ "$mcp_need" -eq 1 ]; then
         *) if is_windows; then mcp_old_kind=rel; else mcp_old_kind=bare; fi ;;
       esac
     fi
-    if [ "$mcp_old_kind" = abs ] && shim_runs "$(unix_path "$mcp_old")"; then
+    mcp_old_rc=1
+    case $mcp_old_kind in
+      abs)  mcp_entry_runs "$(unix_path "$mcp_old")" mcp_user_args mcp_user_env; mcp_old_rc=$? ;;
+      bare) mcp_entry_runs "$mcp_old" mcp_user_args mcp_user_env; mcp_old_rc=$? ;;
+    esac
+    if [ "$mcp_old_rc" -eq 0 ] && [ "$mcp_old_kind" = abs ]; then
       say ok "MCP registered by absolute path ($mcp_old) as a user-scoped server — $mcp_why"
       mcp_state=ok
-    elif [ "$mcp_old_kind" = bare ] && mcp_bare_runs "$mcp_old"; then
+    elif [ "$mcp_old_rc" -eq 0 ]; then
       say ok "MCP registered as a user-scoped server ($mcp_old, found on PATH) — $mcp_why"
+      mcp_state=ok
+    elif [ "$mcp_old_rc" -eq 124 ]; then
+      # Too slow is not dead (a first `uvx` run downloads): never replace it
+      say note "the user-scoped headroom MCP ($mcp_old) did not answer within ${DOCTOR_SHIM_RUNS_TIMEOUT:-5}s — left as is; re-run the doctor once it has warmed up"
       mcp_state=ok
     elif [ "$FIX" -eq 1 ]; then
       mcp_repl=""; mcp_stuck=0
@@ -1074,8 +1094,9 @@ if [ "$mcp_need" -eq 1 ]; then
   # A LOCAL-scoped `headroom` for this project wins over the user-scoped one. A
   # dead one silently defeats everything above; never remove it for the user.
   if command -v claude >/dev/null 2>&1; then
-    mcp_loc=$(mcp_local_cmd)
-    if [ -n "$mcp_loc" ] && ! shim_runs "$(unix_path "$mcp_loc")"; then
+    mcp_loc=$(mcp_local_cmd); mcp_loc_rc=0
+    [ -n "$mcp_loc" ] && { mcp_entry_runs "$(unix_path "$mcp_loc")" mcp_local_args mcp_local_env; mcp_loc_rc=$?; }
+    if [ -n "$mcp_loc" ] && [ "$mcp_loc_rc" -ne 0 ] && [ "$mcp_loc_rc" -ne 124 ]; then
       say fixable "a local-scoped headroom MCP for this project ($mcp_loc) takes precedence over the user-scoped one and does not start — remove it: claude mcp remove headroom -s local"
       [ "$mcp_state" = ok ] && mcp_state=shadowed
     elif [ -n "$mcp_loc" ]; then
