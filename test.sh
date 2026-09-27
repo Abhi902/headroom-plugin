@@ -5702,6 +5702,16 @@ out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28K/widen.json" unix 
 t1=$(date +%s)
 check "w28k: an entry's DOCTOR_SHIM_RUNS_TIMEOUT does not change the doctor's bound" "did not answer within 1s" "$out"
 [ $((t1 - t0)) -lt 25 ]; pass_fail "w28k: ...and the run stays bounded ($((t1 - t0))s)" $?
+# ...nor through a key that collides with the probe helper's own variables
+jq -n --rawfile c "$(jraw "$W28J/abs/slow")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"],env:{t:"60",_sp_t:"60"}}}}' > "$W28K/widen2.json"
+t0=$(date +%s)
+out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28K/widen2.json" unix "$W21/stub:/usr/bin:/bin")
+t1=$(date +%s)
+check "w28k: an entry key named t / _sp_t cannot widen the bound" "did not answer within 1s" "$out"
+[ $((t1 - t0)) -lt 25 ]; pass_fail "w28k: ...and the run stays bounded ($((t1 - t0))s)" $?
+jq -n --rawfile c "$(jraw "$W28J/abs/launch")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["good-mod"],env:{NEED:"yes",argv_env:"/nonexistent",e:"x",IFS:"/"}}}}' > "$W28K/collide.json"
+out=$(cd "$W28G" && w28g_run "$W28K/collide.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28k: entry keys named like shell/helper variables do not break a healthy entry" "MCP registered by absolute path ($W28J/abs/launch)" "$out"
 # a NUL inside an arg is refused without running anything
 jq -n --rawfile c "$(jraw "$W28K/spy")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["a\u0000b"]}}}' > "$W28K/nul.json"
 rm -f "$W28K/argv"
@@ -5719,7 +5729,7 @@ rm -f "$W28K/argv"
 [ ! -e "$W28K/argv" ]; pass_fail "w28k: a local-scoped entry with a NUL in an arg is never executed" $?
 # PATH from the entry reaches the probed command (on its env argv)
 mkdir -p "$W28K/pbin"; printf '#!/bin/sh\nexit 0\n' > "$W28K/pbin/onlyhere"; chmod +x "$W28K/pbin/onlyhere"
-jq -n --arg p "$W28K/pbin:/usr/bin:/bin" '{mcpServers:{headroom:{type:"stdio",command:"onlyhere",args:[],env:{PATH:$p}}}}' > "$W28K/path.json"
+jq -n --rawfile p "$(jraw "$W28K/pbin:/usr/bin:/bin")" '{mcpServers:{headroom:{type:"stdio",command:"onlyhere",args:[],env:{PATH:$p}}}}' > "$W28K/path.json"
 out=$(cd "$W28G" && w28g_run "$W28K/path.json" unix "$W21/stub:/usr/bin:/bin")
 check "w28k: an entry's own PATH is used to find a bare launcher" "MCP registered as a user-scoped server (onlyhere, found on PATH)" "$out"
 # a slow user entry never produces the "no working registration" outage FAIL
@@ -5729,6 +5739,32 @@ check_absent "w28k: a slow entry under --fix raises no outage FAIL" "no working 
 # -- contains("\u0000") on jq 1.6 -- would call a healthy entry dead)
 got=$(HEADROOM_CLAUDE_JSON="$W28J/absenv.json" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; mcp_user_args >/dev/null && mcp_user_env >/dev/null && echo pass || echo refused")
 check_eq "w28k: ordinary args/env pass the NUL gate" "pass" "$got"
+# a Windows-style mixed-case `Path` key is routed like PATH: onto the probe's
+# env argv (Windows treats it as PATH), never exported into the doctor's shell
+jq -n --rawfile c "$(jraw "$W28J/abs/launch")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["good-mod"],env:{NEED:"yes",Path:"/w28k-mixed-case-path"}}}}' > "$W28K/path2.json"
+: > "$W28K/targv"
+(cd "$W28G" && w28g_run "$W28K/path2.json" unix "$W28K/tbin:$W21/stub:/usr/bin:/bin" >/dev/null)
+check "w28k: a mixed-case Path key goes on the probe's env argv like PATH" "Path=/w28k-mixed-case-path" "$(cat "$W28K/targv")"
+# the resolver's own knobs (ER_*) from an entry do not bend the doctor either
+jq -n --rawfile c "$(jraw "$W28J/abs/slow")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"],env:{ER_PY_TIMEOUT:"60",_ER_SLEEP_UNIT:"none"}}}}' > "$W28K/erknob.json"
+t0=$(date +%s)
+out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28K/erknob.json" unix "$W21/stub:/usr/bin:/bin")
+t1=$(date +%s)
+check "w28k: an entry's ER_*/_ER_* keys leave the doctor's bound alone" "did not answer within 1s" "$out"
+[ $((t1 - t0)) -lt 25 ]; pass_fail "w28k: ...still bounded ($((t1 - t0))s)" $?
+# a key that is not a shell identifier still reaches the probe (via the env argv)
+jq -n --rawfile c "$(jraw "$W28J/abs/launch")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["good-mod"],env:{NEED:"yes","my-key":"w28k-nonident"}}}}' > "$W28K/nonident.json"
+: > "$W28K/targv"
+(cd "$W28G" && w28g_run "$W28K/nonident.json" unix "$W28K/tbin:$W21/stub:/usr/bin:/bin" >/dev/null)
+check "w28k: a non-identifier env key is passed to the probe, not dropped" "my-key=w28k-nonident" "$(cat "$W28K/targv")"
+# an entry PATH without coreutils never reaches the bound wrapper: the slow
+# launcher is still cut off (were PATH exported, no timeout/sleep would be found)
+mkdir -p "$W28K/emptybin"
+jq -n --rawfile c "$(jraw "$W28J/abs/slow")" --rawfile p "$(jraw "$W28K/emptybin")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"],env:{PATH:$p}}}}' > "$W28K/barepath.json"
+t0=$(date +%s)
+out=$(cd "$W28G" && DOCTOR_SHIM_RUNS_TIMEOUT=1 w28g_run "$W28K/barepath.json" unix "$W21/stub:/usr/bin:/bin")
+t1=$(date +%s)
+[ $((t1 - t0)) -lt 25 ]; pass_fail "w28k: an entry PATH without coreutils leaves the probe bounded ($((t1 - t0))s)" $?
 # a SLOW user entry shadowed by a dead local one: the FAIL never says it "works"
 jq -n --arg k "$w28k_root" --rawfile c "$(jraw "$W28J/abs/slow")" --rawfile d "$(jraw "$W28J/abs/launch")" \
   '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}},projects:{($k):{mcpServers:{headroom:{type:"stdio",command:$d,args:["no-such-mod"]}}}}}' > "$W28K/slowshadow.json"

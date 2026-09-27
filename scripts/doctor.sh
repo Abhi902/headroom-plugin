@@ -474,8 +474,10 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
   # Only the loader/search-path variables stay on the `env` argv, so they reach
   # the probed command but never the timeout/watchdog wrapper itself (a PATH
   # without coreutils would otherwise leave the probe unbounded).
-  local -a e=() argv_env=(); local kv k t=${DOCTOR_SHIM_RUNS_TIMEOUT:-5}
-  while [ $# -gt 0 ] && [ "$1" != -- ]; do e+=("$1"); shift; done
+  # Every local here is _sp_-prefixed and that prefix is never exported: an
+  # entry key must not be able to overwrite the bound or the argv list.
+  local -a _sp_e=() _sp_argv=(); local _sp_kv _sp_k _sp_t=${DOCTOR_SHIM_RUNS_TIMEOUT:-5}
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do _sp_e+=("$1"); shift; done
   shift
   # the bound is fixed BEFORE the entry's env is exported: an entry must not be
   # able to widen the doctor's own probe window
@@ -484,21 +486,23 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
     # Git Bash rewrites POSIX-looking ARGS (/c -> C:/) when it starts a native
     # exe; Claude Code passes them verbatim, so the probe must too (as mcp_add)
     export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-    for kv in ${e[@]+"${e[@]}"}; do
-      k=${kv%%=*}
-      case $k in
-        # the doctor's own knobs (and the bound helper's) never come from an
-        # entry; they go to the probed command's argv env only
-        DOCTOR_*|ER_*|_ER_*) argv_env+=("$kv") ;;
-        [Pp][Aa][Tt][Hh]|LD_*|DYLD_*) argv_env+=("$kv") ;;
+    for _sp_kv in ${_sp_e[@]+"${_sp_e[@]}"}; do
+      _sp_k=${_sp_kv%%=*}
+      case $_sp_k in
+        # never exported into THIS shell (they reach the probed command through
+        # the env argv instead): the doctor's own knobs and the bound helper's,
+        # this function's locals, and the names bash itself acts on
+        DOCTOR_*|ER_*|_ER_*|_sp_*|IFS|BASH*|SHELLOPTS|ENV|CDPATH|GLOBIGNORE|PS4|POSIXLY_CORRECT)
+          _sp_argv+=("$_sp_kv") ;;
+        [Pp][Aa][Tt][Hh]|LD_*|DYLD_*) _sp_argv+=("$_sp_kv") ;;
         '') ;;
-        [0-9]*|*[!A-Za-z0-9_]*) argv_env+=("$kv") ;;   # not an identifier: `env` still passes it
-        *) # shellcheck disable=SC2163  # $kv is a whole KEY=VALUE pair, exported as such
-           export "$kv" ;;
+        [0-9]*|*[!A-Za-z0-9_]*) _sp_argv+=("$_sp_kv") ;;   # not an identifier: `env` still passes it
+        *) # shellcheck disable=SC2163  # $_sp_kv is a whole KEY=VALUE pair, exported as such
+           export "$_sp_kv" ;;
       esac
     done
-    run_bounded "$t" \
-      env ${argv_env[@]+"${argv_env[@]}"} "$@" --help >/dev/null 2>&1
+    run_bounded "$_sp_t" \
+      env ${_sp_argv[@]+"${_sp_argv[@]}"} "$@" --help >/dev/null 2>&1
   )
 }
 shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves
