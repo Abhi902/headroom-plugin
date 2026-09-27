@@ -477,7 +477,7 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
   # are exported, so their values never reach argv (where `ps` shows them to
   # other users). The exceptions travel as visible `env` args: a key that is
   # not a shell identifier, one bash refuses (readonly) or rewrites (RANDOM,
-  # SECONDS, ...), and the loader-steering POSIXLY_CORRECT / SHLVL. Keys
+  # SECONDS, ...), and the loader-steering POSIXLY_CORRECT / TMOUT / SHLVL. Keys
   # starting with `-` and SHELLOPTS/BASHOPTS are dropped; a command starting
   # with `-` is refused unexecuted.
   # A command path containing `=` is started through `sh -c 'exec "$0" "$@"'`,
@@ -508,11 +508,10 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
     trap "rm -f '$_sp_f'" EXIT
     printf '%s\0' "${_sp_e[@]}" > "$_sp_f" || exit 1
     # The loader keeps everything it needs in its POSITIONAL parameters, which an
-    # exported entry key cannot overwrite: "$@" = env, [non-identifier pairs],
-    # [trampoline], cmd, args, --help. Its variables (__hr_probe_kv/_k) are
-    # re-set every iteration; a key of either name travels as an `env` arg so
-    # its value survives. A key starting with `-` would be read by env as an
-    # option, so it is dropped.
+    # exported entry key cannot overwrite: "$@" = env, [pairs env must set
+    # verbatim], [trampoline], cmd, args, --help. Its variables (__hr_probe_kv/_k)
+    # are re-set every iteration. Which keys are dropped, exported, or passed
+    # verbatim is annotated per case arm below.
     # shellcheck disable=SC2016  # the script is for the loader bash
     run_bounded "$_sp_t" "$_sp_bash" -c '
       while IFS= read -r -d "" __hr_probe_kv; do
@@ -522,9 +521,10 @@ _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts
           # readonly SHELLOPTS/BASHOPTS would steer the sh hop (noexec)
           ""|-*|SHELLOPTS|BASHOPTS) ;;
           # env sets these verbatim: POSIXLY_CORRECT exported here would put the
-          # loader in posix mode (a later readonly key then kills it), and bash
-          # decrements an exported SHLVL on exec
-          __hr_probe_kv|__hr_probe_k|POSIXLY_CORRECT|SHLVL|[0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
+          # loader in posix mode (a later readonly key then kills it), TMOUT
+          # would time out the loader`s own read, and bash decrements an exported
+          # SHLVL on exec
+          __hr_probe_kv|__hr_probe_k|POSIXLY_CORRECT|TMOUT|SHLVL|[0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$__hr_probe_kv" "${@:2}" ;;
           # exported -- unless bash refuses it (readonly) or rewrites it on the
           # way (RANDOM, SECONDS, LINENO, ...): then env passes it verbatim
           *) if ! export "$__hr_probe_kv" 2>/dev/null || [ "${!__hr_probe_k}" != "${__hr_probe_kv#*=}" ]; then
