@@ -98,7 +98,10 @@ Each line is aligned `<status> - <what>`:
     `~/.claude/headroom-statusline.sh` and settings.json pointed at it
     (backup first); merge-aware: an existing non-headroom statusLine command
     is preserved under `_headroomStatusLineBackup` and chained ahead of the
-    badge, never clobbered
+    badge, never clobbered. On Windows a command written for the native
+    spawner (a `\` path or a `%VAR%`) cannot be chained through bash, so the
+    merge is refused with a `FAIL` (plain run and `--fix` alike) and
+    settings.json is left untouched
   - statusLine wired but script missing → `scripts/statusline.sh` re-copied to
     `~/.claude/headroom-statusline.sh` (settings already point at it, in any
     spelling — absolute or tilde), with its `lib/` deps re-provisioned (the
@@ -117,6 +120,13 @@ Each line is aligned `<status> - <what>`:
     it's missing too, it's re-copied first, same as above); doctor never
     reports this wiring as healthy even when the file is present, since the
     wired command itself would still never resolve it
+  - headroom CLI supplied by the project itself (a relative path, or one whose
+    link or target is inside the current project — `HCAT_PYTHON`,
+    `UV_TOOL_DIR` or PATH can come from a project's settings) → a `FAIL`,
+    never a fix: it is not shimmed and not registered as a user-scoped MCP,
+    because both outlive the project. The line says which setting to undo and
+    where to install the engine instead. An existing user-scoped registration
+    that already works is kept either way.
   - headroom CLI not on PATH (engine found, bare name unresolved) → the
     resolved `headroom` is shimmed into `~/.local/bin` (symlink; on Windows a
     copy named `headroom.exe`), then re-checked by name **and by execution** —

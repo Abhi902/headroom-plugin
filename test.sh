@@ -6021,6 +6021,127 @@ mkdir -p "$W29/badge-state"
 out=$(HEADROOM_STATE_DIR="$W29/badge-state" badge "$W29/t_pretr.jsonl" claude-opus-4-8 sess-w29)
 check "w29: the badge excludes the plugin-namespaced headroom result" "not compressing yet" "$out"
 
+# --- w29b. REGRESSION (round 34 review of c8bd7f6).
+W29B="$W/w29b"; mkdir -p "$W29B"
+# A WORKING user-scoped registration outside the project is judged and kept even
+# when this run resolves an in-project CLI -- the refusal applies only where
+# --fix would add or replace an entry (it FAILed a healthy install before).
+mkdir -p "$W29B/proj/bin"
+printf '#!/bin/sh\necho hr\n' > "$W29B/proj/bin/headroom"; chmod +x "$W29B/proj/bin/headroom"
+jq -n --rawfile c "$(jraw "$W21/venv/bin/headroom")" '{mcpServers:{headroom:{type:"stdio",command:$c,args:["mcp","serve"]}}}' > "$W29B/keep.json"
+out=$(cd "$W29B/proj" && w28g_run "$W29B/keep.json" windows "$W29B/proj/bin:$W21/stub:/usr/bin:/bin" --fix)
+check "w29b: a working user entry is kept while the resolved CLI is in the project" \
+      "MCP registered by absolute path ($W21/venv/bin/headroom)" "$out"
+check_absent "w29b: ...and is not refused" "refusing to register" "$out"
+# ...but with NO entry, that in-project CLI (found on PATH, so 2b never saw it)
+# is refused by 2c itself, with a remedy that does not rebuild it
+jq -n '{}' > "$W29B/none.json"
+out=$(cd "$W29B/proj" && w28g_run "$W29B/none.json" windows "$W29B/proj/bin:$W21/stub:/usr/bin:/bin" --fix)
+check "w29b: 2c refuses an in-project CLI it resolved from PATH" "refusing to register it as a user-scoped MCP" "$out"
+check "w29b: ...and says to take that dir off PATH" "take $W29B/proj/bin off PATH" "$out"
+check_eq "w29b: ...and registers nothing" "" "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/none.json")"
+# the 2b remedy names HCAT_PYTHON, never the in-project interpreter it resolved
+out=$(w29w_run tools/python "$W29B/cj-hint.json")
+check "w29b: the in-project refusal says to unset HCAT_PYTHON" "unset HCAT_PYTHON" "$out"
+check_absent "w29b: ...and never tells you to pip into the in-project python" "tools/python -m pip" "$out"
+# a link OUTSIDE the project whose target is INSIDE it is refused too
+mkdir -p "$W29B/out"
+printf '#!/bin/sh\nexit 0\n' > "$W29B/out/python"; chmod +x "$W29B/out/python"
+ln -s "$W29W/proj/tools/headroom" "$W29B/out/headroom" 2>/dev/null
+if [ -L "$W29B/out/headroom" ]; then
+  rm -f "$W29W/shim/headroom"
+  out=$(w29w_run "$W29B/out/python" "$W29B/cj-link.json")
+  check "w29b: a link outside the project into it is refused" "refusing to shim it" "$out"
+  check_eq "w29b: ...and nothing is registered" "" "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cj-link.json" 2>/dev/null)"
+else
+  skip_note "w29b: link-into-project fixture needs real symlinks (this host's ln -s copies)"
+fi
+# the Windows-syntax verdict reads the SAME base command in a plain run and --fix:
+# a clean statusLine in front of a backslash backup is refused by both...
+W29BC="$W29B/chain"; mkdir -p "$W29BC/cd"
+for _b in bash bash.exe; do printf '#!/bin/sh\nexit 0\n' > "$W29BC/cd/$_b"; chmod +x "$W29BC/cd/$_b"; done
+w29b_chain() {  # w29b_chain <settings> [--fix]
+  env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" CYGPATH_UNIX_DIR="$W29BC/cd" \
+      PATH="$FENG:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$1" DOCTOR_CLAUDE_DIR="$W29BC/cd" \
+      DOCTOR_VENV_DIR="$NOVENV" DOCTOR_SHIM_DIR="$W29BC/shim" \
+      HEADROOM_STATE_DIR="$W29BC/state" bash "$DOCTOR" ${2:+"$2"} 2>&1
+}
+jq -n '{statusLine:{type:"command",command:"printf OK"},_headroomStatusLineBackup:{type:"command",command:"node C:\\Users\\me\\sl.js"}}' > "$W29BC/bak.json"
+out=$(w29b_chain "$W29BC/bak.json")
+check "w29b: a backslash BACKUP is refused by a plain run too" "uses Windows syntax" "$out"
+out=$(w29b_chain "$W29BC/bak.json" --fix)
+check "w29b: ...as --fix refuses it" "uses Windows syntax" "$out"
+# ...while a legacy inline badge (not a base at all) with a % in it is fixable, as --fix replaces it
+jq -n '{statusLine:{type:"command",command:"printf %s mcp__headroom__headroom_compress"}}' > "$W29BC/legacy.json"
+out=$(w29b_chain "$W29BC/legacy.json")
+check_absent "w29b: a legacy inline badge with a % is not refused as Windows syntax" "uses Windows syntax" "$out"
+# the gate: a retry of a deduped file, and a file whose check outran the bound,
+# never pay for the eligibility check again
+W29BG="$W29B/gate"; mkdir -p "$W29BG/slow" "$W29BG/state"
+cat > "$W29BG/slow/jq" <<W29BJQ
+#!/bin/sh
+case "\$*" in *keys_unsorted*) echo x >> "$W29BG/jq.calls"; exec sleep 30 ;; esac
+exec "$(command -v jq)" "\$@"
+W29BJQ
+chmod +x "$W29BG/slow/jq"
+mkuniform "$W29BG/uni.json"
+w29b_gate() {
+  gate_input "$W29BG/uni.json" w29bg | env -u HCAT_PYTHON HOME="$W29G/home" DOCTOR_VENV_DIR=/nonexistent ER_JQ_TIMEOUT=1 \
+    PATH="$W29BG/slow:$W29G/bin:$STUB:/usr/bin:/bin" HEADROOM_STATE_DIR="$W29BG/state" bash "$GATE"
+}
+: > "$W29BG/jq.calls"
+out=$(w29b_gate); ! w29_denied "$out"; pass_fail "w29b: an over-bound eligibility check lets the Read through" $?
+out=$(w29b_gate)
+check_eq "w29b: ...and is not re-run on the next Read of that file" "1" "$(grep -c x "$W29BG/jq.calls")"
+
+# a cwd that CONTAINS $HOME (a doctor run from /Users or C:\) is no project
+# boundary: the user's own engine under $HOME is not "inside the workspace"
+W29BH="$W29B/hroot"; mkdir -p "$W29BH/home/v/bin" "$W29BH/home/.claude" "$W29BH/shim" "$W29BH/state"
+printf '#!/bin/sh\nexit 0\n'  > "$W29BH/home/v/bin/python";   chmod +x "$W29BH/home/v/bin/python"
+printf '#!/bin/sh\necho hr\n' > "$W29BH/home/v/bin/headroom"; chmod +x "$W29BH/home/v/bin/headroom"
+doc_settings_wired "$W29BH/home/.claude" > "$W29BH/s.json"
+out=$(cd "$W29BH" && env -u HCAT_PYTHON HOME="$W29BH/home" DOCTOR_OS=unix HEADROOM_CLAUDE_JSON="$W29BH/cj.json" \
+      PATH="$W21/stub:/usr/bin:/bin" DOCTOR_SETTINGS="$W29BH/s.json" DOCTOR_CLAUDE_DIR="$W29BH/home/.claude" \
+      DOCTOR_VENV_DIR="$W29BH/home/v" DOCTOR_SHIM_DIR="$W29BH/shim" HEADROOM_STATE_DIR="$W29BH/state" \
+      bash "$DOCTOR" --fix 2>&1)
+check_absent "w29b: a cwd above \$HOME does not make the user's engine 'inside this project'" "lives inside this project" "$out"
+check "w29b: ...so it is registered as usual" "registered the headroom MCP by absolute path" "$out"
+# a bash-legal % (date +%H:%M) is chained normally; only %NAME% is native syntax
+jq -n '{statusLine:{type:"command",command:"date +%H:%M"}}' > "$W29BC/pct.json"
+out=$(w29b_chain "$W29BC/pct.json" --fix)
+check_absent "w29b: a bash-legal % is not refused as Windows syntax" "uses Windows syntax" "$out"
+check "w29b: ...and is merged" "statusLine merged" "$out"
+jq -n '{statusLine:{type:"command",command:"node %USERPROFILE%/sl.js"}}' > "$W29BC/var.json"
+out=$(w29b_chain "$W29BC/var.json" --fix)
+check "w29b: a %VAR% is refused" "uses Windows syntax" "$out"
+# an in-project CLI with no claude CLI and nothing registered: a FAIL, never a
+# `fixable` that "install claude, then --fix" could only turn into the refusal
+out=$(cd "$W29B/proj" && env -u HCAT_PYTHON DOCTOR_OS=windows HEADROOM_CLAUDE_JSON="$W29B/none2.json" \
+      PATH="$W29B/proj/bin:$STUB:/usr/bin:/bin" DOCTOR_SETTINGS="$W21/s.json" DOCTOR_CLAUDE_DIR="$W21/cd" \
+      DOCTOR_VENV_DIR="$W21/venv" DOCTOR_SHIM_DIR="$W21/shim" HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" 2>&1)
+check "w29b: an in-project CLI without the claude CLI is refused" "must never be registered as a user-scoped MCP" "$out"
+check_absent "w29b: ...not offered as fix-the-engine-first" "fix the engine first" "$out"
+
+# SessionStart on Windows does NOT accept a bare-name user MCP (Windows searches
+# the cwd first for a bare name -- doctor 2c calls it shadowable); it only nudges
+# there, so pin that the acceptance path is not taken: the nudge still appears
+mkdir -p "$W29S/wstate"
+w29_pout=$(printf '{"session_id":"w29sw"}' | env -u HCAT_PYTHON DOCTOR_OS=windows DOCTOR_CYGPATH="$W/cygpath" HOME="$W29S/home" \
+  HEADROOM_CLAUDE_JSON="$W29S/cj.json" DOCTOR_VENV_DIR="$W24P/venv" PATH="$W29S/bin:$STUB:/usr/bin:/bin" \
+  HEADROOM_STATE_DIR="$W29S/wstate" bash "$PROBE" 2>&1)
+check "w29b: on Windows a bare-name user MCP does not stand in for headroom on PATH" "is not on PATH" "$w29_pout"
+# the POSIX "already shimmed" note is for the doctor's shim OF THIS ENGINE only: a
+# shim pointing elsewhere is still fixable (--fix repoints or FAILs on it)
+if [ -L "$W29P/shim/headroom" ]; then
+  mkdir -p "$W29P/other"; printf '#!/bin/sh\necho other\n' > "$W29P/other/headroom"; chmod +x "$W29P/other/headroom"
+  ln -sfn "$W29P/other/headroom" "$W29P/shim/headroom"
+  out=$(w29p_run)
+  check_absent "w29b: a shim pointing at another engine is not called 'already shimmed'" "headroom is shimmed to" "$out"
+  check "w29b: ...it stays fixable" "headroom CLI not on PATH (engine at" "$out"
+else
+  skip_note "w29b: repointed-shim fixture needs real symlinks (this host's ln -s copies)"
+fi
+
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
 [ "$FAIL" -eq 0 ]

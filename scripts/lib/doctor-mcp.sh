@@ -113,12 +113,28 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
     _dm_cache_put ws-roots "$pwd_c" "$r2" "$r3"
   fi
   r1=$pwd_c
+  # A root that CONTAINS $HOME (a cwd of /Users, C:\ or / itself) is no project
+  # boundary either: taking it would put ~/.headroom-venv, ~/.local/bin and every
+  # user-level install "inside the workspace". Drop such roots up front.
+  local r kept=""
+  for r in "$r1" "$r2" "$r3"; do
+    { [ -z "$r" ] || [ "$r" = / ]; } && continue
+    case $r in /[A-Za-z]) continue ;; esac    # an MSYS drive root
+    a=$home
+    while :; do
+      [ "$a" -ef "$r" ] && continue 2
+      [ "$a" = / ] || [ -z "$a" ] && break
+      a=${a%/*}; [ -n "$a" ] || a=/
+    done
+    kept="$kept$r
+"
+  done
   a=$d
   while [ -n "$a" ]; do
-    for root in "$r1" "$r2" "$r3"; do
-      { [ -z "$root" ] || [ "$root" = / ] || [ "$root" -ef "$home" ]; } && continue
+    while IFS= read -r root; do
+      [ -n "$root" ] || continue
       [ "$a" -ef "$root" ] && return 0
-    done
+    done <<< "$kept"
     [ "$a" = / ] && break
     a=${a%/*}; [ -n "$a" ] || a=/
   done

@@ -130,6 +130,20 @@ if [ ! -x "$HCAT" ]; then
   legacy=1
 fi
 [ -x "$HCAT" ] || exit 0
+sid=$(printf '%s' "$in" | jq -r '.session_id // "unknown"' 2>/dev/null) || sid="unknown"
+[ -n "$sid" ] || sid="unknown"
+
+# Escape hatch: deny each file only once per session; a retry passes. Checked
+# BEFORE any engine or eligibility spawn below, so a retry costs nothing.
+state="$STATE_DIR/session-$sid.gate"
+if [ -f "$state" ] && grep -qFx -- "$fp" "$state" 2>/dev/null; then
+  exit 0
+fi
+gate_remember() {  # record $fp for this session: later Reads of it pass at once
+  mkdir -p "$STATE_DIR" 2>/dev/null && { printf '%s\n' "$fp" >> "$state"; } 2>/dev/null
+  return 0
+}
+
 # Pick the first IMPORTABLE candidate, not merely the first EXECUTABLE one --
 # doctor.sh check 2 has always walked the list this way, and resolve_engine_python
 # stops at the first -x hit. A stray `python` beside the `headroom` console script
@@ -214,8 +228,12 @@ else
   # (it tripped the gate), and a Read must never hang on its eligibility check.
   # Any answer but a clean 0 -- including an older hcat that rejects the flag
   # with its usage error -- lets the Read through.
+  # (ER_JQ_TIMEOUT bounds the whole hcat --toon-check run -- the jq parse inside
+  #  it is what the knob always meant.) A check that outran its bound is not
+  #  retried on every later Read of the same large file: remember it and pass.
   if type _er_bounded >/dev/null 2>&1; then
-    _er_bounded "${ER_JQ_TIMEOUT:-5}" "$HCAT" --toon-check "$fp" >/dev/null 2>&1 || exit 0
+    _er_bounded "${ER_JQ_TIMEOUT:-5}" "$HCAT" --toon-check "$fp" >/dev/null 2>&1; _tc=$?
+    if [ "$_tc" -ne 0 ]; then [ "$_tc" -eq 124 ] && gate_remember; exit 0; fi
   else
     # a flat legacy copy without the lib: a timeout binary if there is one,
     # else fail OPEN (let the Read through) rather than parse unbounded
@@ -224,17 +242,7 @@ else
   fi
 fi
 
-sid=$(printf '%s' "$in" | jq -r '.session_id // "unknown"' 2>/dev/null) || sid="unknown"
-[ -n "$sid" ] || sid="unknown"
-
-# Escape hatch: deny each file only once per session; a retry passes.
-state="$STATE_DIR/session-$sid.gate"
-if [ -f "$state" ] && grep -qFx -- "$fp" "$state" 2>/dev/null; then
-  exit 0
-fi
-if mkdir -p "$STATE_DIR" 2>/dev/null; then
-  { printf '%s\n' "$fp" >> "$state"; } 2>/dev/null || true
-fi
+gate_remember
 
 kb=$(( size / 1024 ))
 # Install-aware pointer: the plugin layout has hcat on Bash PATH; a legacy
