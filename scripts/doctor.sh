@@ -469,40 +469,48 @@ mcp_entry_runs() {  # mcp_entry_runs <command> <args-fn> <env-fn> — a register
   _start_probe ${e[@]+"${e[@]}"} -- "$1" ${a[@]+"${a[@]}"}
 }
 _start_probe() {  # _start_probe [KEY=VALUE...] -- <cmd> [args...] — it starts (with --help) within the bound
-  # An entry's env block can hold secrets (API keys): those are EXPORTED in a
-  # subshell, never put on argv, where `ps` would show them to other local users.
-  # Only the loader/search-path variables stay on the `env` argv, so they reach
-  # the probed command but never the timeout/watchdog wrapper itself (a PATH
-  # without coreutils would otherwise leave the probe unbounded).
-  # Every local here is _sp_-prefixed and that prefix is never exported: an
-  # entry key must not be able to overwrite the bound or the argv list.
-  local -a _sp_e=() _sp_argv=(); local _sp_kv _sp_k _sp_t=${DOCTOR_SHIM_RUNS_TIMEOUT:-5}
+  # The entry's env block reaches ONLY the probed command: it is written to a
+  # private (0600) file and loaded by a small bash that runs INSIDE the bound,
+  # just before it execs the command. The doctor's own shell and the timeout /
+  # watchdog wrapper never see it -- so no entry key (a bound variable, IFS,
+  # EXECIGNORE, PATH, ...) can widen or break the bound -- and the values are
+  # exported, never put on argv, where `ps` would show them to other users.
+  # (A key that is not a shell identifier can only travel as an `env` arg.)
+  # The command itself is started through `sh -c 'exec "$0" "$@"'`, so a path
+  # containing `=` is never read by `env` as one more assignment.
+  local -a _sp_e=(); local _sp_t=${DOCTOR_SHIM_RUNS_TIMEOUT:-5} _sp_f _sp_env _sp_sh _sp_bash
   while [ $# -gt 0 ] && [ "$1" != -- ]; do _sp_e+=("$1"); shift; done
   shift
-  # the bound is fixed BEFORE the entry's env is exported: an entry must not be
-  # able to widen the doctor's own probe window
   (
     export HEADROOM_UPDATE_CHECK=off HF_HUB_OFFLINE=1
     # Git Bash rewrites POSIX-looking ARGS (/c -> C:/) when it starts a native
     # exe; Claude Code passes them verbatim, so the probe must too (as mcp_add)
     export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-    for _sp_kv in ${_sp_e[@]+"${_sp_e[@]}"}; do
-      _sp_k=${_sp_kv%%=*}
-      case $_sp_k in
-        # never exported into THIS shell (they reach the probed command through
-        # the env argv instead): the doctor's own knobs and the bound helper's,
-        # this function's locals, and the names bash itself acts on
-        DOCTOR_*|ER_*|_ER_*|_sp_*|IFS|BASH*|SHELLOPTS|ENV|CDPATH|GLOBIGNORE|PS4|POSIXLY_CORRECT)
-          _sp_argv+=("$_sp_kv") ;;
-        [Pp][Aa][Tt][Hh]|LD_*|DYLD_*) _sp_argv+=("$_sp_kv") ;;
-        '') ;;
-        [0-9]*|*[!A-Za-z0-9_]*) _sp_argv+=("$_sp_kv") ;;   # not an identifier: `env` still passes it
-        *) # shellcheck disable=SC2163  # $_sp_kv is a whole KEY=VALUE pair, exported as such
-           export "$_sp_kv" ;;
-      esac
-    done
-    run_bounded "$_sp_t" \
-      env ${_sp_argv[@]+"${_sp_argv[@]}"} "$@" --help >/dev/null 2>&1
+    _sp_env=$(command -v env) && _sp_sh=$(command -v sh) || exit 1
+    if [ "${#_sp_e[@]}" -eq 0 ]; then
+      # shellcheck disable=SC2016  # the script is for the trampoline sh
+      run_bounded "$_sp_t" "$_sp_sh" -c 'exec "$0" "$@"' "$@" --help >/dev/null 2>&1
+      exit $?
+    fi
+    _sp_bash=$(command -v bash) || exit 1
+    _sp_f=$(umask 077; mktemp "${TMPD:-${TMPDIR:-/tmp}}/probe-env.XXXXXX") || exit 1
+    # shellcheck disable=SC2064  # expand the path now
+    trap "rm -f '$_sp_f'" EXIT
+    printf '%s\0' "${_sp_e[@]}" > "$_sp_f"
+    # The loader keeps everything it needs in its POSITIONAL parameters, which an
+    # exported entry key cannot overwrite: "$@" = env, [non-identifier pairs],
+    # sh -c 'exec "$0" "$@"', cmd, args, --help. A key starting with `-` would be
+    # read by env as an option, so it is dropped.
+    # shellcheck disable=SC2016  # the script is for the loader bash
+    run_bounded "$_sp_t" "$_sp_bash" -c '
+      while IFS= read -r -d "" kv; do
+        case ${kv%%=*} in
+          ""|-*) ;;
+          [0-9]*|*[!A-Za-z0-9_]*) set -- "$1" "$kv" "${@:2}" ;;
+          *) export "$kv" 2>/dev/null || set -- "$1" "$kv" "${@:2}" ;;
+        esac
+      done < "$0"
+      exec "$@"' "$_sp_f" "$_sp_env" "$_sp_sh" -c 'exec "$0" "$@"' "$@" --help >/dev/null 2>&1
   )
 }
 shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just resolves

@@ -208,9 +208,16 @@ else
   # jq being installed proves nothing about THIS file: bin/hcat's toon-lite tier
   # renders only a uniform array of flat objects and exits 3 on anything else
   # (CSV, logs, nested JSON). Ask the same question hcat will, or let it through.
-  jq -e 'type=="array" and length>1
+  # Bounded like every other spawn on this path: the file is large by definition
+  # (it tripped the gate), and a Read must never hang on its eligibility check.
+  toon_q='type=="array" and length>1
          and all(.[]; type=="object" and (to_entries | all(.value | (type=="object" or type=="array") | not)))
-         and ((.[0] | keys_unsorted) as $k | all(.[]; keys_unsorted == $k))' "$fp" >/dev/null 2>&1 || exit 0
+         and ((.[0] | keys_unsorted) as $k | all(.[]; keys_unsorted == $k))'
+  if type _er_bounded >/dev/null 2>&1; then
+    _er_bounded "${ER_JQ_TIMEOUT:-5}" jq -e "$toon_q" "$fp" >/dev/null 2>&1 || exit 0
+  else
+    jq -e "$toon_q" "$fp" >/dev/null 2>&1 || exit 0
+  fi
 fi
 
 sid=$(printf '%s' "$in" | jq -r '.session_id // "unknown"' 2>/dev/null) || sid="unknown"
