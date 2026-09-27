@@ -406,15 +406,29 @@ sl_base_command() {  # the command check 7 --fix would chain ahead of the badge 
 | (\$base.command // \"\")" "$SETTINGS" 2>/dev/null | tr -d '\r'   # a native jq.exe writes CRLF
 }
 sl_native_syntax() {  # sl_native_syntax <cmd> — written for a non-POSIX spawner (a \ path, %VAR%)
-  # %NAME% only, NAME of 2+ characters: a bare % is bash-legal (date +%H:%M,
-  # printf '%s'), and so are ADJACENT one-letter specifiers (date +%Y%m%d reads
-  # as %Y% ...); Windows environment variable names are never one letter
-  local re='%[A-Za-z_][A-Za-z0-9_]+%'
+  local c=$1 t n
   # A native PATH, not every backslash: printf '\n' and sed 's/\s//' are
-  # bash-legal. Drive-qualified (C:\...), UNC (\\host\...) or dot-relative (.\x).
-  local rp='(^|[^A-Za-z0-9])[A-Za-z]:\\|\\\\[A-Za-z0-9]|(^|[[:space:]"'"'"'=])\.{1,2}\\'
-  [[ $1 =~ $rp ]] && return 0
-  [[ $1 =~ $re ]]
+  # bash-legal. At a token start: drive-qualified (C:\Users), UNC (\\host\...),
+  # dot- or home-relative (.\x, ~\x); and, outside quotes, a backslash BETWEEN
+  # path characters (scripts\sl.js).
+  local rp='(^|[[:space:]"'"'"'=])([A-Za-z]:\\[A-Za-z0-9_.$ -]|\\\\[A-Za-z0-9]|(\.{1,2}|~)\\)'
+  local rr='[A-Za-z0-9_.-]\\[A-Za-z0-9_.-]'
+  [[ $c =~ $rp ]] && return 0
+  t=$(printf '%s' "$c" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
+  [[ $t =~ $rr ]] && return 0
+  # %NAME% as its own token: a start/space/quote/=/slash before it and an
+  # end/space/quote/;/slash after it (node %APPDATA%/x, "%USERPROFILE%\x"), with a
+  # NAME of 2+ characters that is not one letter plus underscores. Runs of
+  # strftime/printf specifiers (date +%Y%m%d, +%Y-%m-%dT%H:%M, %d_%H,
+  # --format=%an%n, printf '%s_%s') are bash-legal and never match.
+  local re='(^|[[:space:]"'"'"'=/\\])%([A-Za-z_][A-Za-z0-9_]+)%($|[[:space:]"'"'"';/\\])'
+  t=$c
+  while [[ $t =~ $re ]]; do
+    n=${BASH_REMATCH[2]}
+    [[ $n =~ ^[A-Za-z]_+$ ]] || return 0
+    t=${t#*"${BASH_REMATCH[0]}"}
+  done
+  return 1
 }
 cli_in_workspace() {  # cli_in_workspace <cli> — exit 0 when <cli> must NOT be persisted globally
   # The shim (2b) and the user-scoped registration (2c) outlive this project:
@@ -430,11 +444,26 @@ cli_in_workspace() {  # cli_in_workspace <cli> — exit 0 when <cli> must NOT be
   t=$(_cli_canon "$(real_file "$c")") || return 0
   under_workspace "$(dirname "$t")"
 }
+mcp_cmd_kind() {  # mcp_cmd_kind <registered command> — none | abs | rel | bare
+  # abs: a path no project file can shadow (a network-share spelling counts: --fix
+  # itself writes one when the engine lives on a share). rel: resolved against the
+  # project -- any relative path, and a bare name on Windows, which is searched
+  # cwd-first. bare: a name looked up on PATH only (POSIX).
+  case $1 in
+    '') echo none ;;
+    /*|[A-Za-z]:[\\/]*|[\\/][\\/]*) echo abs ;;
+    */*|*\\*) echo rel ;;
+    *) if is_windows; then echo rel; else echo bare; fi ;;
+  esac
+}
 mcp_user_entry_alive() {  # a user-scoped headroom entry exists and starts (or is merely slow)
   local c rc
-  c=$(mcp_user_cmd); [ -n "$c" ] || return 1
-  case $c in /*|[A-Za-z]:[\\/]*|[\\/][\\/]*) c=$(unix_path "$c") ;; */*|*\\*) return 1 ;;
-    *) is_windows && return 1 ;; esac
+  c=$(mcp_user_cmd)
+  case $(mcp_cmd_kind "$c") in
+    abs)  c=$(unix_path "$c") ;;
+    bare) ;;
+    *)    return 1 ;;
+  esac
   mcp_entry_runs "$c" mcp_user_args mcp_user_env; rc=$?
   [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]
 }
@@ -456,15 +485,17 @@ foreign_cli_hint() {  # foreign_cli_hint <cli> — how to stop resolving an in-p
        && case $c in "${uvc%/x}"/*) true ;; *) false ;; esac; then
     how="unset UV_TOOL_DIR"
   elif same_file "$(dirname "$1")" "$VENV_DIR/bin" || same_file "$(dirname "$1")" "$VENV_DIR/Scripts"; then
-    how="point DOCTOR_VENV_DIR outside this project"
+    how="unset DOCTOR_VENV_DIR (or point it at the venv created below)"
   elif pc=$(command -v headroom 2>/dev/null) && same_file "$pc" "$1"; then
     how="take $(dirname "$1") off PATH"
   else
     how="stop pointing the engine settings (HCAT_PYTHON, UV_TOOL_DIR, PATH, DOCTOR_VENV_DIR) into this project"
   fi
-  # the default venv, unless it too sits inside this project
-  if venv_c=$(_cli_canon "$venv/x") && under_workspace "$(dirname "$venv_c")"; then venv="${HOME:-~}/.headroom-venv"; fi
-  if venv_c=$(_cli_canon "$venv/x") && under_workspace "$(dirname "$venv_c")"; then
+  # the default venv, unless it too is inside this project (or relative, which
+  # resolves against it); then the HOME one; if that is no better, uv only
+  _hint_venv_ok() { venv_c=$(_cli_canon "$1") && ! under_workspace "$venv_c"; }
+  _hint_venv_ok "$venv" || venv="${HOME:-}/.headroom-venv"
+  if ! _hint_venv_ok "$venv"; then
     printf '%s, then install the engine outside it: uv tool install headroom-ai' "$how"; return
   fi
   local mk
@@ -1172,6 +1203,10 @@ if [ "$mcp_need" -eq 1 ]; then
     # nothing (live) registered, and the only CLI there is must never be
     # registered: "install claude, then --fix" would only reach the same refusal
     mcp_refuse_foreign
+  elif ! command -v claude >/dev/null 2>&1 && mcp_user_entry_alive; then
+    # the entry is judged by spawning it, which needs no `claude` CLI
+    say ok "MCP registered as a user-scoped server ($(mcp_user_cmd)) — $mcp_why"
+    mcp_state=ok
   elif ! command -v claude >/dev/null 2>&1; then
     if [ -n "$mcp_abs" ]; then
       mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: $(mcp_add_hint "$mcp_abs")"
@@ -1204,16 +1239,7 @@ if [ "$mcp_need" -eq 1 ]; then
     # against the project on every OS (both: "rel", shadowable). A bare
     # `headroom` on POSIX cannot start here (2c runs there only off PATH), so it
     # falls through as a dead entry.
-    mcp_old_kind=none
-    if [ -n "$mcp_old" ]; then
-      case $mcp_old in
-        # a network-share spelling is absolute too: --fix itself writes one when
-        # the engine lives on a share, and must then recognise its own entry
-        /*|[A-Za-z]:[\\/]*|[\\/][\\/]*) mcp_old_kind=abs ;;
-        */*|*\\*)           mcp_old_kind=rel ;;
-        *) if is_windows; then mcp_old_kind=rel; else mcp_old_kind=bare; fi ;;
-      esac
-    fi
+    mcp_old_kind=$(mcp_cmd_kind "$mcp_old")
     mcp_old_rc=1
     case $mcp_old_kind in
       abs)  mcp_entry_runs "$(unix_path "$mcp_old")" mcp_user_args mcp_user_env; mcp_old_rc=$? ;;
@@ -1788,7 +1814,7 @@ CHEOF
   elif is_windows && sl_base_now=$(sl_base_command) && [ -n "$sl_base_now" ] && sl_native_syntax "$sl_base_now"; then
     # the same refusal --fix makes (see the WINDOWS MERGE note): never offer a
     # `fixable` that --fix will only FAIL
-    say FAIL "statusLine present without the headroom badge, and your command ($sl_base_now) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), then run --fix"
+    say FAIL "the headroom badge is not wired, and your own status-line command ($sl_base_now) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), then run --fix"
   elif [ -n "$sl" ]; then
     say fixable "statusLine present without the headroom badge — --fix appends it, preserving your command under _headroomStatusLineBackup"
   else

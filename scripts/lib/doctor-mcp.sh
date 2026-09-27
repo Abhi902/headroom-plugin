@@ -118,11 +118,13 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # user-level install "inside the workspace". Drop such roots up front.
   # Only a root that really holds a home: never every drive root (a project at
   # E:\ with no home on it is still a project). On Windows the user's files also
-  # live under the NATIVE profile (USERPROFILE), which an MSYS HOME of /home/me
-  # does not reveal -- walk both.
+  # live under the NATIVE profile, which an MSYS HOME of /home/me does not
+  # reveal -- but take it from the OS (cygpath -F 40, CSIDL_PROFILE), NEVER from
+  # $USERPROFILE: that is environment, and a project's settings env could point
+  # it at the project to erase this very boundary.
   local r h b hs kept="" uprof=""
-  if [ -n "${USERPROFILE:-}" ] && command -v unix_path >/dev/null 2>&1; then
-    uprof=$(unix_path "$USERPROFILE" 2>/dev/null) || uprof=""
+  if type is_windows >/dev/null 2>&1 && is_windows && type _er_cygpath >/dev/null 2>&1; then
+    uprof=$(_er_cygpath -F 40 2>/dev/null) || uprof=""
     case $uprof in /*) ;; *) uprof="" ;; esac
   fi
   # a RELATIVE HOME (HOME=. from a project's settings env) is canonicalised
