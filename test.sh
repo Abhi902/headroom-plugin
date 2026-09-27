@@ -5467,6 +5467,30 @@ got=$(bash -c ". '$ER'; eval \"\$(sed -n '/^_sl_quote_safe() {/,/^}/p' '$DOCTOR'
 b'; do _sl_quote_safe \"\$v\" && printf y || printf n; done")
 check_eq "w28f: _sl_quote_safe passes paths and refuses the five active characters" "yynnnnn" "$got"
 
+# --- w28g. REGRESSION (PR #10 review round 17). An existing user-scoped entry is
+# only kept when a project file cannot shadow it: a bare name on Windows (searched
+# cwd-first) or a relative path (resolved against the project) is replaced, never
+# reported as "registered by absolute path".
+W28G="$W28/g"; mkdir -p "$W28G"
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"headroom",args:["mcp","serve"]}}}' > "$W28G/bare.json"
+w28g_run() {  # w28g_run <claude.json> <os> <path> [--fix]
+  env -u HCAT_PYTHON DOCTOR_OS="$2" HEADROOM_CLAUDE_JSON="$1" PATH="$3" \
+      DOCTOR_SETTINGS="$W21/s.json" DOCTOR_CLAUDE_DIR="$W21/cd" DOCTOR_VENV_DIR="$W21/venv" \
+      DOCTOR_SHIM_DIR="$W21/shim" HEADROOM_STATE_DIR="$W21/state" bash "$DOCTOR" ${4:+"$4"} 2>&1
+}
+out=$(cd "$W28G" && w28g_run "$W28G/bare.json" windows "$W21/stub:$W21/venv/bin:/usr/bin:/bin")
+check "w28g: a bare-name user entry on Windows is reported as shadowable" "which is not an absolute path" "$out"
+check_absent "w28g: ...never as registered by absolute path" "MCP registered by absolute path (headroom)" "$out"
+out=$(cd "$W28G" && w28g_run "$W28G/bare.json" windows "$W21/stub:$W21/venv/bin:/usr/bin:/bin" --fix)
+check "w28g: --fix replaces it with the absolute CLI" "(replaced headroom, which a project file could shadow)" "$out"
+check_eq "w28g: ...and the stored command is now absolute" \
+         "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command' "$W28G/bare.json")"
+# a RELATIVE command is shadowable on POSIX too (it resolves against the cwd)
+jq -n '{mcpServers:{headroom:{type:"stdio",command:"venv/bin/headroom",args:["mcp","serve"]}}}' > "$W28G/rel.json"
+mkdir -p "$W28G/venv/bin"; cp "$W21/venv/bin/headroom" "$W28G/venv/bin/headroom"
+out=$(cd "$W28G" && w28g_run "$W28G/rel.json" unix "$W21/stub:/usr/bin:/bin")
+check "w28g: a relative user entry on POSIX is reported as shadowable" "which is not an absolute path" "$out"
+
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
 [ "$FAIL" -eq 0 ]

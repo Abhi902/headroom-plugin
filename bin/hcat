@@ -7,8 +7,11 @@
 # offset/limit. Appends a "hcat" compression event to headroom's shared session
 # stats file so the statusline and headroom_stats count the savings.
 #
-# Exit codes: 0 ok · 2 usage/missing file · 3 headroom python not found
-#             4 compression failed
+# Exit codes: 0 ok (incl. a TOON-lite reformat) · 2 usage/missing file
+#             3 no engine python and no viable TOON-lite reformat
+#             4 the engine is broken: it resolved but cannot import
+#               headroom.compress (records `engine`), or it raised while
+#               compressing (records `runtime`)
 #
 # Python resolution lives in scripts/lib/engine-resolve.sh (one definition for
 # every entry point): $HCAT_PYTHON → sibling python of `headroom` on PATH → its
