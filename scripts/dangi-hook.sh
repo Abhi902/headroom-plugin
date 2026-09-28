@@ -39,7 +39,7 @@ in=$(cat)
 tool=$(printf '%s' "$in" | jq -r '.tool_name // empty' 2>/dev/null) || exit 0
 tool=$(printf '%s' "$tool" | tr -cd 'A-Za-z0-9_.-')   # defensive: tool name feeds JSON + AppleScript
 [ -n "$tool" ] || exit 0
-case "$tool" in "$HPREFIX"*) exit 0 ;; esac
+case "$tool" in "$HPREFIX"*|mcp__plugin_*_headroom__*) exit 0 ;; esac   # user-registered or the plugin's namespaced MCP
 # Edits/writes echo the code being changed; web results are prose — never
 # compression targets. Neither are image responses (base64, not text).
 case "$tool" in Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch) exit 0 ;; esac
@@ -217,7 +217,7 @@ if [ "$nudge" -eq 1 ]; then
   elif [ "$eff" -ge "$HUGE_BYTES" ] 2>/dev/null; then
     printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"🤖 Dangi: that %s output is ~%s KB — too large to compress in place, and it is not traceable to a file on disk.%s Re-derive it inside a disposable subagent (Agent tool) that fetches/produces and analyzes it, returning only conclusions or an hcat-compressed digest — the raw bytes then never enter this context."}}' "$tool" "$kb" "$batch_note"
   else
-    printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"🤖 Dangi: that %s output was ~%s KB and was not compressed.%s If it came from a file on disk, run hcat \\"%s\\" via Bash next time (plugin installs have it on PATH; legacy installs use ~/.claude/hcat) — raw bytes never enter context. If it is not file-backed but structured/repetitive, use mcp__headroom__headroom_compress, or read+compress it inside a disposable subagent that returns only the compressed text."}}' "$tool" "$kb" "$batch_note" "$target"
+    printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"🤖 Dangi: that %s output was ~%s KB and was not compressed.%s If it came from a file on disk, run hcat \\"%s\\" via Bash next time (plugin installs have it on PATH; legacy installs use ~/.claude/hcat) — raw bytes never enter context. If it is not file-backed but structured/repetitive, use the headroom_compress tool that is connected (mcp__plugin_headroom-usage-indicator_headroom__headroom_compress from the plugin, or mcp__headroom__headroom_compress when registered by hand), or read+compress it inside a disposable subagent that returns only the compressed text."}}' "$tool" "$kb" "$batch_note" "$target"
   fi
 fi
 exit 0

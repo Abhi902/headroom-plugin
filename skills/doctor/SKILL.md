@@ -8,14 +8,18 @@ description: Use when the headroom setup needs a health check or repair — the 
 ## Overview
 
 `scripts/doctor.sh` validates the whole headroom setup end-to-end: jq, the
-headroom engine python (`$HCAT_PYTHON` → sibling of `headroom` on PATH → the
-`headroom` console script's shebang interpreter, which covers pip --user and
-pipx layouts → `~/.headroom-venv`), a real `bin/hcat` smoke compression of a
+headroom engine python (`$HCAT_PYTHON` → sibling `python`/`python.exe` of
+`headroom` on PATH → the `headroom` console script's shebang interpreter, which
+covers pip --user and pipx layouts and is skipped for MZ/PE launchers such as uv
+trampolines and pip's `headroom.exe` → the `uv tool` dir → `~/.headroom-venv` in
+either the `bin/` or the `Scripts/` layout), a real `bin/hcat` smoke compression of a
 generated ~26 KB JSON, the plugin-native `hooks/hooks.json` (SessionStart,
-PreToolUse, PostToolUse, Stop, SessionEnd), the bundled
-`.mcp.json` (parses and its launcher is executable **exactly as spawned** —
-MCP commands run without a shell, so a command carrying literal quotes is
-broken and `--fix` unquotes it in place), the bundled
+PreToolUse, PostToolUse, Stop, SessionEnd), the bundled `.mcp.json` (parses
+and names the bare `headroom mcp serve` command — since v2.8 there is no
+launcher script, because MCP stdio commands are spawned without a shell and
+Windows cannot run a `.sh` that way), that `headroom` actually resolves on
+PATH (check 2b — the bundled MCP is spawned by name; `--fix` shims the
+resolved CLI into `~/.local/bin` and re-verifies), the bundled
 `data/model-prices.json` badge price table (parses; `--fix` copies it beside the
 statusline copy), that
 `~/.claude/settings.json` is a single valid JSON document, legacy pre-plugin
@@ -26,18 +30,35 @@ directory with `DOCTOR_PROJECT_DIR`, default the current working directory) —
 they all double-fire alongside the plugin-native hooks — the statusLine
 wiring (including a doctor-blessed custom, hand-wired path, not just the
 canonical `~/.claude/headroom-statusline.sh` copy), that the wired copy
-matches the plugin's script **and that its runtime deps (`attribution.jq`,
+matches the plugin's script **and that the installed badge deps (`attribution.jq`,
 `headroom-state.sh`) are present and current** — under `~/.claude/lib/`, or,
 for the legacy full-manual install layout, as flat siblings next to the copy
-(without them the badge is stuck at a permanent "idle" showing zero savings),
+(without them the badge is stuck at a permanent "idle" showing zero savings) —
+plus the shared engine resolver `engine-resolve.sh`, which is not a badge dep and
+is therefore checked (and provisioned) under `~/.claude` only, wherever the
+status-line copy itself happens to live,
 stale pre-plugin script copies in `~/.claude`, and whether a recorded
 ambient-health failure (the `last-error` file that flips the statusline badge
-to "broken") can now be cleared.
+to "broken") can now be cleared. On Windows the doctor also confirms it is
+running under Git Bash (a stale `CLAUDE_CODE_GIT_BASH_PATH` is `FAIL`) and
+writes the status-line command with explicit Windows paths (`"C:\…\bash.exe"
+"C:\…\headroom-statusline.sh"`; the bash is never one found inside the current
+project — if no Git for Windows bash exists outside it, `--fix` FAILs and asks for
+Git for Windows or `CLAUDE_CODE_GIT_BASH_PATH` rather than wire anything; when it has to merge with a status line you
+already had, the chain lives in `~/.claude/headroom-statusline-chain.sh` so the
+stored command keeps that two-token shape).
+It also `FAIL`s when an executable named `headroom` (`.com`, `.exe`, `.bat`,
+`.cmd` or extensionless) sits in the project directory — on Windows a bare
+command name resolves from the spawning process's current directory *before*
+PATH, so that file, not the installed engine, is what the bundled MCP would
+spawn.
 
 A companion SessionStart hook, `scripts/session-probe.sh`, runs a much
 lighter version of this check automatically every session (jq present, `hcat`
-executable, engine python resolvable by existence only, price table parses)
-and stays silent when healthy — this doctor is the deeper, on-demand check
+executable, the shared libs present, engine python resolvable by existence
+only, price table parses, plus — v2.8 — a stale `CLAUDE_CODE_GIT_BASH_PATH`,
+a nudge when the engine resolves but `headroom` is not on PATH, and the Windows
+project-directory name hijack described above) and stays silent when healthy — this doctor is the deeper, on-demand check
 Claude runs when something actually needs diagnosis or repair.
 
 Invoked as `/headroom-usage-indicator:doctor`.
@@ -65,8 +86,10 @@ Each line is aligned `<status> - <what>`:
   or a broken exported `HCAT_PYTHON` are reported here — the doctor refuses
   to edit settings or bootstrap around them.
 - `fixable` — the doctor can repair this itself with `--fix`:
-  - engine missing → bootstrap `python3 -m venv ~/.headroom-venv` +
-    `pip install "headroom-ai[all]"`
+  - engine missing → bootstrap a venv at `~/.headroom-venv` (`python3`,
+    `python`, or `py -3` — whichever works; `bin/` or `Scripts/` layout) +
+    `pip install "headroom-ai[all]"` (falling back to plain `headroom-ai` when
+    the extras fail to build), then shim `headroom` onto PATH as above
   - legacy hook entries → removed from `~/.claude/settings.json`,
     `~/.claude/settings.local.json`, and the current project's
     `.claude/settings.json` / `.claude/settings.local.json` (a timestamped
@@ -75,7 +98,10 @@ Each line is aligned `<status> - <what>`:
     `~/.claude/headroom-statusline.sh` and settings.json pointed at it
     (backup first); merge-aware: an existing non-headroom statusLine command
     is preserved under `_headroomStatusLineBackup` and chained ahead of the
-    badge, never clobbered
+    badge, never clobbered. On Windows a command written for the native
+    spawner (a `\` path or a `%VAR%`) cannot be chained through bash, so the
+    merge is refused with a `FAIL` (plain run and `--fix` alike) and
+    settings.json is left untouched
   - statusLine wired but script missing → `scripts/statusline.sh` re-copied to
     `~/.claude/headroom-statusline.sh` (settings already point at it, in any
     spelling — absolute or tilde), with its `lib/` deps re-provisioned (the
@@ -94,14 +120,39 @@ Each line is aligned `<status> - <what>`:
     it's missing too, it's re-copied first, same as above); doctor never
     reports this wiring as healthy even when the file is present, since the
     wired command itself would still never resolve it
-  - quoted `.mcp.json` command → literal quotes around `${CLAUDE_PLUGIN_ROOT}`
-    stripped in place (timestamped `.bak.*` first) — MCP stdio commands are
-    spawned without a shell, so the quotes 404 the launcher and the bundled
-    server never connects (the `/plugin` ✗)
+  - headroom CLI supplied by the project itself (a relative path, or one whose
+    link or target is inside the current project — `HCAT_PYTHON`,
+    `UV_TOOL_DIR` or PATH can come from a project's settings) → a `FAIL`,
+    never a fix: it is not shimmed and not registered as a user-scoped MCP,
+    because both outlive the project. The line says which setting to undo and
+    where to install the engine instead. An existing user-scoped registration
+    that already works is kept either way.
+  - headroom CLI not on PATH (engine found, bare name unresolved) → the
+    resolved `headroom` is shimmed into `~/.local/bin` (symlink; on Windows a
+    copy named `headroom.exe`), then re-checked by name **and by execution** —
+    three `FAIL`s can come out of that re-check instead of a fix: (1) on
+    Windows, the shim landed but `~/.local/bin` is not on PATH — the line
+    carries the Windows user Path steps (on macOS/Linux this is only a `note`:
+    check 2c registers the engine by absolute path instead, and a later plain
+    `/doctor` keeps it a `note`, never a `fixable`);
+    (2) the shim resolves by name but will not start (`headroom --help` fails),
+    e.g. a uv trampoline copied away from the interpreter it resolves relative
+    to — the doctor deletes the shim it just wrote (so the next run diagnoses
+    the engine again instead of greening a dead file) and tells you to reinstall
+    the engine; (3) a `headroom` that was *already* on PATH does not start —
+    same reason, same remedy, but nothing is deleted because the file is not
+    the doctor's. The doctor never edits rc files or the registry
   - stale statusline copy → refreshed from the plugin's `scripts/statusline.sh`
-  - missing/stale statusline lib deps → `attribution.jq` and
-    `headroom-state.sh` (re)installed into `~/.claude/lib/`; these are what the
-    badge needs to attribute savings, so without them it silently reads zero
+  - missing/stale badge deps → `attribution.jq` and `headroom-state.sh`
+    (re)installed into `~/.claude/lib/`; they are what the badge needs to
+    attribute savings, so without them it silently reads zero. A custom-path
+    install is `FAIL` here, not `fixable` — the doctor detects its health but
+    never writes into it
+  - missing/stale shared engine resolver → `engine-resolve.sh` (re)installed
+    into `~/.claude/lib/`. It is reported on its own line because it is not a
+    badge dep: it is what a legacy flat install's `hcat`/hooks source before
+    their narrower inline fallback, so it is checked and provisioned under
+    `~/.claude` regardless of where the status-line copy lives
   - stale `~/.claude` copies → deleted, but only once plugin-native hooks are
     confirmed and no legacy entries remain in `settings.json`,
     `settings.local.json`, or the current project's settings — project-level
@@ -112,7 +163,10 @@ Each line is aligned `<status> - <what>`:
 - `note` — a supplementary caveat attached to the fixed/ok line just above it
   (e.g. that stale-copy deletion only scanned this project's `.claude`
   settings, not every project on disk); not counted toward the ok/fixable/
-  failed/skipped tally.
+  failed/skipped tally. Exception: a `note` that stands ALONE is the whole
+  result of its check — e.g. "the user-scoped headroom MCP … did not answer
+  within Ns" — so always relay it with its follow-up (re-run the doctor once
+  it has warmed up), even though it is not tallied.
 
 Summarize for the user in one or two sentences: what is healthy, what is
 broken, what the doctor could fix.
@@ -124,8 +178,11 @@ Never run `--fix` unprompted. If anything is `fixable`, list exactly what
 `~/.claude/settings.local.json`, and the current project's
 `.claude/settings.json` / `.claude/settings.local.json`, each with its own
 timestamped backup; may create a venv and run pip; may delete stale script
-copies; may rewrite the plugin's bundled `.mcp.json` in place to unquote its
-command, with its own timestamped backup; may re-copy the statusline script
+copies; may create or replace a `headroom` shim in `~/.local/bin` (symlink;
+`headroom.exe` copy on Windows); may write
+`~/.claude/headroom-statusline-chain.sh` when it merges an existing status line
+on Windows (the chain has to live in a file there, because the persisted
+command must stay a plain `"<bash.exe>" "<script>"` pair); may re-copy the statusline script
 plus its `lib/` deps and price table to `~/.claude` — both when wiring
 statusLine for the first time and when settings already point at a missing
 canonical copy; and may rewrite `statusLine.command` to an absolute path (same
@@ -142,6 +199,48 @@ If the user wants the project-settings scan pointed at a different directory
 than the current working one, set `DOCTOR_PROJECT_DIR` before running either
 command.
 
+**`--fix` may also register the engine as a user-scoped MCP by absolute path**
+via `claude mcp add -s user headroom -e HEADROOM_UPDATE_CHECK=off -e HF_HUB_OFFLINE=1 -- <engine path> mcp serve` (the name goes before `-e`, which is variadic).
+It does this on Windows, and on macOS/Linux only when `headroom` is not on PATH
+(the bundled bare-name entry cannot start there). This writes to the user's
+Claude Code MCP configuration, which is OUTSIDE `~/.claude/settings.json` and
+outside the plugin — list it when asking for consent. An existing entry is
+judged by its WHOLE registered command — args and env block included, as Claude
+Code spawns it — not by the launcher name alone. A user-scoped entry that cannot
+be shadowed (an absolute path, or a bare name on macOS/Linux) is left alone while
+it still starts; one that does not answer within the probe window (e.g. a first
+`uvx` run still downloading) is also left alone and reported as a `note` — too
+slow is not read as dead, so re-run the doctor once it has warmed up; one that
+plainly does not start, or that a project file could shadow (any relative path,
+or a bare name on Windows), is removed and re-added with the absolute engine path.
+A local-scoped `headroom` for the current project wins over the user-scoped one;
+the doctor reports a dead one with the `claude mcp remove headroom -s local`
+command but never removes it itself.
+Be accurate about what it achieves: it adds a SECOND server. On Windows the
+bundled bare-name entry is still spawned, so a `headroom.exe` in a project
+directory still runs — never tell the user this registration closes that. When
+the `claude` CLI is not on PATH, an existing user-scoped entry is still judged
+by starting it (`ok` when it starts, a `note` when it does not answer in time);
+only adding or replacing one needs the CLI, and that is skipped with a `note`
+(Windows) or reported with the PATH alternative (macOS/Linux).
+
+**If `--fix` still ends in a registration `FAIL` on macOS/Linux** (`headroom` is
+off PATH and no working MCP registration landed, or a dead local-scoped entry is
+spawned instead), the MCP is down: do not report the run as fixed. Relay the
+specific remedy printed on the `fixable`/`FAIL` line above it — the by-hand
+`claude mcp add ...` command it prints, `claude mcp remove headroom -s user` /
+`-s local` for a dead entry, or the one-line PATH edit — then offer to re-run
+`--fix` once the user has done it.
+
 All fixes are idempotent — a second `--fix` run changes nothing. After fixing,
 report the `fixed` lines back, and suggest one more plain doctor run if the
 engine was just bootstrapped (the hcat smoke test is skipped in the same run).
+
+**Whenever a `headroom CLI not on PATH` item was acted on — whether it ended
+`fixed` or `FAIL` — always tell the user Claude Code must be RESTARTED before
+headroom's MCP tools work again.** Reaching that check at all means the bundled
+MCP, which is spawned by the bare name `headroom` at session start, already
+failed to connect earlier in this same session; shimming the CLI cannot revive a
+connection that is already dead. Reporting "all fixed" without the restart leaves
+the user with a clean bill of health and a tool that still cannot be reached for
+the rest of the session.

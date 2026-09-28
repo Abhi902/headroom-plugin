@@ -22,6 +22,27 @@ _here="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
 for _sl in "$_here/lib/headroom-state.sh" "$_here/headroom-state.sh"; do
   [ -f "$_sl" ] && { . "$_sl"; break; }
 done
+# shellcheck disable=SC1090,SC1091
+for _er in "$_here/lib/engine-resolve.sh" "$_here/engine-resolve.sh"; do
+  [ -f "$_er" ] && { . "$_er"; break; }
+done
+type resolve_engine_python >/dev/null 2>&1 || resolve_engine_python() {  # partial legacy copy
+  # Deliberately NARROWER than scripts/lib/engine-resolve.sh: no uv tool dir and
+  # no shebang-interpreter tier. Keep the PATH-sibling lookup though — a flat
+  # install that lands here is exactly the pipx/uv population that needs it.
+  local c d
+  if [ -n "${HCAT_PYTHON:-}" ]; then printf '%s\n' "$HCAT_PYTHON"; return 0; fi
+  if d=$(command -v headroom 2>/dev/null) && [ -n "$d" ]; then
+    d=$(dirname "$d")
+    for c in "$d/python" "$d/python.exe"; do
+      [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+  fi
+  for c in "${HOME:-}/.headroom-venv/bin/python" "${HOME:-}/.headroom-venv/Scripts/python.exe"; do
+    [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
 type note_error >/dev/null 2>&1 || note_error() { :; }
 type canon_path >/dev/null 2>&1 || canon_path() { printf '%s' "$1"; }
 # Eligibility predicates come from the same lib (one definition shared with
@@ -109,11 +130,52 @@ if [ ! -x "$HCAT" ]; then
   legacy=1
 fi
 [ -x "$HCAT" ] || exit 0
-py=""
-if [ -n "${HCAT_PYTHON:-}" ]; then
-  py="$HCAT_PYTHON"
-elif [ -x "${HOME:-}/.headroom-venv/bin/python" ]; then
-  py="$HOME/.headroom-venv/bin/python"
+sid=$(printf '%s' "$in" | jq -r '.session_id // "unknown"' 2>/dev/null) || sid="unknown"
+[ -n "$sid" ] || sid="unknown"
+
+# Escape hatch: deny each file only once per session; a retry passes. Checked
+# BEFORE any engine or eligibility spawn below, so a retry costs nothing.
+state="$STATE_DIR/session-$sid.gate"
+if [ -f "$state" ] && grep -qFx -- "$fp" "$state" 2>/dev/null; then
+  exit 0
+fi
+gate_remember() {  # record $fp for this session: later Reads of it pass at once
+  mkdir -p "$STATE_DIR" 2>/dev/null && { printf '%s\n' "$fp" >> "$state"; } 2>/dev/null
+  return 0
+}
+
+# Pick the first IMPORTABLE candidate, not merely the first EXECUTABLE one --
+# doctor.sh check 2 has always walked the list this way, and resolve_engine_python
+# stops at the first -x hit. A stray `python` beside the `headroom` console script
+# (pyenv/asdf/mise shims, uv's default install, or ~/.local/bin once /doctor --fix
+# puts its own shim there) is executable but cannot import headroom, so the gate
+# recorded a broken badge and stopped denying while /doctor on the SAME machine
+# reported `ok - engine python`. Before this lib landed the gate only ever saw
+# $HCAT_PYTHON or ~/.headroom-venv, so a decoy could not reach it.
+# py_seen records that SOME candidate was executable. Without it, "every
+# candidate failed to import" and "there is no engine at all" both end with an
+# empty $py -- and the else branch below only exits 0 when `headroom` is absent
+# from PATH, so a broken-but-installed engine fell through and DENIED the Read
+# with no badge. The pre-lib code failed OPEN and recorded the outage; losing
+# that was strictly worse than the decoy bug this loop exists to fix.
+py=""; py_seen=""; py_validated=""
+if type resolve_engine_python_validated >/dev/null 2>&1; then
+  py=$(resolve_engine_python_validated); case $? in
+    # Status 0 means the resolver already ran the import probe, bounded -- EXCEPT
+    # for an HCAT_PYTHON override, which it returns authoritatively without
+    # probing. Only the probed case may skip the re-check below.
+    0) [ -z "${HCAT_PYTHON:-}" ] && py_validated=1 ;;
+    2) py_seen=$py; py="" ;;    # resolved but cannot import: an OUTAGE, not absence
+    *) py="" ;;                 # nothing installed: ordinary red-idle
+  esac
+else
+  py=$(resolve_engine_python) || py=""   # partial legacy copy: narrower lookup
+fi
+if [ -n "$py_seen" ]; then
+  # Fail OPEN and light the badge. Denying here would be worse than the decoy bug
+  # this resolution fixes: the user loses Reads with no idea why.
+  note_error engine "engine import failed ($py_seen) — gate failing open; run /headroom-usage-indicator:doctor"
+  exit 0
 fi
 if [ -n "$py" ]; then
   # A resolved-but-broken engine is a real outage the fail-open would otherwise
@@ -121,33 +183,67 @@ if [ -n "$py" ]; then
   # (An engine that was never installed is NOT recorded: that is the ordinary
   # red-idle state, not a breakage.)
   if [ ! -x "$py" ]; then
-    note_error engine "engine python not executable ($py) — gate failing open; run /doctor"
+    note_error engine "engine python not executable ($py) — gate failing open; run /headroom-usage-indicator:doctor"
     exit 0
   fi
   # A half-created venv passes -x yet cannot `import headroom.compress` (hcat
   # exits 4) — verify the import and fail OPEN (allow the Read) on a broken
   # engine. `.compress` also distinguishes the real headroom-ai package from
-  # a name-squatted `headroom` on PyPI (see doctor.sh/bin/hcat/mcp-launcher.sh).
-  # Only runs on the rare deny path, so the interpreter spawn is fine.
-  if ! "$py" -c 'import headroom.compress' >/dev/null 2>&1; then
-    note_error engine "engine import failed ($py) — gate failing open; run /doctor"
-    exit 0
+  # a name-squatted `headroom` on PyPI (see doctor.sh/bin/hcat).
+  #
+  # SKIP it when resolve_engine_python_validated already probed this exact
+  # candidate: this runs on every FIRST gated Read of a file (the per-session
+  # dedup above short-circuits retries), so repeating the resolver's own bounded
+  # probe doubled the spawns
+  # the shared resolver was introduced to bound. What is left -- an
+  # HCAT_PYTHON override, or the legacy narrow resolver -- is bounded too.
+  if [ -z "$py_validated" ]; then
+    if type _er_bounded >/dev/null 2>&1; then
+      _er_bounded "${ER_PY_TIMEOUT:-5}" "$py" -c 'import headroom.compress' >/dev/null 2>&1
+    else
+      "$py" -c 'import headroom.compress' >/dev/null 2>&1
+    fi
+    _gate_st=$?
+    # 124 = the probe outran its bound, not proof of a broken engine; treat it
+    # the way the resolver does and let the Read through on the engine we have.
+    if [ "$_gate_st" -ne 0 ] && [ "$_gate_st" -ne 124 ]; then
+      note_error engine "engine import failed ($py) — gate failing open; run /headroom-usage-indicator:doctor"
+      exit 0
+    fi
   fi
 else
+  # No interpreter resolved at all. Denying here would point the user at hcat,
+  # which without an engine exits 3 unless jq can carry the toon-lite tier --
+  # so only deny when that tier can actually deliver. `headroom` resolving on
+  # PATH is not enough: this PR's own Windows shim can put the CLI in a
+  # python-less ~/.local/bin, and the gate now shares hcat's broad resolver, so
+  # it already knows hcat will find no interpreter either.
   command -v headroom >/dev/null 2>&1 || exit 0
+  command -v jq >/dev/null 2>&1 || exit 0
+  # jq being installed proves nothing about THIS file: bin/hcat's toon-lite tier
+  # renders only a uniform array of flat objects that it shrinks by 5%, and exits
+  # 3 on anything else (CSV, logs, nested JSON, long-string rows). Ask hcat
+  # ITSELF (--toon-check) rather than a copy of its rule -- a copy had already
+  # drifted (it lacked the 5% test) and denied Reads hcat then refused.
+  # Bounded like every other spawn on this path: the file is large by definition
+  # (it tripped the gate), and a Read must never hang on its eligibility check.
+  # Any answer but a clean 0 -- including an older hcat that rejects the flag
+  # with its usage error -- lets the Read through.
+  # (ER_JQ_TIMEOUT bounds the whole hcat --toon-check run -- the jq parse inside
+  #  it is what the knob always meant.) A check that outran its bound is not
+  #  retried on every later Read of the same large file: remember it and pass.
+  if type _er_bounded >/dev/null 2>&1; then
+    _er_bounded "${ER_JQ_TIMEOUT:-5}" "$HCAT" --toon-check "$fp" >/dev/null 2>&1; _tc=$?
+    if [ "$_tc" -ne 0 ]; then [ "$_tc" -eq 124 ] && gate_remember; exit 0; fi
+  else
+    # a flat legacy copy without the lib: a timeout binary if there is one,
+    # else fail OPEN (let the Read through) rather than parse unbounded
+    t=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null) || exit 0
+    "$t" -k 2 5 "$HCAT" --toon-check "$fp" </dev/null >/dev/null 2>&1 || exit 0
+  fi
 fi
 
-sid=$(printf '%s' "$in" | jq -r '.session_id // "unknown"' 2>/dev/null) || sid="unknown"
-[ -n "$sid" ] || sid="unknown"
-
-# Escape hatch: deny each file only once per session; a retry passes.
-state="$STATE_DIR/session-$sid.gate"
-if [ -f "$state" ] && grep -qFx -- "$fp" "$state" 2>/dev/null; then
-  exit 0
-fi
-if mkdir -p "$STATE_DIR" 2>/dev/null; then
-  { printf '%s\n' "$fp" >> "$state"; } 2>/dev/null || true
-fi
+gate_remember
 
 kb=$(( size / 1024 ))
 # Install-aware pointer: the plugin layout has hcat on Bash PATH; a legacy
