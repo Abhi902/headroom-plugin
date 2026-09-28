@@ -30,7 +30,7 @@ set -u
 _hb="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
 # shellcheck disable=SC1090,SC1091
 # "$_hb/lib/..." is in the list because a flat ~/.claude install puts hcat at
-# ~/.claude/hcat while /doctor --fix provisions the libs into ~/.claude/lib/ —
+# ~/.claude/hcat while /headroom-usage-indicator:doctor --fix provisions the libs into ~/.claude/lib/ —
 # the same lib/-first shape hcat-gate.sh and session-probe.sh already use.
 for _sl in "$_hb/../scripts/lib/headroom-state.sh" "$_hb/lib/headroom-state.sh" "$_hb/headroom-state.sh"; do
   [ -f "$_sl" ] && { . "$_sl"; break; }
@@ -88,7 +88,7 @@ fi
 
 # Same rule as the gate and the doctor: the first IMPORTABLE candidate, not the
 # first executable one. A decoy `python` beside the headroom console script would
-# otherwise be chosen here and fail at import time with exit 4, while /doctor on
+# otherwise be chosen here and fail at import time with exit 4, while /headroom-usage-indicator:doctor on
 # the same machine reported a healthy engine.
 PY=""; PY_BROKEN=""
 if [ "$TOON_CHECK" -eq 1 ]; then
@@ -274,7 +274,7 @@ try:
     result = compress([{"role": "tool", "content": raw}])
 except Exception as e:
     print(f"hcat: compression failed: {e}", file=sys.stderr)
-    _note_error("runtime", f"hcat: compression failed: {e} — run /headroom-usage-indicator:doctor")
+    _note_error("runtime", f"hcat: compression failed: {str(e)[:120]} — run /headroom-usage-indicator:doctor")
     sys.exit(4)
 _clear_error()
 

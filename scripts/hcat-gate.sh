@@ -147,9 +147,9 @@ gate_remember() {  # record $fp for this session: later Reads of it pass at once
 # Pick the first IMPORTABLE candidate, not merely the first EXECUTABLE one --
 # doctor.sh check 2 has always walked the list this way, and resolve_engine_python
 # stops at the first -x hit. A stray `python` beside the `headroom` console script
-# (pyenv/asdf/mise shims, uv's default install, or ~/.local/bin once /doctor --fix
+# (pyenv/asdf/mise shims, uv's default install, or ~/.local/bin once /headroom-usage-indicator:doctor --fix
 # puts its own shim there) is executable but cannot import headroom, so the gate
-# recorded a broken badge and stopped denying while /doctor on the SAME machine
+# recorded a broken badge and stopped denying while /headroom-usage-indicator:doctor on the SAME machine
 # reported `ok - engine python`. Before this lib landed the gate only ever saw
 # $HCAT_PYTHON or ~/.headroom-venv, so a decoy could not reach it.
 # py_seen records that SOME candidate was executable. Without it, "every

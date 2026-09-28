@@ -474,6 +474,10 @@ printf '{"k":1}' > "$TMP/hc_small.json"
 out=$(HCAT_PYTHON=/nonexistent/python bash "$HCAT" "$TMP/hc_small.json" 2>/dev/null); rc=$?
 check_eq "hcat: no headroom → exit 3" "3" "$rc"
 check_absent "hcat: no headroom → stdout empty" "{" "$out"
+# 23b. the recorded last-error names the real doctor command (a bare "/doctor"
+# runs Claude Code's built-in diagnostic, not this plugin's doctor -- PR #7)
+check "hcat: engine-error last-error names real doctor command" "headroom-usage-indicator:doctor" \
+      "$(cat "$HEADROOM_STATE_DIR/last-error" 2>/dev/null)"
 
 if [ -n "$HEADROOM_PY" ]; then
   # 24. real compression: big structured JSON shrinks, header cites source path
@@ -517,6 +521,30 @@ PYEOF
 else
   skip_note "hcat compression tests (headroom venv not found)"
 fi
+
+# 25b. static guard for spots this suite cannot trigger without a live engine
+# exception (hcat's Python-side message) or that are pure documentation
+check "hcat: python compression-failure message names real doctor command" \
+      "run /headroom-usage-indicator:doctor" "$(grep '_note_error("runtime"' "$HCAT")"
+check "hcat: python compression-failure caps the exception, not the pointer" \
+      "{str(e)[:120]}" "$(grep '_note_error("runtime"' "$HCAT")"
+USAGE_SKILL="$ROOT/skills/headroom-usage-indicator/SKILL.md"
+check "usage-indicator skill: frontmatter names real doctor command" \
+      "until /headroom-usage-indicator:doctor clears it" "$(cat "$USAGE_SKILL" 2>/dev/null)"
+check "README: broken-badge table names real doctor command" \
+      "a clean \`/headroom-usage-indicator:doctor\` run" "$(cat "$ROOT/README.md" 2>/dev/null)"
+
+# 25c. invariant: no bare "/doctor" command anywhere in the nudge and doc
+# surfaces. The badge's width-budgeted "· run /doctor" is the one deliberate
+# exception, so its verbatim quotes are stripped first, as is every qualified
+# name. Paths (doctor.sh, skills/doctor/) don't match.
+for f in README.md bin/hcat scripts/doctor.sh scripts/hcat-gate.sh \
+         scripts/session-probe.sh skills/headroom-usage-indicator/SKILL.md \
+         skills/doctor/SKILL.md; do
+  stray=$(sed -e 's#headroom-usage-indicator:doctor##g' -e 's#· run /doctor##g' "$ROOT/$f" \
+          | grep -nE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|$)')
+  check_eq "no bare /doctor command in $f" "" "$stray"
+done
 
 # --- 26-28. hcat-gate (PreToolUse Read gate)
 GATE="$ROOT/scripts/hcat-gate.sh"
@@ -2215,6 +2243,15 @@ check_eq "health: gate broken engine exit 0"       "0"    "$rc"
 check_absent "health: gate broken engine fails open" "deny" "$out"
 check "health: gate recorded the breakage" "import failed" \
       "$(cat "$HEADROOM_STATE_DIR/last-error" 2>/dev/null)"
+check "health: gate import-failed breakage names real doctor command" "headroom-usage-indicator:doctor" \
+      "$(cat "$HEADROOM_STATE_DIR/last-error" 2>/dev/null)"
+# an HCAT_PYTHON pointing nowhere hits the distinct "not executable" branch
+rm -f "$HEADROOM_STATE_DIR/last-error"
+out=$(gate_input "$big_h" health-g2 | HCAT_PYTHON=/nonexistent/python bash "$ROOT/scripts/hcat-gate.sh"); rc=$?
+check_eq "health: gate not-executable engine exit 0" "0" "$rc"
+check_absent "health: gate not-executable engine fails open" "deny" "$out"
+check "health: gate not-executable breakage names real doctor command" "headroom-usage-indicator:doctor" \
+      "$(cat "$HEADROOM_STATE_DIR/last-error" 2>/dev/null)"
 
 # hooks.json registers the SessionStart probe
 jq -e '.hooks.SessionStart[0].hooks[0].command | contains("session-probe.sh")' \
@@ -2244,6 +2281,7 @@ check_eq "health: probe exit 0" "0" "$rc"
 rm -f "$HEADROOM_STATE_DIR/last-error"
 out=$(env -u HCAT_PYTHON HOME="$TMP/nohome" PATH="$STUB:/usr/bin:/bin" bash "$PROBE")
 check "health: probe notes missing engine" "not installed" "$out"
+check "health: probe missing-engine nudge names real doctor command" "headroom-usage-indicator:doctor --fix" "$out"
 if [ -f "$HEADROOM_STATE_DIR/last-error" ]; then
   echo "FAIL - health: missing engine must not write last-error"; FAIL=$((FAIL+1))
 else
@@ -2254,6 +2292,17 @@ fi
 printf '%s runtime hcat: compression failed: boom\n' "$(date +%s)" > "$HEADROOM_STATE_DIR/last-error"
 out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
 check "health: probe surfaces recorded failure" "recent failure" "$out"
+check "health: probe recent-failure nudge names real doctor command" "headroom-usage-indicator:doctor" "$out"
+# a recorded message already carries its own doctor pointer; the probe line
+# names the command once (current wording, pre-rename wording, and --fix form)
+for rec in "engine engine python not executable (/x) — gate failing open; run /headroom-usage-indicator:doctor" \
+           "runtime hcat: compression failed: boom — run /doctor" \
+           "mcp \`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /headroom-usage-indicator:doctor --fix"; do
+  printf '%s %s\n' "$(date +%s)" "$rec" > "$HEADROOM_STATE_DIR/last-error"
+  out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
+  n=$(printf '%s' "$out" | grep -o 'run /[a-z:-]*doctor' | wc -l | tr -d ' ')
+  check_eq "health: probe names doctor once for '${rec%% *}' record" "1" "$n"
+done
 
 # probe: status line not wired yet → one-line setup nudge (the "I installed it,
 # why is there no badge?" case). Must be a setup line, not a breakage, and must
@@ -2316,6 +2365,14 @@ out=$(HCAT_PYTHON=/nonexistent/python DOCTOR_SETTINGS="$S2" DOCTOR_CLAUDE_DIR="$
       DOCTOR_VENV_DIR="$DOCD/none" bash "$DOCTOR" 2>&1)
 check "health: doctor keeps state while fixable" "failure state kept" "$out"
 rm -f "$HEADROOM_STATE_DIR/last-error"
+
+# 38b. static guard: two doctor-command messages this suite cannot trigger
+# dynamically (the probe resolves $HCAT beside itself; the doctor's message is
+# a concurrent-write race)
+check "session-probe: hcat-missing message names real doctor command" \
+      "reinstall the plugin or run /headroom-usage-indicator:doctor" "$(cat "$PROBE" 2>/dev/null)"
+check "doctor.sh: concurrent-failure message names real doctor command" \
+      "badge kept broken; run /headroom-usage-indicator:doctor again" "$(cat "$DOCTOR" 2>/dev/null)"
 
 # --- 39. dangi router: true-size detection + tiered compress/delegate advice (v2.7)
 export HEADROOM_STATE_DIR="$TMP/state-router"
@@ -3106,8 +3163,8 @@ check "w10: README has a Windows section"      "## Windows"           "$(cat "$R
 check "w10: README names Git Bash prerequisite" "Git for Windows"     "$(cat "$ROOT/README.md")"
 check "w10: README upgrade note for the shim"   "headroom on PATH"    "$(cat "$ROOT/README.md")"
 check_absent "w10: README no launcher"          "mcp-launcher"        "$(cat "$ROOT/README.md")"
-check_eq "w10: plugin.json 2.8.0"      "2.8.0" "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")"
-check_eq "w10: marketplace.json 2.8.0" "2.8.0" "$(jq -r '.plugins[0].version // .version' "$ROOT/.claude-plugin/marketplace.json")"
+check_eq "w10: plugin.json 2.8.1"      "2.8.1" "$(jq -r .version "$ROOT/.claude-plugin/plugin.json")"
+check_eq "w10: marketplace.json 2.8.1" "2.8.1" "$(jq -r '.plugins[0].version // .version' "$ROOT/.claude-plugin/marketplace.json")"
 
 # w11. final whole-branch review fix wave (C1, I1, I2, I3, M4 + shim idempotency)
 

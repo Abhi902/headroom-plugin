@@ -79,7 +79,7 @@ fi
 # the gate each fall back to a minimal HCAT_PYTHON-or-~/.headroom-venv lookup).
 # Without them those features silently degrade to no-ops. Plugin installs ship
 # them in lib/; a legacy flat install keeps them as siblings (copied by the
-# manual installer, and re-provisioned by /doctor --fix).
+# manual installer, and re-provisioned by /headroom-usage-indicator:doctor --fix).
 for _lib in attribution.jq headroom-state.sh engine-resolve.sh; do
   if [ ! -f "$here/lib/$_lib" ] && [ ! -f "$here/$_lib" ]; then
     # engine-resolve.sh is the one entry here that DEGRADES instead of breaking:
@@ -87,7 +87,7 @@ for _lib in attribution.jq headroom-state.sh engine-resolve.sh; do
     # resolve_engine_python for precisely the partial/legacy layout that lands
     # here, so an install missing only this lib still finds its engine and still
     # compresses. note_error is the STICKY yellow "headroom broken — run
-    # /doctor" badge, which this file reserves for real outages — doctor.sh
+    # /headroom-usage-indicator:doctor" badge, which this file reserves for real outages — doctor.sh
     # classifies the very same condition as merely `fixable`. So badge it only
     # when the inline fallback ALSO comes up empty, and otherwise just nudge,
     # exactly as the never-installed-engine case below does.
@@ -106,7 +106,7 @@ done
 # install whose engine resolves only through the doctor's venv — the doctor's own
 # happy path before v2.8 — silently loses its MCP the moment the plugin updates.
 # Nothing else announces it: the badge's "idle" is indistinguishable from "you
-# haven't compressed anything yet", and /doctor only runs when the user already
+# haven't compressed anything yet", and /headroom-usage-indicator:doctor only runs when the user already
 # suspects something. A hook's PATH is the closest proxy available for the MCP
 # spawn environment. On POSIX it is not merely a proxy: the hook's PATH IS the
 # PATH the MCP is spawned with, so a miss here is authoritative. On Windows it is
@@ -165,7 +165,7 @@ engine_off_path() {
   # at session start, cleared by the first compression, yellow again next session,
   # forever, for a condition that never changed -- which is the fastest way to
   # teach someone to ignore the one always-visible health signal. Under `mcp` it
-  # persists until /doctor actually resolves it and clears the file.
+  # persists until /headroom-usage-indicator:doctor actually resolves it and clears the file.
   # byp=2: the registration lookup timed out -- unknown, so nudge but do not
   # light the sticky badge on a guess.
   [ "$byp" -eq 2 ] && return 0
@@ -220,16 +220,20 @@ if [ -z "$problems" ] && [ -f "$STATE_DIR/last-error" ]; then
   case "${le_ts:-}" in (*[!0-9]*|"") le_ts=0 ;; esac
   le_age=$(( $(date +%s) - le_ts ))
   if [ "$le_age" -ge 0 ] 2>/dev/null && [ "$le_age" -le 86400 ] 2>/dev/null; then
+    # Recorded messages already end with their own "run <doctor>" pointer; strip
+    # it (current or pre-rename wording) so the line names the command once.
+    le_msg="${le_msg%" — run /"*doctor*}"
+    le_msg="${le_msg%"; run /"*doctor*}"
     add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /headroom-usage-indicator:doctor (doctor clears this once healthy)"
   fi
 fi
 
 # --- 5b. status line not wired yet — the one setup step a plugin can't perform
 # for you: Claude Code has no plugin field for the status line, so wiring it means
-# writing the user's settings.json, which only /doctor does (with consent). A
+# writing the user's settings.json, which only /headroom-usage-indicator:doctor does (with consent). A
 # freshly installed plugin therefore shows no badge until that step. Nudge about
 # it — but only when everything else is healthy: a broken toolchain is the bigger
-# fish, and /doctor --fix wires the status line while repairing it anyway. This is
+# fish, and /headroom-usage-indicator:doctor --fix wires the status line while repairing it anyway. This is
 # a setup reminder, never a breakage: it does not write last-error or flip the
 # badge to "broken".
 if [ -z "$problems" ] && command -v jq >/dev/null 2>&1; then

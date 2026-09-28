@@ -134,7 +134,7 @@ Each line is aligned `<status> - <what>`:
     Windows, the shim landed but `~/.local/bin` is not on PATH — the line
     carries the Windows user Path steps (on macOS/Linux this is only a `note`:
     check 2c registers the engine by absolute path instead, and a later plain
-    `/doctor` keeps it a `note`, never a `fixable`);
+    `/headroom-usage-indicator:doctor` keeps it a `note`, never a `fixable`);
     (2) the shim resolves by name but will not start (`headroom --help` fails),
     e.g. a uv trampoline copied away from the interpreter it resolves relative
     to — the doctor deletes the shim it just wrote (so the next run diagnoses

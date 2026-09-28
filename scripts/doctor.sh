@@ -182,7 +182,7 @@ else
   # Use the SHARED resolver. This walk was the model the gate and bin/hcat copied,
   # and keeping a private copy here meant three definitions of "which interpreter
   # is the engine" -- able to disagree about the same machine, and this one alone
-  # unbounded, so a wedged interpreter could hang a plain /doctor forever.
+  # unbounded, so a wedged interpreter could hang a plain /headroom-usage-indicator:doctor forever.
   # The doctor may wait longer than a hook: it is interactive, and a cold
   # headroom-ai[all] import is exactly what it is here to diagnose.
   # (The lib is mandatory -- see the guard where it is sourced -- so there is no
@@ -682,7 +682,7 @@ shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just 
   # then dies at spawn), and a name-squatted `headroom` on PyPI would greenlight
   # the line that stands in for "the MCP will connect". Cheap flag, engine env.
   #
-  # BOUNDED: a plain `/doctor` executes whatever `command -v headroom` resolves —
+  # BOUNDED: a plain `/headroom-usage-indicator:doctor` executes whatever `command -v headroom` resolves —
   # by this function's own reasoning that may be a squatter or a wedged binary —
   # so a hang here would hang the doctor (and the skill that runs it) forever.
   # `env` carries the engine vars because run_bounded is a function, not a command.
@@ -1776,7 +1776,7 @@ $sl_merge_tail"
         {
           cat <<'CHEOF'
 #!/usr/bin/env bash
-# headroom-statusline-chain.sh — written by `/doctor --fix` on Windows.
+# headroom-statusline-chain.sh — written by `/headroom-usage-indicator:doctor --fix` on Windows.
 # Claude Code executes statusLine.command without a POSIX shell, so the command
 # it stores must stay a `"<bash.exe>" "<C:\path>"` pair; the shell chain that
 # renders your own status line first and the headroom badge after it lives here.
@@ -1910,7 +1910,7 @@ CHEOF
     # 7c-2. the shared engine resolver. engine-resolve.sh is not a badge dep —
     # statusline.sh never loads it — but a legacy FLAT install's hcat /
     # hcat-gate.sh / session-probe.sh source it ahead of their (narrower) inline
-    # fallback, so /doctor --fix is the one place that population gets it
+    # fallback, so /headroom-usage-indicator:doctor --fix is the one place that population gets it
     # (spec §1, v2.8). It is resolved and repaired against $CLAUDE_DIR ONLY,
     # never next to a custom-path statusline copy: the doctor refuses to write
     # into a custom path, so demanding the file there produced a FAIL that --fix
