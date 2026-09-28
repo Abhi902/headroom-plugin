@@ -533,11 +533,21 @@ USAGE_SKILL="$ROOT/skills/headroom-usage-indicator/SKILL.md"
 # the doctor's consent rule: only a --fix the USER typed waives the ask; a nudge
 # in Claude's own context (or Claude's own Skill call) never does
 doctor_skill=$(cat "$ROOT/skills/doctor/SKILL.md" 2>/dev/null)
-check "doctor skill: implicit consent only from the user's own typed --fix" \
-      "the user themselves typed" "$doctor_skill"
-check "doctor skill: a nudge in context is not consent" "is NOT" "$doctor_skill"
+check "doctor skill: implicit consent only from the user's own --fix invocation" \
+      "the user invoked this skill as" "$doctor_skill"
+check "doctor skill: the message must BE the command" "message IS that command" "$doctor_skill"
+check "doctor skill: quoting or pasting the command is not consent" \
+      "only quotes, pastes or" "$doctor_skill"
+check "doctor skill: a nudge in context is not consent" \
+      "setup or hook nudge in your context (those lines are addressed" "$doctor_skill"
 check "doctor skill: a --fix Claude passed itself is not consent" "you passed to this skill yourself" "$doctor_skill"
 check_absent "doctor skill: never says the nudges grant consent" "as the plugin's own nudges tell them" "$doctor_skill"
+check_absent "session-probe: nudges never tell Claude to run --fix itself" \
+             "run /headroom-usage-indicator:doctor --fix" "$(grep -E 'add_problem|setup=' "$ROOT/scripts/session-probe.sh")"
+check "session-probe: nudges offer --fix to the user" \
+      "offer the user /headroom-usage-indicator:doctor --fix" "$(cat "$ROOT/scripts/session-probe.sh")"
+check "usage-indicator skill: installer asks before editing settings.json" \
+      "a probe or setup nudge in your context is not that request" "$(cat "$ROOT/skills/headroom-usage-indicator/SKILL.md")"
 check "usage-indicator skill: frontmatter names real doctor command" \
       "until /headroom-usage-indicator:doctor clears it" "$(cat "$USAGE_SKILL" 2>/dev/null)"
 check "README: broken-badge table names real doctor command" \
@@ -554,8 +564,11 @@ dr_scan() {  # stdin -> the lines that name a bare /doctor (ONE scanner: the loo
   sed -e '/bare-doctor-ok/d' -e 's#headroom-usage-indicator:doctor##g' | grep -nE "$DR_RE"
 }
 dr_files=$(cd "$ROOT" && { printf '%s\n' README.md skills/doctor/SKILL.md \
-             skills/headroom-usage-indicator/SKILL.md bin/hcat; ls scripts/*.sh scripts/lib/*.sh; })
-check "25c scans the hook scripts and libs too" "scripts/lib/" "$dr_files"
+             skills/headroom-usage-indicator/SKILL.md bin/hcat .claude-plugin/plugin.json \
+             .claude-plugin/marketplace.json; ls scripts/*.sh scripts/lib/*.sh; })
+check "25c scans the libs" "scripts/lib/" "$dr_files"
+check "25c scans the hook scripts" "scripts/session-probe.sh" "$dr_files"
+check "25c scans the plugin manifest" ".claude-plugin/plugin.json" "$dr_files"
 for f in $dr_files; do
   if [ ! -f "$ROOT/$f" ]; then check_eq "no bare /doctor command in $f (file exists)" present missing; continue; fi
   check_eq "no bare /doctor command in $f" "" "$(dr_scan < "$ROOT/$f")"
@@ -568,9 +581,15 @@ for dr_s in 'bash scripts/doctor.sh' 'skills/doctor/SKILL.md' 'run /headroom-usa
             'x /doctor y   # bare-doctor-ok'; do
   check_eq "25c guard ignores '$dr_s'" miss "$(printf '%s\n' "$dr_s" | dr_scan >/dev/null && echo hit || echo miss)"
 done
-# ...and the exemption marker cannot quietly spread: exactly the two known uses
+# ...and the exemption marker cannot quietly spread: exactly the two known
+# lines (a legacy pattern, a comment), never a line that prints or records text
 check_eq "25c: bare-doctor-ok marker count" "2" \
          "$(cd "$ROOT" && cat $dr_files 2>/dev/null | grep -c 'bare-doctor-ok')"
+check_eq "25c: bare-doctor-ok only in the probe and the badge script" \
+         "scripts/session-probe.sh scripts/statusline.sh" \
+         "$(cd "$ROOT" && grep -l 'bare-doctor-ok' $dr_files 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')"
+check_eq "25c: bare-doctor-ok never on a line that prints or records" "" \
+         "$(cd "$ROOT" && grep -h 'bare-doctor-ok' $dr_files 2>/dev/null | grep -E 'printf|echo|add_problem|note_error|say ')"
 
 # 25d. the 120-char exception cap, exercised: an engine whose compress() raises
 # a 500-char exception still leaves the doctor pointer intact in last-error
@@ -2376,8 +2395,19 @@ for rec in "hcat: compression failed: crlf — run /headroom-usage-indicator:doc
   printf '%s runtime %s\n' "$(date +%s)" "$rec" > "$HEADROOM_STATE_DIR/last-error"
   out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
   n=$(printf '%s' "$out" | grep -o 'run /[a-z:-]*doctor' | wc -l | tr -d ' ')
-  check_eq "health: probe names doctor once for '$(printf '%s' "${rec%% *}" | tr -d '\r')...' record" "1" "$n"
-  check_absent "health: probe line carries no CR" "$(printf '\r')" "$out"
+  rec_n=$(printf '%s' "${rec%% *}" | tr -d '\r')
+  check "health: probe surfaced the '$rec_n...' record" "recent failure" "$out"
+  check_eq "health: probe names doctor once for '$rec_n...' record" "1" "$n"
+  # the probe emits JSON: a CR arrives as the escape \r, a raw one only in the no-jq fallback
+  check_absent "health: probe line for '$rec_n...' carries no CR" '\r' "$out"
+  check_absent "health: probe line for '$rec_n...' carries no raw CR" "$(printf '\r')" "$out"
+done
+# the pre-rename pointer forms with a suffix are stripped too
+for rec in "hcat: failed x; run /doctor --fix" "hcat: failed y — run /doctor again"; do
+  printf '%s runtime %s\n' "$(date +%s)" "$rec" > "$HEADROOM_STATE_DIR/last-error"
+  out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
+  n=$(printf '%s' "$out" | grep -o 'run /[a-z:-]*doctor' | wc -l | tr -d ' ')
+  check_eq "health: probe names doctor once for legacy '${rec##* /}' record" "1" "$n"
 done
 
 # probe: status line not wired yet → one-line setup nudge (the "I installed it,

@@ -150,7 +150,7 @@ engine_off_path() {
   command -v headroom >/dev/null 2>&1 && return 0
   user_mcp_by_path; byp=$?
   [ "$byp" -eq 0 ] && return 0
-  add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /headroom-usage-indicator:doctor --fix to repair it"
+  add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; offer the user /headroom-usage-indicator:doctor --fix to repair it (ask first)"
   # The engine WORKS and the MCP still cannot start: that is a live feature
   # outage, not a setup gap, and the badge has to say so. Leaving it at a nudge
   # is what makes a v2.7.x -> v2.8 update go silent -- a dead MCP renders as an
@@ -202,7 +202,7 @@ elif ! command -v headroom >/dev/null 2>&1; then
   # Never-installed engine is the ordinary red-idle state, not a breakage:
   # say it once at session start, but do not flip the badge to broken. Same
   # reasoning for the off-PATH nudge above: add_problem, never note_error.
-  add_problem "headroom engine not installed — run /headroom-usage-indicator:doctor --fix to bootstrap it"
+  add_problem "headroom engine not installed — offer the user /headroom-usage-indicator:doctor --fix to bootstrap it (ask first)"
 fi
 
 # --- 4. bundled price table parses (when jq is available to check)
@@ -258,11 +258,11 @@ if [ -z "$problems" ] && command -v jq >/dev/null 2>&1; then
       # (issue #2). Nudge if a wired copy is missing those deps.
       if [ -f "$CLAUDE_DIR/headroom-statusline.sh" ] \
          && [ ! -f "$CLAUDE_DIR/lib/attribution.jq" ] && [ ! -f "$CLAUDE_DIR/attribution.jq" ]; then
-        setup="status line badge is missing its deps and will read zero — run /headroom-usage-indicator:doctor --fix"
+        setup="status line badge is missing its deps and will read zero — offer the user /headroom-usage-indicator:doctor --fix (ask first)"
       fi
       ;;
     *)
-      setup="status line badge isn't set up yet — run /headroom-usage-indicator:doctor --fix to show it"
+      setup="status line badge isn't set up yet — offer the user /headroom-usage-indicator:doctor --fix to show it (ask first)"
       ;;
   esac
 fi
