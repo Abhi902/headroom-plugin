@@ -471,6 +471,7 @@ check_eq "hcat: missing file → exit 2" "2" "$rc"
 
 # 23. unusable python → distinct exit 3, nothing on stdout
 printf '{"k":1}' > "$TMP/hc_small.json"
+rm -f "$HEADROOM_STATE_DIR/last-error"   # 23b below must read what THIS run wrote
 out=$(HCAT_PYTHON=/nonexistent/python bash "$HCAT" "$TMP/hc_small.json" 2>/dev/null); rc=$?
 check_eq "hcat: no headroom → exit 3" "3" "$rc"
 check_absent "hcat: no headroom → stdout empty" "{" "$out"
@@ -534,17 +535,48 @@ check "usage-indicator skill: frontmatter names real doctor command" \
 check "README: broken-badge table names real doctor command" \
       "a clean \`/headroom-usage-indicator:doctor\` run" "$(cat "$ROOT/README.md" 2>/dev/null)"
 
-# 25c. invariant: no bare "/doctor" command anywhere in the nudge and doc
-# surfaces. The badge's width-budgeted "· run /doctor" is the one deliberate
-# exception, so its verbatim quotes are stripped first, as is every qualified
-# name. Paths (doctor.sh, skills/doctor/) don't match.
-for f in README.md bin/hcat scripts/doctor.sh scripts/hcat-gate.sh \
-         scripts/session-probe.sh skills/headroom-usage-indicator/SKILL.md \
-         skills/doctor/SKILL.md; do
-  stray=$(sed -e 's#headroom-usage-indicator:doctor##g' -e 's#· run /doctor##g' "$ROOT/$f" \
-          | grep -nE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|$)')
+# 25c. invariant: no bare "/doctor" command anywhere a user or agent reads it:
+# the README, the skills, and every shipped script (hooks, hcat, the badge,
+# the libs). Qualified names are stripped first; a sentence-final "/doctor." is
+# still a command, while paths (doctor.sh, skills/doctor/) never match; a line
+# marked "bare-doctor-ok" names it on purpose (a legacy pattern). A file
+# that is missing FAILS: a rename must not green the guard by emptying it.
+dr_files=$(cd "$ROOT" && { printf '%s\n' README.md skills/doctor/SKILL.md \
+             skills/headroom-usage-indicator/SKILL.md bin/hcat; ls scripts/*.sh scripts/lib/*.sh; })
+for f in $dr_files; do
+  if [ ! -f "$ROOT/$f" ]; then check_eq "no bare /doctor command in $f (file exists)" present missing; continue; fi
+  stray=$(sed -e '/bare-doctor-ok/d' -e 's#headroom-usage-indicator:doctor##g' "$ROOT/$f" \
+          | grep -nE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|\.([^A-Za-z]|$)|$)')
   check_eq "no bare /doctor command in $f" "" "$stray"
 done
+# the guard itself: a sentence-final "/doctor." and a backticked `/doctor` are caught
+for dr_s in 'then run /doctor.' 'run `/doctor` now' 'see /doctor' ; do
+  printf '%s\n' "$dr_s" | grep -qE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|\.([^A-Za-z]|$)|$)' && r=hit || r=miss
+  check_eq "25c guard catches '$dr_s'" hit "$r"
+done
+printf '%s\n' 'bash scripts/doctor.sh' 'skills/doctor/SKILL.md' | grep -qE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|\.([^A-Za-z]|$)|$)' && r=hit || r=miss
+check_eq "25c guard ignores doctor.sh / skills/doctor/ paths" miss "$r"
+
+# 25d. the 120-char exception cap, exercised: an engine whose compress() raises
+# a 500-char exception still leaves the doctor pointer intact in last-error
+PY3=$(command -v python3 2>/dev/null)
+if [ -n "$PY3" ]; then
+  cap_t="$TMP/hcat-cap"; mkdir -p "$cap_t/stub/headroom" "$cap_t/state"
+  : > "$cap_t/stub/headroom/__init__.py"
+  printf 'def compress(*a, **k):\n    raise Exception("E" * 500)\n' > "$cap_t/stub/headroom/compress.py"
+  { printf '['; i=0; while [ $i -lt 2000 ]; do printf '{"a":%d},' $i; i=$((i+1)); done; printf '{}]'; } > "$cap_t/big.json"
+  PYTHONPATH="$cap_t/stub" HCAT_PYTHON="$PY3" HEADROOM_STATE_DIR="$cap_t/state" \
+    bash "$HCAT" "$cap_t/big.json" >/dev/null 2>&1; rc=$?
+  check_eq "hcat: a raising engine exits 4" "4" "$rc"
+  check "hcat: a 500-char exception keeps the doctor pointer" \
+        "— run /headroom-usage-indicator:doctor" "$(tail -c 60 "$cap_t/state/last-error" 2>/dev/null)"
+else
+  skip_note "hcat exception-cap fixture (no python3)"
+fi
+check "hcat: import-failed message names real doctor command" \
+      "run /headroom-usage-indicator:doctor" "$(grep 'engine import failed' "$HCAT")"
+check "hcat: timeout message names real doctor command" \
+      "run /headroom-usage-indicator:doctor" "$(grep 'compression timed out' "$HCAT")"
 
 # --- 26-28. hcat-gate (PreToolUse Read gate)
 GATE="$ROOT/scripts/hcat-gate.sh"
@@ -2228,7 +2260,8 @@ check "health: hcat wrote last-error" "engine" "$(cat "$HEADROOM_STATE_DIR/last-
 tr_h="$TMP/t_health.jsonl"; compress_event th1 500 > "$tr_h"
 out=$(badge "$tr_h" claude-opus-4-8 health-s1)
 check "health: badge shows broken"     "broken"  "$out"
-check "health: badge points at doctor" "/doctor" "$out"
+check "health: badge points at doctor" "ask: headroom doctor" "$out"
+check_absent "health: badge never names the built-in /doctor" "/doctor" "$out"
 
 # a stale entry (>24h by its own timestamp) no longer takes over
 printf '%s engine old failure\n' "$(( $(date -u +%s) - 90000 ))" > "$HEADROOM_STATE_DIR/last-error"
@@ -2302,6 +2335,16 @@ for rec in "engine engine python not executable (/x) — gate failing open; run 
   out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
   n=$(printf '%s' "$out" | grep -o 'run /[a-z:-]*doctor' | wc -l | tr -d ' ')
   check_eq "health: probe names doctor once for '${rec%% *}' record" "1" "$n"
+done
+# ...and the strip removes ONLY the pointer: the message body survives, an
+# earlier " — " segment survives, and text that merely mentions a doctor stays
+for pr in "engine python not executable (/x) — gate failing open; run /headroom-usage-indicator:doctor|gate failing open" \
+          "hcat: compression failed: a — b — run /headroom-usage-indicator:doctor|failed: a — b" \
+          "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /headroom-usage-indicator:doctor --fix|cannot spawn it by name" \
+          "hcat: compression failed: x; run /opt/doctor/bin failed|x; run /opt/doctor/bin failed"; do
+  printf '%s runtime %s\n' "$(date +%s)" "${pr%%|*}" > "$HEADROOM_STATE_DIR/last-error"
+  out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
+  check "health: probe keeps the body of '${pr##*|}'" "${pr##*|}" "$out"
 done
 
 # probe: status line not wired yet → one-line setup nudge (the "I installed it,

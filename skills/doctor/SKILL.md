@@ -173,7 +173,10 @@ broken, what the doctor could fix.
 
 ## Step 3 — get consent, then fix
 
-Never run `--fix` unprompted. If anything is `fixable`, list exactly what
+Never run `--fix` unprompted. If the user invoked the doctor WITH `--fix` (typed
+`/headroom-usage-indicator:doctor --fix`, as the plugin's own nudges tell them
+to), that request is the consent: still list exactly what it will change, then
+run it without asking a second time. If anything is `fixable`, list exactly what
 `--fix` would change (it may edit `~/.claude/settings.json`,
 `~/.claude/settings.local.json`, and the current project's
 `.claude/settings.json` / `.claude/settings.local.json`, each with its own

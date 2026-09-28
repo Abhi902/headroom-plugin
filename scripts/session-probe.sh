@@ -221,9 +221,15 @@ if [ -z "$problems" ] && [ -f "$STATE_DIR/last-error" ]; then
   le_age=$(( $(date +%s) - le_ts ))
   if [ "$le_age" -ge 0 ] 2>/dev/null && [ "$le_age" -le 86400 ] 2>/dev/null; then
     # Recorded messages already end with their own "run <doctor>" pointer; strip
-    # it (current or pre-rename wording) so the line names the command once.
-    le_msg="${le_msg%" — run /"*doctor*}"
-    le_msg="${le_msg%"; run /"*doctor*}"
+    # it so the line names the command once. Only the pointer forms the writers
+    # actually use (current, pre-rename; optionally followed by " --fix" or
+    # " again"), and only the first that matches -- never arbitrary text.
+    for _le_p in " — run /headroom-usage-indicator:doctor" "; run /headroom-usage-indicator:doctor" \
+                 " — run /doctor" "; run /doctor"; do   # bare-doctor-ok: pre-rename records
+      case $le_msg in
+        *"$_le_p"|*"$_le_p --fix"|*"$_le_p again") le_msg=${le_msg%"$_le_p"*}; break ;;
+      esac
+    done
     add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /headroom-usage-indicator:doctor (doctor clears this once healthy)"
   fi
 fi
