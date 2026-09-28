@@ -530,6 +530,14 @@ check "hcat: python compression-failure message names real doctor command" \
 check "hcat: python compression-failure caps the exception, not the pointer" \
       "{str(e)[:120]}" "$(grep '_note_error("runtime"' "$HCAT")"
 USAGE_SKILL="$ROOT/skills/headroom-usage-indicator/SKILL.md"
+# the doctor's consent rule: only a --fix the USER typed waives the ask; a nudge
+# in Claude's own context (or Claude's own Skill call) never does
+doctor_skill=$(cat "$ROOT/skills/doctor/SKILL.md" 2>/dev/null)
+check "doctor skill: implicit consent only from the user's own typed --fix" \
+      "the user themselves typed" "$doctor_skill"
+check "doctor skill: a nudge in context is not consent" "is NOT" "$doctor_skill"
+check "doctor skill: a --fix Claude passed itself is not consent" "you passed to this skill yourself" "$doctor_skill"
+check_absent "doctor skill: never says the nudges grant consent" "as the plugin's own nudges tell them" "$doctor_skill"
 check "usage-indicator skill: frontmatter names real doctor command" \
       "until /headroom-usage-indicator:doctor clears it" "$(cat "$USAGE_SKILL" 2>/dev/null)"
 check "README: broken-badge table names real doctor command" \
@@ -541,21 +549,28 @@ check "README: broken-badge table names real doctor command" \
 # still a command, while paths (doctor.sh, skills/doctor/) never match; a line
 # marked "bare-doctor-ok" names it on purpose (a legacy pattern). A file
 # that is missing FAILS: a rename must not green the guard by emptying it.
+DR_RE='(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|\.([^A-Za-z]|$)|$)'
+dr_scan() {  # stdin -> the lines that name a bare /doctor (ONE scanner: the loop and its self-tests)
+  sed -e '/bare-doctor-ok/d' -e 's#headroom-usage-indicator:doctor##g' | grep -nE "$DR_RE"
+}
 dr_files=$(cd "$ROOT" && { printf '%s\n' README.md skills/doctor/SKILL.md \
              skills/headroom-usage-indicator/SKILL.md bin/hcat; ls scripts/*.sh scripts/lib/*.sh; })
+check "25c scans the hook scripts and libs too" "scripts/lib/" "$dr_files"
 for f in $dr_files; do
   if [ ! -f "$ROOT/$f" ]; then check_eq "no bare /doctor command in $f (file exists)" present missing; continue; fi
-  stray=$(sed -e '/bare-doctor-ok/d' -e 's#headroom-usage-indicator:doctor##g' "$ROOT/$f" \
-          | grep -nE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|\.([^A-Za-z]|$)|$)')
-  check_eq "no bare /doctor command in $f" "" "$stray"
+  check_eq "no bare /doctor command in $f" "" "$(dr_scan < "$ROOT/$f")"
 done
-# the guard itself: a sentence-final "/doctor." and a backticked `/doctor` are caught
-for dr_s in 'then run /doctor.' 'run `/doctor` now' 'see /doctor' ; do
-  printf '%s\n' "$dr_s" | grep -qE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|\.([^A-Za-z]|$)|$)' && r=hit || r=miss
-  check_eq "25c guard catches '$dr_s'" hit "$r"
+# the guard itself, through the SAME scanner: caught vs. ignored
+for dr_s in 'then run /doctor.' 'run `/doctor` now' 'see /doctor'; do
+  check_eq "25c guard catches '$dr_s'" hit "$(printf '%s\n' "$dr_s" | dr_scan >/dev/null && echo hit || echo miss)"
 done
-printf '%s\n' 'bash scripts/doctor.sh' 'skills/doctor/SKILL.md' | grep -qE '(^|[^A-Za-z0-9_])/doctor([^./A-Za-z0-9_-]|\.([^A-Za-z]|$)|$)' && r=hit || r=miss
-check_eq "25c guard ignores doctor.sh / skills/doctor/ paths" miss "$r"
+for dr_s in 'bash scripts/doctor.sh' 'skills/doctor/SKILL.md' 'run /headroom-usage-indicator:doctor.' \
+            'x /doctor y   # bare-doctor-ok'; do
+  check_eq "25c guard ignores '$dr_s'" miss "$(printf '%s\n' "$dr_s" | dr_scan >/dev/null && echo hit || echo miss)"
+done
+# ...and the exemption marker cannot quietly spread: exactly the two known uses
+check_eq "25c: bare-doctor-ok marker count" "2" \
+         "$(cd "$ROOT" && cat $dr_files 2>/dev/null | grep -c 'bare-doctor-ok')"
 
 # 25d. the 120-char exception cap, exercised: an engine whose compress() raises
 # a 500-char exception still leaves the doctor pointer intact in last-error
@@ -570,6 +585,13 @@ if [ -n "$PY3" ]; then
   check_eq "hcat: a raising engine exits 4" "4" "$rc"
   check "hcat: a 500-char exception keeps the doctor pointer" \
         "— run /headroom-usage-indicator:doctor" "$(tail -c 60 "$cap_t/state/last-error" 2>/dev/null)"
+  # the STUB's exception was recorded (not an import failure, which also exits
+  # 4 with the pointer), capped to exactly 120 characters
+  check "hcat: the stub engine's exception was recorded" "runtime hcat: compression failed: EEEE" \
+        "$(cat "$cap_t/state/last-error" 2>/dev/null)"
+  check_eq "hcat: the exception is capped at exactly 120 characters" "120" \
+        "$(tr -cd E < "$cap_t/state/last-error" 2>/dev/null | wc -c | tr -d ' ')"
+  check_absent "hcat: last-error is written with LF only" "$(printf '\r')" "$(cat "$cap_t/state/last-error" 2>/dev/null)"
 else
   skip_note "hcat exception-cap fixture (no python3)"
 fi
@@ -2345,6 +2367,17 @@ for pr in "engine python not executable (/x) — gate failing open; run /headroo
   printf '%s runtime %s\n' "$(date +%s)" "${pr%%|*}" > "$HEADROOM_STATE_DIR/last-error"
   out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
   check "health: probe keeps the body of '${pr##*|}'" "${pr##*|}" "$out"
+done
+# a CRLF record (a native-Windows writer), a pointer-only record, and the
+# " again" form: each still names the doctor exactly once
+for rec in "hcat: compression failed: crlf — run /headroom-usage-indicator:doctor$(printf '\r')" \
+           "— run /headroom-usage-indicator:doctor" \
+           "badge kept broken; run /headroom-usage-indicator:doctor again"; do
+  printf '%s runtime %s\n' "$(date +%s)" "$rec" > "$HEADROOM_STATE_DIR/last-error"
+  out=$(HCAT_PYTHON=/usr/bin/true PATH="$AMBIENT_HR:$PATH" bash "$PROBE")
+  n=$(printf '%s' "$out" | grep -o 'run /[a-z:-]*doctor' | wc -l | tr -d ' ')
+  check_eq "health: probe names doctor once for '$(printf '%s' "${rec%% *}" | tr -d '\r')...' record" "1" "$n"
+  check_absent "health: probe line carries no CR" "$(printf '\r')" "$out"
 done
 
 # probe: status line not wired yet → one-line setup nudge (the "I installed it,

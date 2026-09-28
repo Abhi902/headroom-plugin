@@ -201,7 +201,7 @@ def _note_error(component, message):
     try:
         os.makedirs(_STATE_DIR, exist_ok=True)
         msg = " ".join(str(message).split())[:200]
-        with open(_LAST_ERROR, "w") as f:
+        with open(_LAST_ERROR, "w", newline="\n") as f:  # LF on Windows too: the probe reads it with bash
             f.write(f"{int(time.time())} {component} {msg}\n")
     except Exception:
         pass

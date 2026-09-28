@@ -224,12 +224,16 @@ if [ -z "$problems" ] && [ -f "$STATE_DIR/last-error" ]; then
     # it so the line names the command once. Only the pointer forms the writers
     # actually use (current, pre-rename; optionally followed by " --fix" or
     # " again"), and only the first that matches -- never arbitrary text.
+    # (a leading space lets a record that is ONLY the pointer match too; a
+    # native-Windows writer may leave a CR before the LF)
+    le_msg=" ${le_msg%$'\r'}"
     for _le_p in " — run /headroom-usage-indicator:doctor" "; run /headroom-usage-indicator:doctor" \
                  " — run /doctor" "; run /doctor"; do   # bare-doctor-ok: pre-rename records
       case $le_msg in
         *"$_le_p"|*"$_le_p --fix"|*"$_le_p again") le_msg=${le_msg%"$_le_p"*}; break ;;
       esac
     done
+    le_msg=${le_msg# }
     add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /headroom-usage-indicator:doctor (doctor clears this once healthy)"
   fi
 fi
