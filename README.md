@@ -246,6 +246,12 @@ Less than you used to. The hcat gate redirects big structured-file reads automat
 **I already have a custom status line — will this wipe it?**
 No. The status-line setup is **merge-aware**: it *appends* the headroom badge to your existing status line (so you keep `Model · ctx · dir (branch)` and gain the headroom dot) and backs up your original under `_headroomStatusLineBackup` in `settings.json`. To restore, copy that key back over `statusLine`.
 
+**On Windows, `--fix` refused to keep my custom status line — why?**
+Your existing command is written for a native spawner, with a backslash path (`node C:\Users\you\sl.js`, `.\tools\sl.cmd`) or a `%VAR%` (`%APPDATA%\sl.js`). The badge runs your old status line *inside bash*, and bash strips those backslashes and never expands `%VAR%`, so chaining it would quietly break both. Since v2.8 the doctor refuses that merge and leaves `settings.json` untouched. Rewrite the command with forward slashes and no `%VAR%` (`node C:/Users/you/sl.js` works in both worlds), then re-run `--fix`. If the backslash is a regex escape (`grep '.\w+' f`), single-quote the argument: bash keeps backslashes inside single quotes, and the doctor lets that through.
+
+**`--fix` said it won't register the `headroom` it found — why?**
+The shim in `~/.local/bin` and the user-scoped MCP registration both outlive the project you ran the doctor in: every later session, in every project, spawns them. So since v2.8, `--fix` refuses to persist a `headroom` that resolves inside the current project, or through a relative path. That is exactly what a repository that sets `HCAT_PYTHON`, `UV_TOOL_DIR` or `PATH` in its project settings would steer it to. The message names the setting that pointed there. Undo it, or install the engine normally (`uv tool install headroom-ai`, `pipx`, or let the doctor bootstrap `~/.headroom-venv`), and run `--fix` again. An existing registration that already works is left alone.
+
 **Can I change the colours / the 60-second decay / show a different tool?**
 Yes — see the **Customize** section in `skills/headroom-usage-indicator/SKILL.md`. The same pattern works for any MCP tool (`mcp__server__tool`), not just headroom.
 
