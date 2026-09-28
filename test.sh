@@ -6371,6 +6371,31 @@ for w29_c in 'tools\sl.cmd|more' 'node node_modules\.bin\sl'; do
   check "w29b: '$w29_c' is refused as Windows syntax" "uses Windows syntax" "$out"
 done
 
+# in-project CLI + a DEAD user entry + the claude CLI present, --fix: refused --
+# the dead entry is neither removed nor replaced with the in-project CLI
+cp "$W29B/dead.json" "$W29B/dead2.json"
+out=$(cd "$W29B/proj" && w28g_run "$W29B/dead2.json" windows "$W29B/proj/bin:$W21/stub:/usr/bin:/bin" --fix)
+check "w29b: in-project CLI + dead entry + claude present is refused" "refusing to register it as a user-scoped MCP" "$out"
+check_eq "w29b: ...and the dead entry is left, never replaced by it" "/nonexistent/w29-dead" \
+         "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/dead2.json")"
+
+for w29_c in 'grep 1\.2\.3 f' 'sed s/a\.b\.c/x/' 'grep 127\.0\.0\.1 log' 'sed -e s/v1\.2\.3/x/'; do
+  jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/dots.json"
+  out=$(w29b_chain "$W29BC/dots.json" --fix)
+  check_absent "w29b: '$w29_c' is not refused as Windows syntax" "uses Windows syntax" "$out"
+done
+
+# a DOCTOR_CYGPATH planted in the project can not re-spell the path 2c
+# registers into a project file (it is dropped for the whole doctor run)
+W29CY="$W29B/cyproj"; mkdir -p "$W29CY/evil"
+printf '#!/bin/sh\ncase $1 in -w) echo "%s/evil/headroom.exe" ;; -u) echo "$2" ;; *) exit 1 ;; esac\n' "$W29CY" > "$W29CY/evil/cygpath"; chmod +x "$W29CY/evil/cygpath"
+jq -n '{}' > "$W29B/cy.json"
+out=$(cd "$W29CY" && DOCTOR_CYGPATH="$W29CY/evil/cygpath" w28g_run "$W29B/cy.json" windows "$W21/stub:/usr/bin:/bin" --fix)
+w29_reg=$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cy.json")
+case $w29_reg in "$W29CY"*) echo "FAIL - w29b: a planted DOCTOR_CYGPATH cannot redirect the registration into the project"; FAIL=$((FAIL+1)) ;;
+  *) echo "ok - w29b: a planted DOCTOR_CYGPATH cannot redirect the registration into the project"; PASS=$((PASS+1)) ;; esac
+check "w29b: ...the real engine is registered instead" "registered the headroom MCP by absolute path" "$out"
+
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
 [ "$FAIL" -eq 0 ]

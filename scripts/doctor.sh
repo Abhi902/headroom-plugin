@@ -115,6 +115,17 @@ say() {  # say <ok|fixed|FAIL|fixable|skip> <message> — aligned status lines
 
 TMPD=$(mktemp -d) || exit 1
 trap 'rm -rf "$TMPD"' EXIT
+# DOCTOR_CYGPATH (the test seam every win_path/unix_path goes through) is
+# environment, and a project's settings env can set it: a planted one could
+# re-spell the very path check 2c registers, AFTER the provenance check. So
+# honour it only when it is absolute and outside the project; otherwise drop it
+# for this whole run and fall back to the real cygpath.
+if [ -n "${DOCTOR_CYGPATH:-}" ]; then
+  case $DOCTOR_CYGPATH in
+    /*) _dcy=$(_dm_canon "$(dirname "$DOCTOR_CYGPATH")") && ! under_workspace "$_dcy" || unset DOCTOR_CYGPATH ;;
+    *)  unset DOCTOR_CYGPATH ;;
+  esac
+fi
 
 # one timestamped settings.json backup per doctor run, before the first edit.
 # Returns failure (and keeps returning it for the rest of this run, via
@@ -410,10 +421,12 @@ sl_native_syntax() {  # sl_native_syntax <cmd> — written for a non-POSIX spawn
   # A native PATH, not every backslash: printf '\n' and sed 's/\s//' are
   # bash-legal. At a token start: drive-qualified (C:\Users), UNC (\\host\...),
   # dot- or home-relative (.\x, ~\x); and, outside quotes, a backslash BETWEEN
-  # path characters that looks like a path (scripts\sl.js, a\b\c -- never
-  # cut -d\. or sed s/a\.b/).
+  # path characters that looks like a path: a\b\c, a file with an extension
+  # ending at a space or ; | & < > ) (scripts\sl.js, tools\x.cmd|more), or a
+  # named .dir (node_modules\.bin\x) -- never cut -d\., sed s/a\.b\.c/ or
+  # grep 1\.2\.3.
   local rp='(^|[[:space:]"'"'"'=])([A-Za-z]:\\[A-Za-z0-9_.$ -]|\\\\[A-Za-z0-9]|(\.{1,2}|~)\\)'
-  local rr='[A-Za-z0-9_-]\\(\.?[A-Za-z0-9_][A-Za-z0-9_.-]*\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+([[:space:];|&<>)]|$))'
+  local rr='[A-Za-z0-9_-]\\(\.[A-Za-z_][A-Za-z0-9_.-]+\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+([[:space:];|&<>)]|$))'
   [[ $c =~ $rp ]] && return 0
   t=$(printf '%s' "$c" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
   [[ $t =~ $rr ]] && return 0
@@ -1654,7 +1667,7 @@ else
           # with the wrong (or no) anchor can't also mangle an unrelated
           # sibling token that merely shares this one's prefix (e.g. a
           # coexisting ...headroom-statusline.sh.bak).
-          sl_new_cmd=${sl//"$sl_respelled_raw$sl_respelled_delim"/$CLAUDE_DIR/headroom-statusline.sh$sl_respelled_delim}
+          sl_new_cmd=${sl//"$sl_respelled_raw$sl_respelled_delim"/"$CLAUDE_DIR/headroom-statusline.sh$sl_respelled_delim"}
           if [ "$sl_new_cmd" = "$sl" ]; then
             # the replace found nothing to change -- never claim "fixed" for a
             # rewrite that silently did nothing, which would violate the

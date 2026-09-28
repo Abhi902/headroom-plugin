@@ -16,12 +16,12 @@ jobs:
       # trips it on EACH runner -- the largest such group is 15 assertions -- so
       # it tracks each runner's count: one shared value while both POSIX runners
       # count the same (today), a per-OS matrix expression if they diverge.
-      # Review round 38: 0d65ce2's run measured 1173 on macOS and on ubuntu; +10
-      # since gives 1183, and the gate is `ran -lt floor`, so the floor is
-      # 1183 - 14 = 1169 (a lost 15-assertion group lands below it).
+      # Review round 39: dcd2c39's run measured 1183 on macOS and on ubuntu; +8
+      # since gives 1191, and the gate is `ran -lt floor`, so the floor is
+      # 1191 - 14 = 1177 (a lost 15-assertion group lands below it).
       # RAISE it whenever fixtures are added -- at 810 the floor had drifted ~65 below
       # the real count and would have let four such groups vanish green.
-      MIN_FIXTURES: 1169
+      MIN_FIXTURES: 1177
     steps:
       - uses: actions/checkout@v7
       - name: deps
@@ -105,11 +105,11 @@ jobs:
           # block, and the grep counts zero and passes. The floor notices the
           # collapse regardless of how the skip is spelled.
           ran=$( { grep -oE '^[0-9]+ passed, [0-9]+ failed' suite.log || true; } | tail -1 | awk '{print $1+$3}' )
-          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-1169}" ]; then
-            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-1169}) — coverage collapsed"
+          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-1177}" ]; then
+            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-1177}) — coverage collapsed"
             exit 1
           fi
-          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-1169})"
+          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-1177})"
           grep -E '^[0-9]+ passed' suite.log | tail -1
   windows:
     runs-on: windows-latest
@@ -118,9 +118,9 @@ jobs:
       VENV_DIR: ${{ github.workspace }}/.headroom-venv
       # It must stay well above ~726, the count while the engine probe was
       # POSIX-only, so a regression of that fix is caught. RAISE as coverage grows.
-      # 1153 executed on 0d65ce2's run; +10 since gives 1163, so 1163 - 14 =
-      # 1149 (the gate is `ran -lt floor`: a lost 15-assertion group lands below).
-      MIN_FIXTURES: "1149"
+      # 1163 executed on dcd2c39's run; +8 since gives 1171, so 1171 - 14 =
+      # 1157 (the gate is `ran -lt floor`: a lost 15-assertion group lands below).
+      MIN_FIXTURES: "1157"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking

@@ -275,7 +275,8 @@ native_profile_dir() {  # the Windows user profile as a POSIX path, from the OS;
   # CSIDL_PROFILE via `cygpath -F 40` -- never $USERPROFILE, which is environment
   # (a project's settings env can set it). And the cygpath at its install path,
   # not whatever PATH finds first (PATH can be seeded too); DOCTOR_CYGPATH stays
-  # the test seam.
+  # the test seam -- and is environment as well, so a caller that draws a trust
+  # boundary from this must vet it first (under_workspace does).
   is_windows || return 1
   local c=${DOCTOR_CYGPATH:-/usr/bin/cygpath} p
   [ -x "$c" ] || return 1

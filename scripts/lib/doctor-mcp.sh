@@ -130,15 +130,9 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   if [ -n "${DOCTOR_CYGPATH:-}" ]; then
     case $DOCTOR_CYGPATH in
       /*) a=$(_dm_canon "$(dirname "$DOCTOR_CYGPATH")") || a=""
-          while [ -n "$a" ]; do
-            for r in "$r1" "$r2" "$r3"; do
-              [ -n "$r" ] && [ "$a" -ef "$r" ] && { cyg_ok=0; break 2; }
-            done
-            [ "$a" = / ] && break
-            b=${a%/*}; [ -n "$b" ] || b=/
-            [ "$b" = "$a" ] && break
-            a=$b
-          done ;;
+          [ -n "$a" ] && _dm_under_any "$a" "$r1
+$r2
+$r3" && cyg_ok=0 ;;
       *) cyg_ok=0 ;;
     esac
   fi
@@ -151,27 +145,25 @@ $uprof"
   for r in "$r1" "$r2" "$r3"; do
     { [ -z "$r" ] || [ "$r" = / ]; } && continue
     while IFS= read -r h; do
-      case $h in /*) ;; *) continue ;; esac
-      a=$h
-      while :; do
-        [ "$a" -ef "$r" ] && continue 3
-        [ "$a" = / ] || [ -z "$a" ] && break
-        b=${a%/*}; [ -n "$b" ] || b=/
-        [ "$b" = "$a" ] && break      # no parent left to strip: never loop
-        a=$b
-      done
+      case $h in /*) _dm_under_any "$h" "$r" && continue 2 ;; esac
     done <<< "$hs"
     kept="$kept$r
 "
   done
-  a=$d
+  _dm_under_any "$d" "$kept"
+}
+_dm_under_any() {  # _dm_under_any <path> <roots, one per line> — <path> or an ancestor IS one of them
+  # By IDENTITY (-ef), never by string prefix; stops at / or when nothing is
+  # left to strip, so no spelling of <path> can loop.
+  local a=$1 r b
   while [ -n "$a" ]; do
-    while IFS= read -r root; do
-      [ -n "$root" ] || continue
-      [ "$a" -ef "$root" ] && return 0
-    done <<< "$kept"
+    while IFS= read -r r; do
+      [ -n "$r" ] && [ "$a" -ef "$r" ] && return 0
+    done <<< "$2"
     [ "$a" = / ] && break
-    a=${a%/*}; [ -n "$a" ] || a=/
+    b=${a%/*}; [ -n "$b" ] || b=/
+    [ "$b" = "$a" ] && break
+    a=$b
   done
   return 1
 }
