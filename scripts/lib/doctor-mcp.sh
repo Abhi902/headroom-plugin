@@ -110,6 +110,9 @@ dm_cygpath_trusted() {  # DOCTOR_CYGPATH is unset, or absolute and outside every
   # No . or .. segment: the vet resolves logically, but the file that RUNS is the
   # raw string, and <proj>/lnk/../.. differs between the two when lnk is a symlink
   case /$DOCTOR_CYGPATH/ in */./*|*/../*) return 1 ;; esac
+  # nor a UNC (//host/...: vetting would already stat the share) or a backslash
+  # (MSYS dirname and the spawner can disagree on where it splits)
+  case $DOCTOR_CYGPATH in //*|*\\*) return 1 ;; esac
   c=$(_dm_canon "$(dirname "$DOCTOR_CYGPATH")") || return 1
   ! _dm_under_any "$c" "$(_dm_roots)"
 }

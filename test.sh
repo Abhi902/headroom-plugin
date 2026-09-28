@@ -6284,7 +6284,7 @@ check_absent "w29b: no claude CLI + a slow user entry is not refused" "refusing 
 check "w29b: ...it gets the slow note, as with claude on PATH" "did not answer within" "$out"
 check_absent "w29b: ...never an ok it has not earned" "MCP registered" "$out"
 # UNC and dot-relative arms
-for w29_c in 'node \\srv\share\sl.js' '.\sl.cmd'; do
+for w29_c in 'node \\srv\share\sl.js' '.\sl.cmd' 'node ..\..\sl.js' '..\..\sl.cmd' '.\..\x.cmd' 'node .\.bin\sl' '~\.claude\sl' 'node .\-x\sl'; do
   jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/p.json"
   case $(jq -r .statusLine.command "$W29BC/p.json") in *'\'*) ;; *) echo "FAIL - w29b: path fixture lost its backslash (fixture broken)"; FAIL=$((FAIL+1)) ;; esac
   out=$(w29b_chain "$W29BC/p.json" --fix)
@@ -6405,7 +6405,7 @@ check_eq "w29b: a cygpath planted on PATH cannot redirect the registration" \
          "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cy2.json")"
 
 # a quoted regex that starts with .\ is not a path (the remedy "quote it" works)
-for w29_c in "grep -o '.\\{0,20\\}foo' f" "grep -c '..\\*' f"; do
+for w29_c in "grep -o '.\\{0,20\\}foo' f" "grep -c '..\\*' f" "grep -Eo '.\\w+' f" "grep -P '..\\d{3}' f" "rg '.\\bfoo' f"; do
   jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/qre.json"
   out=$(w29b_chain "$W29BC/qre.json" --fix)
   check_absent "w29b: quoted $w29_c is not refused as Windows syntax" "uses Windows syntax" "$out"
@@ -6434,6 +6434,11 @@ check_eq "w29b: a DOCTOR_CYGPATH with .. after an in-project symlink is dropped"
          "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cy4.json")"
 check_absent "w29b: ...and the planted CLI never registers" "$W29CY/evil" "$out"
 rm -f "$W29CY/evil/headroom.exe"
+# ...nor a /./ segment, a UNC or a backslash (vetted spelling != spawned file)
+for w29_cy in '/usr/./bin/cygpath' '//host/share/cygpath' '/usr/bin\cygpath'; do
+  got=$(cd "$W29CY" && DOCTOR_CYGPATH="$w29_cy" bash -c ". '$ER'; . '$ROOT/scripts/lib/doctor-mcp.sh'; TMPD=\$(mktemp -d); dm_cygpath_trusted; echo rc=\$?")
+  check_eq "w29b: DOCTOR_CYGPATH '$w29_cy' is not trusted" "rc=1" "$got"
+done
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

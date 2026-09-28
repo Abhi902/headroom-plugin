@@ -242,8 +242,9 @@ _er_cygpath() {
   # The INSTALLED cygpath (Git for Windows, MSYS2 and Cygwin all ship it at
   # /usr/bin), never whatever a seeded PATH finds first: every path the doctor
   # registers or persists is spelled through here. DOCTOR_CYGPATH is the test
-  # seam: the doctor vets it at start (dm_cygpath_trusted); session-probe uses it
-  # as-is, for an existence test only.
+  # seam: the doctor vets it at start (dm_cygpath_trusted); session-probe RUNS it
+  # unvetted, but only to spell a path for a [ -f ] test -- nothing it answers is
+  # persisted (the accepted trusted-DOCTOR_* limit).
   if [ -n "${DOCTOR_CYGPATH:-}" ]; then "$DOCTOR_CYGPATH" "$@"
   elif [ -x /usr/bin/cygpath ]; then /usr/bin/cygpath "$@"
   else return 1; fi

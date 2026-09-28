@@ -422,9 +422,13 @@ sl_native_syntax() {  # sl_native_syntax <cmd> — written for a non-POSIX spawn
   # ending at a space or ; | & < > ) (scripts\sl.js, tools\x.cmd|more), or a
   # named .dir followed by more path (node_modules\.bin\x) -- never cut -d\.,
   # sed s/a\.b\.c/, grep 1\.2\.3 or grep www\.example\.com.
-  local rp='(^|[[:space:]"'"'"'=])([A-Za-z]:\\[A-Za-z0-9_.$ -]|\\\\[A-Za-z0-9]|(\.{1,2}|~)\\[A-Za-z0-9_$%])'
+  local rp='(^|[[:space:]"'"'"'=])([A-Za-z]:\\[A-Za-z0-9_.$ -]|\\\\[A-Za-z0-9])'
+  # .\ ..\ ~\ then a path char, a dot (..\..\x, .\.bin\x) or a dash -- but never
+  # inside single quotes, where bash keeps the backslash ('.\w+', '..\*' regexes)
+  local rd='(^|[[:space:]"=])(\.{1,2}|~)\\[A-Za-z0-9_$%.-]'
   local rr='[A-Za-z0-9_-]\\(\.[A-Za-z_][A-Za-z0-9_.-]+\\[A-Za-z0-9_-]|[A-Za-z0-9_][A-Za-z0-9_.-]*\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+([[:space:];|&<>)]|$))'
   [[ $c =~ $rp ]] && return 0
+  [[ $c =~ $rd ]] && return 0
   t=$(printf '%s' "$c" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
   [[ $t =~ $rr ]] && return 0
   # %NAME% as its own token: a start/space/quote/=/slash before it, and an
