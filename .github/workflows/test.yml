@@ -18,10 +18,10 @@ jobs:
       # count the same (today), a per-OS matrix expression if they diverge.
       # Review round 40: bfe20f5's run measured 1191 on macOS and on ubuntu; +5
       # since gives 1196, and the gate is `ran -lt floor`, so the floor is
-      # 1196 - 14 = 1182 (a lost 15-assertion group lands below it).
+      # 1196 - 14 = 1189 (a lost 15-assertion group lands below it).
       # RAISE it whenever fixtures are added -- at 810 the floor had drifted ~65 below
       # the real count and would have let four such groups vanish green.
-      MIN_FIXTURES: 1182
+      MIN_FIXTURES: 1189
     steps:
       - uses: actions/checkout@v7
       - name: deps
@@ -105,11 +105,11 @@ jobs:
           # block, and the grep counts zero and passes. The floor notices the
           # collapse regardless of how the skip is spelled.
           ran=$( { grep -oE '^[0-9]+ passed, [0-9]+ failed' suite.log || true; } | tail -1 | awk '{print $1+$3}' )
-          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-1182}" ]; then
-            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-1182}) — coverage collapsed"
+          if [ -z "$ran" ] || [ "$ran" -lt "${MIN_FIXTURES:-1189}" ]; then
+            echo "::error::only ${ran:-0} fixtures executed (floor: ${MIN_FIXTURES:-1189}) — coverage collapsed"
             exit 1
           fi
-          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-1182})"
+          echo "fixtures executed: $ran (floor: ${MIN_FIXTURES:-1189})"
           grep -E '^[0-9]+ passed' suite.log | tail -1
   windows:
     runs-on: windows-latest
@@ -120,7 +120,7 @@ jobs:
       # POSIX-only, so a regression of that fix is caught. RAISE as coverage grows.
       # 1171 executed on bfe20f5's run; +5 since gives 1176, so 1176 - 14 =
       # 1162 (the gate is `ran -lt floor`: a lost 15-assertion group lands below).
-      MIN_FIXTURES: "1162"
+      MIN_FIXTURES: "1169"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking

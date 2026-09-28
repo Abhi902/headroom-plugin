@@ -107,6 +107,9 @@ dm_cygpath_trusted() {  # DOCTOR_CYGPATH is unset, or absolute and outside every
   local c
   [ -n "${DOCTOR_CYGPATH:-}" ] || return 0
   case $DOCTOR_CYGPATH in /*) ;; *) return 1 ;; esac
+  # No . or .. segment: the vet resolves logically, but the file that RUNS is the
+  # raw string, and <proj>/lnk/../.. differs between the two when lnk is a symlink
+  case /$DOCTOR_CYGPATH/ in */./*|*/../*) return 1 ;; esac
   c=$(_dm_canon "$(dirname "$DOCTOR_CYGPATH")") || return 1
   ! _dm_under_any "$c" "$(_dm_roots)"
 }
@@ -120,7 +123,7 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # Compared by IDENTITY (-ef: same device and inode, the NTFS file id under
   # MSYS), walking <dir>'s ancestors -- a string prefix is case- and
   # 8.3-sensitive, and Windows paths are neither.
-  local d=$1 a home r1 r2 r3
+  local d=$1 home r1 r2 r3
   # Only an absolute path can be walked; anything else is refused as "inside"
   # (fail closed) rather than looping on a string that never reaches /.
   case $d in /*) ;; *) return 0 ;; esac
@@ -137,7 +140,9 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # it at the project to erase this very boundary.
   local r h hs kept="" uprof=""
   # ...and DOCTOR_CYGPATH (the test seam native_profile_dir honours) is
-  # environment too: only a trusted one may decide which roots are homes.
+  # environment too: only a trusted one may decide which roots are homes
+  # (doctor.sh already dropped an untrusted one at start; this is defence in
+  # depth for any other caller of this lib).
   dm_cygpath_trusted && { uprof=$(native_profile_dir 2>/dev/null) || uprof=""; }
   # a RELATIVE HOME (HOME=. from a project's settings env) is canonicalised
   # against the cwd -- it must not turn the project itself into "a home"

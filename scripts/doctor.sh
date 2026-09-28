@@ -45,7 +45,8 @@
 #   DOCTOR_OS          windows|unix — force platform branches (default: detect)
 #   DOCTOR_SHIM_DIR    where --fix shims `headroom` (default ~/.local/bin)
 #   DOCTOR_DRIVE_ROOT  prefix for the Windows drive mount (default "" => /c/...)
-#   DOCTOR_CYGPATH     cygpath stub for tests (default: cygpath when present)
+#   DOCTOR_CYGPATH     cygpath stub for tests (default: /usr/bin/cygpath when present;
+#                      dropped unless absolute and outside the project -- dm_cygpath_trusted)
 #   DOCTOR_SHIM_RUNS_TIMEOUT  seconds a start-up probe may take (default 5): the
 #                      shimmed `headroom --help`, and a registered MCP entry's
 #                      whole command (e.g. `uvx headroom-ai mcp serve --help`)
@@ -79,7 +80,8 @@ if ! type engine_python_candidates >/dev/null 2>&1 || ! type under_workspace >/d
    || ! type headroom_hijack_file >/dev/null 2>&1 || ! type _er_bounded >/dev/null 2>&1 \
    || ! type is_network_path >/dev/null 2>&1 || ! type mcp_user_args >/dev/null 2>&1 \
    || ! type mcp_local_args >/dev/null 2>&1 || ! type mcp_user_env >/dev/null 2>&1 \
-   || ! type mcp_local_env >/dev/null 2>&1; then
+   || ! type mcp_local_env >/dev/null 2>&1 || ! type dm_cygpath_trusted >/dev/null 2>&1 \
+   || ! type native_profile_dir >/dev/null 2>&1; then
   echo "doctor: scripts/lib/engine-resolve.sh or doctor-mcp.sh missing or stale — partial plugin checkout; reinstall the plugin" >&2
   exit 1
 fi
@@ -420,8 +422,8 @@ sl_native_syntax() {  # sl_native_syntax <cmd> — written for a non-POSIX spawn
   # ending at a space or ; | & < > ) (scripts\sl.js, tools\x.cmd|more), or a
   # named .dir followed by more path (node_modules\.bin\x) -- never cut -d\.,
   # sed s/a\.b\.c/, grep 1\.2\.3 or grep www\.example\.com.
-  local rp='(^|[[:space:]"'"'"'=])([A-Za-z]:\\[A-Za-z0-9_.$ -]|\\\\[A-Za-z0-9]|(\.{1,2}|~)\\)'
-  local rr='[A-Za-z0-9_-]\\(\.[A-Za-z_][A-Za-z0-9_.-]+\\[A-Za-z0-9_]|[A-Za-z0-9_][A-Za-z0-9_.-]*\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+([[:space:];|&<>)]|$))'
+  local rp='(^|[[:space:]"'"'"'=])([A-Za-z]:\\[A-Za-z0-9_.$ -]|\\\\[A-Za-z0-9]|(\.{1,2}|~)\\[A-Za-z0-9_$%])'
+  local rr='[A-Za-z0-9_-]\\(\.[A-Za-z_][A-Za-z0-9_.-]+\\[A-Za-z0-9_-]|[A-Za-z0-9_][A-Za-z0-9_.-]*\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+([[:space:];|&<>)]|$))'
   [[ $c =~ $rp ]] && return 0
   t=$(printf '%s' "$c" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
   [[ $t =~ $rr ]] && return 0

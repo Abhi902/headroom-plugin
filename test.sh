@@ -6365,7 +6365,7 @@ for w29_c in 'printf "%ld%%" 5' 'git log -1 --format=%an%%'; do
   check_absent "w29b: '$w29_c' is not refused as Windows syntax" "uses Windows syntax" "$out"
 done
 
-for w29_c in 'tools\sl.cmd|more' 'node node_modules\.bin\sl'; do
+for w29_c in 'tools\sl.cmd|more' 'node node_modules\.bin\sl' 'node node_modules\.bin\-x.js'; do
   jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/rp.json"
   out=$(w29b_chain "$W29BC/rp.json" --fix)
   check "w29b: '$w29_c' is refused as Windows syntax" "uses Windows syntax" "$out"
@@ -6403,6 +6403,37 @@ jq -n '{}' > "$W29B/cy2.json"
 out=$(cd "$W29CY" && w28g_run "$W29B/cy2.json" windows "$W29CY/evil:$W21/stub:/usr/bin:/bin" --fix)
 check_eq "w29b: a cygpath planted on PATH cannot redirect the registration" \
          "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cy2.json")"
+
+# a quoted regex that starts with .\ is not a path (the remedy "quote it" works)
+for w29_c in "grep -o '.\\{0,20\\}foo' f" "grep -c '..\\*' f"; do
+  jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/qre.json"
+  out=$(w29b_chain "$W29BC/qre.json" --fix)
+  check_absent "w29b: quoted $w29_c is not refused as Windows syntax" "uses Windows syntax" "$out"
+done
+
+# a RELATIVE DOCTOR_CYGPATH is dropped even when it resolves OUTSIDE the project
+mkdir -p "$W29B/outcy"
+printf '#!/bin/sh\ncase $1 in -w) echo "%s/evil/headroom.exe" ;; -u) echo "$2" ;; *) exit 1 ;; esac\n' "$W29CY" > "$W29B/outcy/cygpath"; chmod +x "$W29B/outcy/cygpath"
+jq -n '{}' > "$W29B/cy3.json"
+out=$(cd "$W29CY" && DOCTOR_CYGPATH=../outcy/cygpath w28g_run "$W29B/cy3.json" windows "$W21/stub:/usr/bin:/bin" --fix)
+check_eq "w29b: a relative DOCTOR_CYGPATH resolving outside the project is dropped too" \
+         "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cy3.json")"
+check_absent "w29b: ...and its answer never surfaces" "$W29CY/evil" "$out"
+
+# ..-after-symlink: the vet's logical cd reads <proj>/lnk/../.. as /usr/bin, but
+# the file that runs is <proj>/usr/bin/cygpath -- any . or .. segment is dropped
+w29_n=$(printf '%s' "$W29CY" | tr -cd / | wc -c | tr -d ' '); w29_n=$((w29_n + 1))
+w29_deep="$W29CY"; w29_up=""; i=0
+while [ "$i" -lt "$w29_n" ]; do w29_deep="$w29_deep/d"; w29_up="$w29_up../"; i=$((i + 1)); done
+mkdir -p "$w29_deep" "$W29CY/usr/bin" "$W29CY/evil"; ln -sfn "$w29_deep" "$W29CY/lnk"
+cp "$W29B/outcy/cygpath" "$W29CY/usr/bin/cygpath"
+cp "$W21/venv/bin/headroom" "$W29CY/evil/headroom.exe"; chmod +x "$W29CY/evil/headroom.exe"
+jq -n '{}' > "$W29B/cy4.json"
+out=$(cd "$W29CY" && DOCTOR_CYGPATH="$W29CY/lnk/${w29_up}usr/bin/cygpath" w28g_run "$W29B/cy4.json" windows "$W21/stub:/usr/bin:/bin" --fix)
+check_eq "w29b: a DOCTOR_CYGPATH with .. after an in-project symlink is dropped" \
+         "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cy4.json")"
+check_absent "w29b: ...and the planted CLI never registers" "$W29CY/evil" "$out"
+rm -f "$W29CY/evil/headroom.exe"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"

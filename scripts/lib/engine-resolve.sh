@@ -242,7 +242,8 @@ _er_cygpath() {
   # The INSTALLED cygpath (Git for Windows, MSYS2 and Cygwin all ship it at
   # /usr/bin), never whatever a seeded PATH finds first: every path the doctor
   # registers or persists is spelled through here. DOCTOR_CYGPATH is the test
-  # seam (the doctor vets it at start: dm_cygpath_trusted).
+  # seam: the doctor vets it at start (dm_cygpath_trusted); session-probe uses it
+  # as-is, for an existence test only.
   if [ -n "${DOCTOR_CYGPATH:-}" ]; then "$DOCTOR_CYGPATH" "$@"
   elif [ -x /usr/bin/cygpath ]; then /usr/bin/cygpath "$@"
   else return 1; fi
@@ -277,14 +278,12 @@ claude_json_path() {  # the Claude Code config that holds user- and local-scoped
 win_path()  { _er_cygpath -w "$1" 2>/dev/null || printf '%s\n' "$1"; }   # /c/x → C:\x
 native_profile_dir() {  # the Windows user profile as a POSIX path, from the OS; fails elsewhere
   # CSIDL_PROFILE via `cygpath -F 40` -- never $USERPROFILE, which is environment
-  # (a project's settings env can set it). And the cygpath at its install path,
-  # not whatever PATH finds first (PATH can be seeded too); DOCTOR_CYGPATH stays
-  # the test seam -- and is environment as well, so a caller that draws a trust
-  # boundary from this must vet it first (under_workspace does).
+  # (a project's settings env can set it). Through _er_cygpath, so the installed
+  # cygpath or the test seam; a caller that draws a trust boundary from this
+  # must vet DOCTOR_CYGPATH first (dm_cygpath_trusted).
   is_windows || return 1
-  local c=${DOCTOR_CYGPATH:-/usr/bin/cygpath} p
-  [ -x "$c" ] || return 1
-  p=$("$c" -F 40 2>/dev/null) || return 1
+  local p
+  p=$(_er_cygpath -F 40 2>/dev/null) || return 1
   case $p in /*) printf '%s\n' "$p" ;; *) return 1 ;; esac
 }
 unix_path() { _er_cygpath -u "$1" 2>/dev/null || printf '%s\n' "$1"; }   # C:\x → /c/x
