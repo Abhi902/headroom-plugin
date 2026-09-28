@@ -119,13 +119,8 @@ trap 'rm -rf "$TMPD"' EXIT
 # environment, and a project's settings env can set it: a planted one could
 # re-spell the very path check 2c registers, AFTER the provenance check. So
 # honour it only when it is absolute and outside the project; otherwise drop it
-# for this whole run and fall back to the real cygpath.
-if [ -n "${DOCTOR_CYGPATH:-}" ]; then
-  case $DOCTOR_CYGPATH in
-    /*) _dcy=$(_dm_canon "$(dirname "$DOCTOR_CYGPATH")") && ! under_workspace "$_dcy" || unset DOCTOR_CYGPATH ;;
-    *)  unset DOCTOR_CYGPATH ;;
-  esac
-fi
+# for this whole run and fall back to the installed /usr/bin/cygpath.
+dm_cygpath_trusted || unset DOCTOR_CYGPATH   # one rule, lib/doctor-mcp.sh
 
 # one timestamped settings.json backup per doctor run, before the first edit.
 # Returns failure (and keeps returning it for the rest of this run, via
@@ -423,10 +418,10 @@ sl_native_syntax() {  # sl_native_syntax <cmd> — written for a non-POSIX spawn
   # dot- or home-relative (.\x, ~\x); and, outside quotes, a backslash BETWEEN
   # path characters that looks like a path: a\b\c, a file with an extension
   # ending at a space or ; | & < > ) (scripts\sl.js, tools\x.cmd|more), or a
-  # named .dir (node_modules\.bin\x) -- never cut -d\., sed s/a\.b\.c/ or
-  # grep 1\.2\.3.
+  # named .dir followed by more path (node_modules\.bin\x) -- never cut -d\.,
+  # sed s/a\.b\.c/, grep 1\.2\.3 or grep www\.example\.com.
   local rp='(^|[[:space:]"'"'"'=])([A-Za-z]:\\[A-Za-z0-9_.$ -]|\\\\[A-Za-z0-9]|(\.{1,2}|~)\\)'
-  local rr='[A-Za-z0-9_-]\\(\.[A-Za-z_][A-Za-z0-9_.-]+\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+([[:space:];|&<>)]|$))'
+  local rr='[A-Za-z0-9_-]\\(\.[A-Za-z_][A-Za-z0-9_.-]+\\[A-Za-z0-9_]|[A-Za-z0-9_][A-Za-z0-9_.-]*\\|[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9]+([[:space:];|&<>)]|$))'
   [[ $c =~ $rp ]] && return 0
   t=$(printf '%s' "$c" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")
   [[ $t =~ $rr ]] && return 0
@@ -1803,7 +1798,7 @@ CHEOF
           say fixed "statusLine wired to $sl_disp (script copied, backup: settings.json.bak.*)"
         fi
       elif [ "$sl_chain_ok" -eq 2 ]; then
-        say FAIL "your statusLine command ($sl_base_cmd) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — settings.json left untouched; to show both, rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), then re-run --fix"
+        say FAIL "your statusLine command ($sl_base_cmd) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — settings.json left untouched; to show both, rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then re-run --fix"
       elif [ "$sl_chain_ok" -eq 0 ]; then
         say FAIL "could not write the status-line chain script to $CLAUDE_DIR/headroom-statusline-chain.sh — settings.json left untouched"
       else
@@ -1815,7 +1810,7 @@ CHEOF
   elif is_windows && sl_base_now=$(sl_base_command) && [ -n "$sl_base_now" ] && sl_native_syntax "$sl_base_now"; then
     # the same refusal --fix makes (see the WINDOWS MERGE note): never offer a
     # `fixable` that --fix will only FAIL
-    say FAIL "the headroom badge is not wired, and your own status-line command ($sl_base_now) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), then run --fix"
+    say FAIL "the headroom badge is not wired, and your own status-line command ($sl_base_now) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then run --fix"
   elif [ -n "$sl" ]; then
     say fixable "statusLine present without the headroom badge — --fix appends it, preserving your command under _headroomStatusLineBackup"
   else

@@ -239,8 +239,12 @@ resolve_headroom_cli() {  # first executable `headroom` CLI (.exe first: harmles
 }
 
 _er_cygpath() {
+  # The INSTALLED cygpath (Git for Windows, MSYS2 and Cygwin all ship it at
+  # /usr/bin), never whatever a seeded PATH finds first: every path the doctor
+  # registers or persists is spelled through here. DOCTOR_CYGPATH is the test
+  # seam (the doctor vets it at start: dm_cygpath_trusted).
   if [ -n "${DOCTOR_CYGPATH:-}" ]; then "$DOCTOR_CYGPATH" "$@"
-  elif command -v cygpath >/dev/null 2>&1; then cygpath "$@"
+  elif [ -x /usr/bin/cygpath ]; then /usr/bin/cygpath "$@"
   else return 1; fi
 }
 headroom_hijack_file() {  # the first headroom.* a bare-name spawn would pick up from the project dir, empty if none

@@ -85,6 +85,31 @@ workspace_root() {  # workspace_root <dir> — the REPOSITORY <dir> belongs to, 
   worktree_top "$d"
 }
 
+_dm_roots() {  # the project roots, one per line: the cwd, its checkout, that checkout's main repo
+  # They depend only on the cwd: computed (up to three bounded git spawns) once
+  # per cwd per run, not once per candidate, via the run's TMPD.
+  local pwd_c cached r2 r3
+  pwd_c=$(_dm_canon "$PWD") || pwd_c=$PWD
+  if cached=$(_dm_cache_get ws-roots "$pwd_c"); then
+    # read, not expansions: an EMPTY r3 must stay empty (r2's value is not a
+    # stand-in for it), and $() already dropped the trailing newline
+    { IFS= read -r r2; IFS= read -r r3; } <<< "$cached"
+  else
+    r2=$(worktree_top "$pwd_c"); r3=$(workspace_root "$pwd_c")
+    _dm_cache_put ws-roots "$pwd_c" "$r2" "$r3"
+  fi
+  printf '%s\n%s\n%s\n' "$pwd_c" "$r2" "$r3"
+}
+dm_cygpath_trusted() {  # DOCTOR_CYGPATH is unset, or absolute and outside every project root
+  # The ONE rule for the test seam every win_path/unix_path (and the native
+  # profile) goes through: it is environment, so a project's settings env could
+  # plant it. Checked against the RAW roots -- never home-dropped ones.
+  local c
+  [ -n "${DOCTOR_CYGPATH:-}" ] || return 0
+  case $DOCTOR_CYGPATH in /*) ;; *) return 1 ;; esac
+  c=$(_dm_canon "$(dirname "$DOCTOR_CYGPATH")") || return 1
+  ! _dm_under_any "$c" "$(_dm_roots)"
+}
 under_workspace() {  # under_workspace <dir> — <dir> is inside the project the doctor runs in
   # A UNION of roots, never a replacement: the directory the doctor runs in, the
   # checkout it belongs to, and that checkout's main repository. Replacing the
@@ -95,24 +120,12 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # Compared by IDENTITY (-ef: same device and inode, the NTFS file id under
   # MSYS), walking <dir>'s ancestors -- a string prefix is case- and
   # 8.3-sensitive, and Windows paths are neither.
-  local d=$1 a pwd_c home r1 r2 r3 root
+  local d=$1 a home r1 r2 r3
   # Only an absolute path can be walked; anything else is refused as "inside"
   # (fail closed) rather than looping on a string that never reaches /.
   case $d in /*) ;; *) return 0 ;; esac
-  pwd_c=$(_dm_canon "$PWD") || pwd_c=$PWD
   home=$(_dm_canon "${HOME:-/}") || home=${HOME:-/}
-  # The roots depend only on the cwd: compute them (up to three bounded git
-  # spawns) once per cwd per run, not once per candidate, via the run's TMPD.
-  local cached
-  if cached=$(_dm_cache_get ws-roots "$pwd_c"); then
-    # read, not expansions: an EMPTY r3 must stay empty (r2's value is not a
-    # stand-in for it), and $() already dropped the trailing newline
-    { IFS= read -r r2; IFS= read -r r3; } <<< "$cached"
-  else
-    r2=$(worktree_top "$pwd_c"); r3=$(workspace_root "$pwd_c")
-    _dm_cache_put ws-roots "$pwd_c" "$r2" "$r3"
-  fi
-  r1=$pwd_c
+  { IFS= read -r r1; IFS= read -r r2; IFS= read -r r3; } <<< "$(_dm_roots)"
   # A root that CONTAINS $HOME (a cwd of /Users, C:\ or / itself) is no project
   # boundary either: taking it would put ~/.headroom-venv, ~/.local/bin and every
   # user-level install "inside the workspace". Drop such roots up front.
@@ -122,21 +135,10 @@ under_workspace() {  # under_workspace <dir> — <dir> is inside the project the
   # reveal -- but take it from the OS (cygpath -F 40, CSIDL_PROFILE), NEVER from
   # $USERPROFILE: that is environment, and a project's settings env could point
   # it at the project to erase this very boundary.
-  local r h b hs kept="" uprof=""
+  local r h hs kept="" uprof=""
   # ...and DOCTOR_CYGPATH (the test seam native_profile_dir honours) is
-  # environment too: never let a relative one, or one inside this project,
-  # decide which roots are homes.
-  local cyg_ok=1
-  if [ -n "${DOCTOR_CYGPATH:-}" ]; then
-    case $DOCTOR_CYGPATH in
-      /*) a=$(_dm_canon "$(dirname "$DOCTOR_CYGPATH")") || a=""
-          [ -n "$a" ] && _dm_under_any "$a" "$r1
-$r2
-$r3" && cyg_ok=0 ;;
-      *) cyg_ok=0 ;;
-    esac
-  fi
-  [ "$cyg_ok" -eq 1 ] && { uprof=$(native_profile_dir 2>/dev/null) || uprof=""; }
+  # environment too: only a trusted one may decide which roots are homes.
+  dm_cygpath_trusted && { uprof=$(native_profile_dir 2>/dev/null) || uprof=""; }
   # a RELATIVE HOME (HOME=. from a project's settings env) is canonicalised
   # against the cwd -- it must not turn the project itself into "a home"
   case ${HOME:-} in /*|[A-Za-z]:[\\/]*) hs=$home ;; *) hs="" ;; esac

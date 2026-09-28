@@ -6379,7 +6379,7 @@ check "w29b: in-project CLI + dead entry + claude present is refused" "refusing 
 check_eq "w29b: ...and the dead entry is left, never replaced by it" "/nonexistent/w29-dead" \
          "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/dead2.json")"
 
-for w29_c in 'grep 1\.2\.3 f' 'sed s/a\.b\.c/x/' 'grep 127\.0\.0\.1 log' 'sed -e s/v1\.2\.3/x/'; do
+for w29_c in 'grep 1\.2\.3 f' 'sed s/a\.b\.c/x/' 'grep 127\.0\.0\.1 log' 'sed -e s/v1\.2\.3/x/' 'grep -c www\.example\.com log' 'sed s/foo\.com\.au/x/'; do
   jq -n --arg c "$w29_c" '{statusLine:{type:"command",command:$c}}' > "$W29BC/dots.json"
   out=$(w29b_chain "$W29BC/dots.json" --fix)
   check_absent "w29b: '$w29_c' is not refused as Windows syntax" "uses Windows syntax" "$out"
@@ -6390,11 +6390,19 @@ done
 W29CY="$W29B/cyproj"; mkdir -p "$W29CY/evil"
 printf '#!/bin/sh\ncase $1 in -w) echo "%s/evil/headroom.exe" ;; -u) echo "$2" ;; *) exit 1 ;; esac\n' "$W29CY" > "$W29CY/evil/cygpath"; chmod +x "$W29CY/evil/cygpath"
 jq -n '{}' > "$W29B/cy.json"
-out=$(cd "$W29CY" && DOCTOR_CYGPATH="$W29CY/evil/cygpath" w28g_run "$W29B/cy.json" windows "$W21/stub:/usr/bin:/bin" --fix)
-w29_reg=$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cy.json")
-case $w29_reg in "$W29CY"*) echo "FAIL - w29b: a planted DOCTOR_CYGPATH cannot redirect the registration into the project"; FAIL=$((FAIL+1)) ;;
-  *) echo "ok - w29b: a planted DOCTOR_CYGPATH cannot redirect the registration into the project"; PASS=$((PASS+1)) ;; esac
-check "w29b: ...the real engine is registered instead" "registered the headroom MCP by absolute path" "$out"
+for w29_cy in "$W29CY/evil/cygpath" evil/cygpath; do
+  jq -n '{}' > "$W29B/cy.json"
+  out=$(cd "$W29CY" && DOCTOR_CYGPATH="$w29_cy" w28g_run "$W29B/cy.json" windows "$W21/stub:/usr/bin:/bin" --fix)
+  check_eq "w29b: a planted DOCTOR_CYGPATH ($w29_cy) cannot redirect the registration" \
+           "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cy.json")"
+  check_absent "w29b: ...and never surfaces the planted path" "$W29CY/evil" "$out"
+done
+
+# ...nor can a cygpath planted first on PATH (only the installed one is used)
+jq -n '{}' > "$W29B/cy2.json"
+out=$(cd "$W29CY" && w28g_run "$W29B/cy2.json" windows "$W29CY/evil:$W21/stub:/usr/bin:/bin" --fix)
+check_eq "w29b: a cygpath planted on PATH cannot redirect the registration" \
+         "$(er win_path "$W21/venv/bin/headroom")" "$(jq -r '.mcpServers.headroom.command // empty' "$W29B/cy2.json")"
 
 echo
 echo "$PASS passed, $FAIL failed${SKIP:+, $SKIP skipped}"
