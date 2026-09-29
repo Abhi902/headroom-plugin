@@ -274,7 +274,9 @@ try:
     result = compress([{"role": "tool", "content": raw}])
 except Exception as e:
     print(f"hcat: compression failed: {e}", file=sys.stderr)
-    _note_error("runtime", f"hcat: compression failed: {str(e)[:120]} — run /headroom-usage-indicator:doctor")
+    # only the exception TYPE is recorded: its text can carry file content, and the
+    # session probe surfaces this record in Claude's context
+    _note_error("runtime", f"hcat: compression failed ({type(e).__name__}) — run /headroom-usage-indicator:doctor")
     sys.exit(4)
 _clear_error()
 

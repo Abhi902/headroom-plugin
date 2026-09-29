@@ -1084,7 +1084,7 @@ elif [ -n "$cli_res" ]; then
   if [ "$FIX" -eq 1 ]; then
     shim=$(shim_headroom "$cli_res"); shim_rc=$?
     if [ "$shim_rc" -eq 2 ]; then
-      say FAIL "a different headroom already exists at $(shim_target) — not on PATH; add $SHIM_DIR to PATH or remove that file, then re-run --fix"
+      say FAIL "a different headroom already exists at $(shim_target) — not on PATH; add $SHIM_DIR to PATH or remove that file, then re-run --fix (with the user's consent)"
     elif [ "$shim_rc" -eq 3 ]; then
       say FAIL "the resolved headroom CLI ($cli_res) is not a Windows executable — it is a \`#!\` console script (no MZ/PE header), and Windows cannot spawn one shell-less, so copying it to $(shim_target) would leave the bundled MCP unable to connect; reinstall the engine with a Windows layout so pip produces a real Scripts\\headroom.exe: py -3 -m venv $VENV_DIR && $VENV_DIR/Scripts/python.exe -m pip install \"headroom-ai[all]\" (or: uv tool install headroom-ai)"
     elif [ "$shim_rc" -ne 0 ]; then
@@ -1697,7 +1697,7 @@ else
     # No Git for Windows bash outside the project: refuse to wire rather than
     # persist a project file or a bare `bash` (resolved cwd-first on Windows)
     # -- decided before ANY write: no backup, no seed, no lib, no chain script.
-    say FAIL "$(sl_no_bash_reason), then re-run --fix; settings.json left untouched"
+    say FAIL "$(sl_no_bash_reason), then re-run --fix (with the user's consent); settings.json left untouched"
   elif [ "$FIX" -eq 1 ]; then
     mkdir -p "$CLAUDE_DIR"
     [ -f "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
@@ -1804,7 +1804,7 @@ CHEOF
           say fixed "statusLine wired to $sl_disp (script copied, backup: settings.json.bak.*)"
         fi
       elif [ "$sl_chain_ok" -eq 2 ]; then
-        say FAIL "your statusLine command ($sl_base_cmd) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — settings.json left untouched; to show both, rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then re-run --fix"
+        say FAIL "your statusLine command ($sl_base_cmd) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — settings.json left untouched; to show both, rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then re-run --fix (with the user's consent)"
       elif [ "$sl_chain_ok" -eq 0 ]; then
         say FAIL "could not write the status-line chain script to $CLAUDE_DIR/headroom-statusline-chain.sh — settings.json left untouched"
       else
@@ -1812,11 +1812,11 @@ CHEOF
       fi
     fi
   elif is_windows && [ -z "$(sl_bash_path)" ]; then
-    say FAIL "statusLine is not wired to the headroom badge, and $(sl_no_bash_reason), then run --fix"
+    say FAIL "statusLine is not wired to the headroom badge, and $(sl_no_bash_reason), then run --fix (with the user's consent)"
   elif is_windows && sl_base_now=$(sl_base_command) && [ -n "$sl_base_now" ] && sl_native_syntax "$sl_base_now"; then
     # the same refusal --fix makes (see the WINDOWS MERGE note): never offer a
     # `fixable` that --fix will only FAIL
-    say FAIL "the headroom badge is not wired, and your own status-line command ($sl_base_now) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then run --fix"
+    say FAIL "the headroom badge is not wired, and your own status-line command ($sl_base_now) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then run --fix (with the user's consent)"
   elif [ -n "$sl" ]; then
     say fixable "statusLine present without the headroom badge — --fix appends it, preserving your command under _headroomStatusLineBackup"
   else
@@ -1983,6 +1983,6 @@ summary="$OK ok"
 [ "$SKIPPED" -gt 0 ] && summary="$summary · $SKIPPED skipped"
 echo "$summary"
 if [ "$FIXABLE" -gt 0 ] && [ "$FIX" -eq 0 ]; then
-  echo "→ re-run with --fix to repair."
+  echo "→ re-run with --fix to repair (with the user's consent)."
 fi
 [ "$FAILED" -eq 0 ]

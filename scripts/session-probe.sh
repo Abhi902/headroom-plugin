@@ -216,22 +216,15 @@ fi
 
 # --- 5. surface a fresh recorded error even when today's checks pass
 if [ -z "$problems" ] && [ -f "$STATE_DIR/last-error" ]; then
-  { read -r le_ts _le_comp le_msg < "$STATE_DIR/last-error"; } 2>/dev/null || true
+  { read -r le_ts le_comp _le_msg < "$STATE_DIR/last-error"; } 2>/dev/null || true
   case "${le_ts:-}" in (*[!0-9]*|"") le_ts=0 ;; esac
   le_age=$(( $(date +%s) - le_ts ))
   if [ "$le_age" -ge 0 ] 2>/dev/null && [ "$le_age" -le 86400 ] 2>/dev/null; then
-    # A recorded message carries its own "run <doctor>" pointer (usually at the
-    # end); cut at the FIRST known pointer form so the line names the command
-    # once and no "--fix" imperative from the record -- even mid-message --
-    # reaches Claude's context. Only these exact forms (current, pre-rename),
-    # never arbitrary text. (A leading space lets a record that is ONLY the
-    # pointer match too; a native-Windows writer may leave a CR before the LF.)
-    le_msg=" ${le_msg%$'\r'}"
-    le_msg=${le_msg%%" — run /headroom-usage-indicator:doctor"*}
-    le_msg=${le_msg%%"; run /headroom-usage-indicator:doctor"*}
-    le_msg=${le_msg%%" — run /doctor"*}; le_msg=${le_msg%%"; run /doctor"*}   # bare-doctor-ok: pre-rename records
-    le_msg=${le_msg# }
-    add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /headroom-usage-indicator:doctor (doctor clears this once healthy)"
+    # Only the component -- never the recorded message: its text can come from
+    # an exception, file content or an environment path, and this line lands in
+    # Claude's context. The doctor reads the full record itself.
+    case "${le_comp:-}" in (*[!a-z]*|"") le_comp=unknown ;; esac
+    add_problem "a recent headroom $le_comp failure was recorded — run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix), which clears this once healthy"
   fi
 fi
 
@@ -243,7 +236,9 @@ fi
 # fish, and /headroom-usage-indicator:doctor --fix wires the status line while repairing it anyway. This is
 # a setup reminder, never a breakage: it does not write last-error or flip the
 # badge to "broken".
-if [ -z "$problems" ] && command -v jq >/dev/null 2>&1; then
+# HEADROOM_NO_SETUP_NUDGE=1 silences this reminder for users who keep their own
+# status line and do not want the badge.
+if [ -z "$problems" ] && [ "${HEADROOM_NO_SETUP_NUDGE:-}" != 1 ] && command -v jq >/dev/null 2>&1; then
   SETTINGS="${HEADROOM_SETTINGS:-${HOME:-}/.claude/settings.json}"
   CLAUDE_DIR=$(dirname "$SETTINGS")
   sl_cmd=""
