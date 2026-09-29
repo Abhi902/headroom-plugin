@@ -479,7 +479,7 @@ mcp_no_claude() {  # 2c: an entry must be added or replaced, but there is no `cl
   if [ -n "$mcp_abs" ]; then
     mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: $rm_first$(mcp_add_hint "$mcp_abs")"
   else
-    mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; fix the engine first, then re-run /headroom-usage-indicator:doctor --fix"
+    mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; fix the engine first, then re-run /headroom-usage-indicator:doctor --fix (with the user's consent)"
   fi
   if is_windows; then say note "$mcp_msg — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it"
   else mcp_state=blocked; fi
@@ -1073,7 +1073,7 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
   else
     cli_own=""
     is_own_shim "$cli_now" \
-      && cli_own=" — this file is the doctor's own shim from an earlier run: delete it and re-run /headroom-usage-indicator:doctor --fix to rewrite it"
+      && cli_own=" — this file is the doctor's own shim from an earlier run: delete it and re-run /headroom-usage-indicator:doctor --fix to rewrite it (with the user's consent)"
     CLI_DEAD_PATH=$cli_now
     say FAIL "headroom on PATH at $cli_now does not run (\`$cli_now --help\` failed) — the bundled MCP spawns \`headroom\` by name and will fail to connect; reinstall the engine: $(reinstall_hint)$cli_own"
   fi
@@ -1256,7 +1256,7 @@ if [ "$mcp_need" -eq 1 ]; then
     say skip "MCP registration by absolute path (the headroom CLI does not start — check 2b above already FAILed it)"
     mcp_state=skip
   elif [ "$mcp_dead" -eq 1 ]; then
-    say fixable "the resolved headroom CLI does not start, so the MCP was not registered by absolute path; fix the engine (see check 2b) and re-run /headroom-usage-indicator:doctor --fix"
+    say fixable "the resolved headroom CLI does not start, so the MCP was not registered by absolute path; fix the engine (see check 2b) and re-run /headroom-usage-indicator:doctor --fix (with the user's consent)"
     mcp_state=dead
   elif [ -z "$mcp_abs" ]; then
     # Say SOMETHING. check 2 reports the engine, but it can be `ok` while
@@ -1281,7 +1281,7 @@ if [ "$mcp_need" -eq 1 ]; then
     # Trust the config file, not the exit status: success means the entry is
     # there, naming the path we asked for.
     if [ "$mcp_stuck" -eq 1 ]; then
-      say fixable "could not remove the $mcp_what user-scoped headroom MCP ($mcp_old) — run: claude mcp remove headroom -s user, then re-run /headroom-usage-indicator:doctor --fix"
+      say fixable "could not remove the $mcp_what user-scoped headroom MCP ($mcp_old) — run: claude mcp remove headroom -s user, then re-run /headroom-usage-indicator:doctor --fix (with the user's consent)"
     elif mcp_add "$mcp_abs" && [ "$(mcp_user_cmd)" = "$mcp_abs" ]; then
       say fixed "registered the headroom MCP by absolute path ($mcp_abs) as a user-scoped server$mcp_repl — $mcp_why; restart Claude Code"
       mcp_state=ok

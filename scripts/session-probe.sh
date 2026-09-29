@@ -150,7 +150,7 @@ engine_off_path() {
   command -v headroom >/dev/null 2>&1 && return 0
   user_mcp_by_path; byp=$?
   [ "$byp" -eq 0 ] && return 0
-  add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; offer the user /headroom-usage-indicator:doctor --fix to repair it (ask first)"
+  add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; the headroom doctor repairs it: run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix)"
   # The engine WORKS and the MCP still cannot start: that is a live feature
   # outage, not a setup gap, and the badge has to say so. Leaving it at a nudge
   # is what makes a v2.7.x -> v2.8 update go silent -- a dead MCP renders as an
@@ -169,7 +169,7 @@ engine_off_path() {
   # byp=2: the registration lookup timed out -- unknown, so nudge but do not
   # light the sticky badge on a guess.
   [ "$byp" -eq 2 ] && return 0
-  is_windows || note_error mcp "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /headroom-usage-indicator:doctor --fix"
+  is_windows || note_error mcp "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /headroom-usage-indicator:doctor"
 }
 # ...and the other half of "spawned by name": on Windows a bare command name is
 # resolved from the spawning process's current directory BEFORE PATH, so a
@@ -202,7 +202,7 @@ elif ! command -v headroom >/dev/null 2>&1; then
   # Never-installed engine is the ordinary red-idle state, not a breakage:
   # say it once at session start, but do not flip the badge to broken. Same
   # reasoning for the off-PATH nudge above: add_problem, never note_error.
-  add_problem "headroom engine not installed — offer the user /headroom-usage-indicator:doctor --fix to bootstrap it (ask first)"
+  add_problem "headroom engine not installed — the headroom doctor bootstraps it: run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix)"
 fi
 
 # --- 4. bundled price table parses (when jq is available to check)
@@ -220,19 +220,16 @@ if [ -z "$problems" ] && [ -f "$STATE_DIR/last-error" ]; then
   case "${le_ts:-}" in (*[!0-9]*|"") le_ts=0 ;; esac
   le_age=$(( $(date +%s) - le_ts ))
   if [ "$le_age" -ge 0 ] 2>/dev/null && [ "$le_age" -le 86400 ] 2>/dev/null; then
-    # Recorded messages already end with their own "run <doctor>" pointer; strip
-    # it so the line names the command once. Only the pointer forms the writers
-    # actually use (current, pre-rename; optionally followed by " --fix" or
-    # " again"), and only the first that matches -- never arbitrary text.
-    # (a leading space lets a record that is ONLY the pointer match too; a
-    # native-Windows writer may leave a CR before the LF)
+    # A recorded message carries its own "run <doctor>" pointer (usually at the
+    # end); cut at the FIRST known pointer form so the line names the command
+    # once and no "--fix" imperative from the record -- even mid-message --
+    # reaches Claude's context. Only these exact forms (current, pre-rename),
+    # never arbitrary text. (A leading space lets a record that is ONLY the
+    # pointer match too; a native-Windows writer may leave a CR before the LF.)
     le_msg=" ${le_msg%$'\r'}"
-    for _le_p in " — run /headroom-usage-indicator:doctor" "; run /headroom-usage-indicator:doctor" \
-                 " — run /doctor" "; run /doctor"; do   # bare-doctor-ok: pre-rename records
-      case $le_msg in
-        *"$_le_p"|*"$_le_p --fix"|*"$_le_p again") le_msg=${le_msg%"$_le_p"*}; break ;;
-      esac
-    done
+    le_msg=${le_msg%%" — run /headroom-usage-indicator:doctor"*}
+    le_msg=${le_msg%%"; run /headroom-usage-indicator:doctor"*}
+    le_msg=${le_msg%%" — run /doctor"*}; le_msg=${le_msg%%"; run /doctor"*}   # bare-doctor-ok: pre-rename records
     le_msg=${le_msg# }
     add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /headroom-usage-indicator:doctor (doctor clears this once healthy)"
   fi
@@ -258,11 +255,11 @@ if [ -z "$problems" ] && command -v jq >/dev/null 2>&1; then
       # (issue #2). Nudge if a wired copy is missing those deps.
       if [ -f "$CLAUDE_DIR/headroom-statusline.sh" ] \
          && [ ! -f "$CLAUDE_DIR/lib/attribution.jq" ] && [ ! -f "$CLAUDE_DIR/attribution.jq" ]; then
-        setup="status line badge is missing its deps and will read zero — offer the user /headroom-usage-indicator:doctor --fix (ask first)"
+        setup="status line badge is missing its deps and will read zero — the headroom doctor installs them: run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix)"
       fi
       ;;
     *)
-      setup="status line badge isn't set up yet — offer the user /headroom-usage-indicator:doctor --fix to show it (ask first)"
+      setup="status line badge isn't set up yet — the headroom doctor wires it: run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix)"
       ;;
   esac
 fi
