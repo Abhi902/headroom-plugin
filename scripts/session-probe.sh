@@ -59,10 +59,10 @@ fi
 # A network share is named as one and never stat-ed (doctor check 0 says the same).
 if is_windows && is_network_path "${CLAUDE_CODE_GIT_BASH_PATH:-}"; then
   note_error install "CLAUDE_CODE_GIT_BASH_PATH points at a network share"
-  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a network share ($CLAUDE_CODE_GIT_BASH_PATH) — Git for Windows is never installed on one; set it to the local Git\\bin\\bash.exe in settings.json env, or unset it"
+  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a network share (the headroom doctor shows the value) — Git for Windows is never installed on one; set it to the local Git\\bin\\bash.exe in settings.json env, or unset it"
 elif is_windows && [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
   note_error install "CLAUDE_CODE_GIT_BASH_PATH points at a missing file"
-  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a missing Git Bash ($CLAUDE_CODE_GIT_BASH_PATH) — fix it in settings.json env"
+  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a missing Git Bash (the headroom doctor shows the value) — fix it in settings.json env"
 fi
 
 # --- 2. hcat present + executable (plugin layout, legacy sibling fallback)
@@ -184,7 +184,7 @@ engine_name_hijack() {
   # carry a second copy that can drift
   type headroom_hijack_file >/dev/null 2>&1 || return 0
   f=$(headroom_hijack_file)
-  [ -n "$f" ] && add_problem "an executable $f sits in this project — on Windows a bare command name resolves from the project directory before PATH, so the bundled MCP would spawn it instead of the headroom engine; remove or rename it"
+  [ -n "$f" ] && add_problem "an executable ${f##*/} sits in this project — on Windows a bare command name resolves from the project directory before PATH, so the bundled MCP would spawn it instead of the headroom engine; remove or rename it"
   return 0
 }
 engine_name_hijack
@@ -192,7 +192,7 @@ if [ -n "${HCAT_PYTHON:-}" ]; then
   # An explicit override pointing nowhere is a breakage, not an absence.
   if [ ! -x "$HCAT_PYTHON" ]; then
     note_error engine "HCAT_PYTHON is set but not executable ($HCAT_PYTHON)"
-    add_problem "HCAT_PYTHON points at a non-executable python ($HCAT_PYTHON) — unset or fix it"
+    add_problem "HCAT_PYTHON is set but does not point at an executable python (the headroom doctor shows the value) — unset or fix it"
   else
     engine_off_path
   fi
@@ -222,8 +222,10 @@ if [ -z "$problems" ] && [ -f "$STATE_DIR/last-error" ]; then
   if [ "$le_age" -ge 0 ] 2>/dev/null && [ "$le_age" -le 86400 ] 2>/dev/null; then
     # Only the component -- never the recorded message: its text can come from
     # an exception, file content or an environment path, and this line lands in
-    # Claude's context. The doctor reads the full record itself.
-    case "${le_comp:-}" in (*[!a-z]*|"") le_comp=unknown ;; esac
+    # Claude's context. The doctor prints the record (sanitized, as data) when
+    # the user runs it. The component is checked against the writers' fixed set,
+    # not a character class (bash 3.2's [a-z] is locale-dependent).
+    case "${le_comp:-}" in (engine|runtime|mcp|install|jq|prices) ;; (*) le_comp=unknown ;; esac
     add_problem "a recent headroom $le_comp failure was recorded — run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix), which clears this once healthy"
   fi
 fi
@@ -236,9 +238,10 @@ fi
 # fish, and /headroom-usage-indicator:doctor --fix wires the status line while repairing it anyway. This is
 # a setup reminder, never a breakage: it does not write last-error or flip the
 # badge to "broken".
-# HEADROOM_NO_SETUP_NUDGE=1 silences this reminder for users who keep their own
-# status line and do not want the badge.
-if [ -z "$problems" ] && [ "${HEADROOM_NO_SETUP_NUDGE:-}" != 1 ] && command -v jq >/dev/null 2>&1; then
+# HEADROOM_NO_SETUP_NUDGE=1 silences the not-set-up-yet reminder for users who
+# keep their own status line and do not want the badge -- never the
+# wired-but-missing-deps nudge below, which is a real (zero-reading) breakage.
+if [ -z "$problems" ] && command -v jq >/dev/null 2>&1; then
   SETTINGS="${HEADROOM_SETTINGS:-${HOME:-}/.claude/settings.json}"
   CLAUDE_DIR=$(dirname "$SETTINGS")
   sl_cmd=""
@@ -254,6 +257,7 @@ if [ -z "$problems" ] && [ "${HEADROOM_NO_SETUP_NUDGE:-}" != 1 ] && command -v j
       fi
       ;;
     *)
+      [ "${HEADROOM_NO_SETUP_NUDGE:-}" = 1 ] ||
       setup="status line badge isn't set up yet — the headroom doctor wires it: run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix)"
       ;;
   esac
@@ -270,14 +274,21 @@ if [ -z "$problems" ] && [ -z "$setup" ] && [ -f "$LEDGER" ] && command -v jq >/
   mark=$(cat "$STATE_DIR/last-invoice-mark" 2>/dev/null) || mark=""
   if [ -n "$key" ] && [ "$key" != "null|null" ] && [ "$key" != "$mark" ]; then
     invoice=$(printf '%s' "$last" | jq -r '
-      def k: if . >= 1000 then (((. / 100 | floor) / 10 | tostring) + "k") else tostring end;
+      # every ledger field reaches the model context: numbers only, and a path
+      # only when it is plain, short path characters
+      def n: if type == "number" then . else 0 end;
+      def k: n | if . >= 1000 then (((. / 100 | floor) / 10 | tostring) + "k") else tostring end;
+      def usd: if type == "number" then tostring
+               elif type == "string" and test("^[0-9]{1,9}([.][0-9]{1,8})?$") then .
+               else null end;
+      def plainpath: if type == "string" and test("^[A-Za-z0-9_./~+-]{1,120}$") then . else null end;
       "last session: saved ~" + (.save_tokens | k) + " tok"
-      + (if .save_usd then " (~$" + .save_usd + ")" else "" end)
-      + (if .miss_count > 0 then
-           " · " + (.miss_count | tostring) + " big output(s) went uncompressed (~"
+      + (if (.save_usd | usd) then " (~$" + (.save_usd | usd) + ")" else "" end)
+      + (if (.miss_count | n) > 0 then
+           " · " + (.miss_count | n | tostring) + " big output(s) went uncompressed (~"
            + (.miss_est_tokens | k) + " tok"
-           + (if .miss_usd then " ≈ $" + .miss_usd + " left on the table" else "" end)
-           + (if (.top_misses[0].path // null) then " — biggest: " + .top_misses[0].path else "" end)
+           + (if (.miss_usd | usd) then " ≈ $" + (.miss_usd | usd) + " left on the table" else "" end)
+           + ((try .top_misses[0].path catch null) as $p | if ($p | plainpath) then " — biggest: " + $p else "" end)
            + ")"
          else "" end)' 2>/dev/null) || invoice=""
     [ -n "$invoice" ] && { printf '%s' "$key" > "$STATE_DIR/last-invoice-mark"; } 2>/dev/null

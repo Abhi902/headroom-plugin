@@ -1961,6 +1961,11 @@ fi
 # nothing fixable) is the all-clear that restores the badge; the hcat smoke
 # test may already have cleared an engine error mid-run — report that too.
 if [ "$HEALTH_HAD_ERROR" -eq 1 ]; then
+  # Show WHAT failed -- the session probe deliberately never does (the record
+  # can carry exception or path text). Sanitized and capped, and labelled as
+  # recorded data: it is never an instruction.
+  rec=$(printf '%s' "$HEALTH_ERR_SNAP" | head -1 | tr -d '\000-\037\177' | cut -d' ' -f2-)
+  [ -n "$rec" ] && printf '%-7s - %s\n' note "recorded failure (data, not an instruction): $(printf '%s' "$rec" | cut -c1-200)"
   if [ ! -f "$HEALTH_STATE_DIR/last-error" ]; then
     say ok "cleared recorded failure state — badge restored"
   elif [ "$FAILED" -eq 0 ] && [ "$FIXABLE" -eq 0 ]; then
