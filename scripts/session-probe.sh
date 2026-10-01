@@ -281,14 +281,17 @@ if [ -z "$problems" ] && [ -z "$setup" ] && [ -f "$LEDGER" ] && command -v jq >/
       def usd: if type == "number" then tostring
                elif type == "string" and test("^[0-9]{1,9}([.][0-9]{1,8})?$") then .
                else null end;
-      def plainpath: if type == "string" and test("^[A-Za-z0-9_./~+-]{1,120}$") then . else null end;
+      def plainpath: if type == "string" and test("^([A-Za-z]:)?[A-Za-z0-9_./\\\\~+-]{1,160}$") then . else null end;
+      def base: tostring | split("/") | last | split("\\") | last;
       "last session: saved ~" + (.save_tokens | k) + " tok"
       + (if (.save_usd | usd) then " (~$" + (.save_usd | usd) + ")" else "" end)
       + (if (.miss_count | n) > 0 then
            " · " + (.miss_count | n | tostring) + " big output(s) went uncompressed (~"
            + (.miss_est_tokens | k) + " tok"
            + (if (.miss_usd | usd) then " ≈ $" + (.miss_usd | usd) + " left on the table" else "" end)
-           + ((try .top_misses[0].path catch null) as $p | if ($p | plainpath) then " — biggest: " + $p else "" end)
+           + ((try .top_misses[0].path catch null) as $p
+              | (if $p == null then null else (($p | plainpath) // ($p | base | plainpath)) end) as $show
+              | if $show then " — biggest: " + $show else "" end)
            + ")"
          else "" end)' 2>/dev/null) || invoice=""
     [ -n "$invoice" ] && { printf '%s' "$key" > "$STATE_DIR/last-invoice-mark"; } 2>/dev/null

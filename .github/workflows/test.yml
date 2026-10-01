@@ -16,13 +16,13 @@ jobs:
       # trips it on EACH runner -- the largest such group is 15 assertions -- so
       # it tracks each runner's count: one shared value while both POSIX runners
       # count the same (today), a per-OS matrix expression if they diverge.
-      # v2.8.1: f2b0509's run measured 1334 on macOS and on ubuntu; +20 (review
-      # round 6: invoice/env/component injection pins, doctor record line,
-      # opt-out scope) gives 1354, and the gate is `ran -lt floor`, so
-      # 1354 - 14 = 1340.
+      # v2.8.1: 2113fd5's run measured 1354 on macOS and on ubuntu; +14 (review
+      # round 7: doctor note pointer/ASCII/cap/order pins, legacy-record
+      # fixture, invoice Windows path + file-name fallback, opt-out wording)
+      # gives 1368, and the gate is `ran -lt floor`, so 1368 - 14 = 1354.
       # RAISE it whenever fixtures are added -- at 810 the floor had drifted ~65 below
       # the real count and would have let four such groups vanish green.
-      MIN_FIXTURES: 1340
+      MIN_FIXTURES: 1354
     steps:
       - uses: actions/checkout@v7
       - name: deps
@@ -119,10 +119,10 @@ jobs:
       VENV_DIR: ${{ github.workspace }}/.headroom-venv
       # It must stay well above ~726, the count while the engine probe was
       # POSIX-only, so a regression of that fix is caught. RAISE as coverage grows.
-      # 1314 executed on f2b0509's run (the python3-gated checks DO run
-      # there); +20 since gives 1334, so 1334 - 14 = 1320 (the gate is
+      # 1334 executed on 2113fd5's run (the python3-gated checks DO run
+      # there); +14 since gives 1348, so 1348 - 14 = 1334 (the gate is
       # `ran -lt floor`: a lost 15-assertion group lands below).
-      MIN_FIXTURES: "1320"
+      MIN_FIXTURES: "1334"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking
