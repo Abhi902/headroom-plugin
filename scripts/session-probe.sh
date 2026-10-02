@@ -282,7 +282,7 @@ if [ -z "$problems" ] && [ -z "$setup" ] && [ -f "$LEDGER" ] && command -v jq >/
                elif type == "string" and test("^[0-9]{1,9}([.][0-9]{1,8})?$") then .
                else null end;
       def plainpath: if type == "string" and test("^([A-Za-z]:)?[A-Za-z0-9_./\\\\~+-]{1,160}$") then . else null end;
-      def base: tostring | split("/") | last | split("\\") | last;
+      def base: if type == "string" then ((split("/") | last) // "") | ((split("\\") | last) // "") else "" end;
       "last session: saved ~" + (.save_tokens | k) + " tok"
       + (if (.save_usd | usd) then " (~$" + (.save_usd | usd) + ")" else "" end)
       + (if (.miss_count | n) > 0 then

@@ -16,13 +16,13 @@ jobs:
       # trips it on EACH runner -- the largest such group is 15 assertions -- so
       # it tracks each runner's count: one shared value while both POSIX runners
       # count the same (today), a per-OS matrix expression if they diverge.
-      # v2.8.1: 2113fd5's run measured 1354 on macOS and on ubuntu; +14 (review
-      # round 7: doctor note pointer/ASCII/cap/order pins, legacy-record
-      # fixture, invoice Windows path + file-name fallback, opt-out wording)
-      # gives 1368, and the gate is `ran -lt floor`, so 1368 - 14 = 1354.
+      # v2.8.1: ff5c858's run measured 1368 on macOS and on ubuntu; +20 (review
+      # round 8: --f--fixix / trailing-control / legacy-pointer note pins, the
+      # engine-gated NEW-failure note, degenerate invoice paths, skill pin)
+      # gives 1388, and the gate is `ran -lt floor`, so 1388 - 14 = 1374.
       # RAISE it whenever fixtures are added -- at 810 the floor had drifted ~65 below
       # the real count and would have let four such groups vanish green.
-      MIN_FIXTURES: 1354
+      MIN_FIXTURES: 1374
     steps:
       - uses: actions/checkout@v7
       - name: deps
@@ -119,10 +119,10 @@ jobs:
       VENV_DIR: ${{ github.workspace }}/.headroom-venv
       # It must stay well above ~726, the count while the engine probe was
       # POSIX-only, so a regression of that fix is caught. RAISE as coverage grows.
-      # 1334 executed on 2113fd5's run (the python3-gated checks DO run
-      # there); +14 since gives 1348, so 1348 - 14 = 1334 (the gate is
+      # 1348 executed on ff5c858's run (the python3-gated checks DO run
+      # there); +17 non-engine checks since gives 1365, so 1365 - 14 = 1351 (the gate is
       # `ran -lt floor`: a lost 15-assertion group lands below).
-      MIN_FIXTURES: "1334"
+      MIN_FIXTURES: "1351"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking

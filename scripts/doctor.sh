@@ -1961,6 +1961,7 @@ fi
 # nothing fixable) is the all-clear that restores the badge; the hcat smoke
 # test may already have cleared an engine error mid-run — report that too.
 if [ "$HEALTH_HAD_ERROR" -eq 1 ]; then
+  rec_src=$HEALTH_ERR_SNAP
   if [ ! -f "$HEALTH_STATE_DIR/last-error" ]; then
     say ok "cleared recorded failure state — badge restored"
   elif [ "$FAILED" -eq 0 ] && [ "$FIXABLE" -eq 0 ]; then
@@ -1969,19 +1970,24 @@ if [ "$HEALTH_HAD_ERROR" -eq 1 ]; then
       say ok "cleared recorded failure state — badge restored"
     else
       say skip "a NEW failure was recorded while this run was in progress — badge kept broken; run /headroom-usage-indicator:doctor again"
+      rec_src=$(cat "$HEALTH_STATE_DIR/last-error" 2>/dev/null) || rec_src=""   # show the NEW record
     fi
   else
     say skip "recorded failure state kept (badge shows broken until a clean doctor run)"
   fi
   # ...and WHAT failed, as a note under that verdict -- the session probe
   # deliberately never shows it (the record can carry exception or path text).
-  # The record's own "run <doctor> [--fix]" pointer is dropped (a pre-2.8.1
-  # record still ends in one), then only printable ASCII is kept -- byte-wise,
-  # so no control, bidi or C1 character and no invalid UTF-8 survive -- capped
-  # at 200, and labelled as data: it is never an instruction.
-  rec=$(printf '%s' "$HEALTH_ERR_SNAP" | head -1 | cut -d' ' -f2- \
-        | LC_ALL=C sed -E 's/[[:space:]]*(—|;|-)?[[:space:]]*(re-?run|run) \/(headroom-usage-indicator:)?doctor( --fix| again)?[[:space:]]*$//' \
-        | LC_ALL=C sed 's/—/-/g' | LC_ALL=C tr -cd ' -~' | LC_ALL=C sed 's/--fix//g' | LC_ALL=C cut -c1-200)
+  # Byte-wise, in this order: the em dash becomes "-" and only printable ASCII
+  # is kept (no control, bidi or C1 character, no invalid UTF-8 -- and none
+  # left to hide a trailing pointer from the $ anchor); the record's own
+  # "run <doctor> [--fix|again]" pointer is dropped (a pre-2.8.1 record still
+  # ends in one); runs of "-" are squeezed to one, so no "--fix" can survive or
+  # be reassembled ("--f--fixix"); capped at 200; labelled as data -- never an
+  # instruction.
+  rec=$(printf '%s' "$rec_src" | head -1 | cut -d' ' -f2- \
+        | LC_ALL=C sed 's/—/-/g' | LC_ALL=C tr -cd ' -~' \
+        | LC_ALL=C sed -E 's/[[:space:]]*(-|;)?[[:space:]]*(re-?run|run) \/(headroom-usage-indicator:)?doctor( --fix| again)?[[:space:]]*$//' \
+        | LC_ALL=C tr -s '-' | LC_ALL=C cut -c1-200)
   [ -n "$rec" ] && printf '%-7s - %s\n' note "recorded failure (data, not an instruction): $rec"
 fi
 
