@@ -4,15 +4,26 @@ A tiny **status-line indicator for Claude Code** that shows — at a glance, at 
 
 No more wondering *"did I remember to compress that huge file, or did I just burn context?"* — the indicator tells you, honestly, in real time.
 
-> ### ⚠️ Updating from v2.7.4 or earlier? Run the doctor once.
+> ### ⚠️ Updating from v2.8.0 or earlier? Run the doctor once.
 >
 > ```
 > /headroom-usage-indicator:doctor --fix
 > ```
 >
-> v2.8 spawns the bundled MCP by the **bare name** `headroom` — that change is what makes Windows work at all, and it removed the old launcher's `~/.headroom-venv` fallback. If an earlier doctor bootstrapped your engine into `~/.headroom-venv` (the default path for every release up to v2.7.4), it is **not** on your `PATH`, so the MCP stops connecting until `--fix` shims it into `~/.local/bin`.
+> **From v2.8.0:** v2.8.1 changed the status-line script, and the badge runs from a *copy* in `~/.claude`, so updating the plugin alone leaves your badge on the old script. The doctor reports it as `fixable - statusline copy differs`; `--fix` refreshes the copy and keeps any status line you chained in front of the badge.
+>
+> **From v2.7.4 or earlier:** v2.8 spawns the bundled MCP by the **bare name** `headroom` — that change is what makes Windows work at all, and it removed the old launcher's `~/.headroom-venv` fallback. If an earlier doctor bootstrapped your engine into `~/.headroom-venv` (the default path for every release up to v2.7.4), it is **not** on your `PATH`, so the MCP stops connecting until `--fix` shims it into `~/.local/bin`.
 >
 > **The failure is quiet.** A dead MCP renders as an *idle* badge, which looks identical to "nothing compressed yet". SessionStart nudges you, and one command fixes it — but if your badge never leaves idle after updating, this is why.
+
+### What's new in v2.8.1
+
+- **The doctor asks before it changes anything.** Every hint to run `--fix` now says "with the user's consent", and Claude asks you first. Typing `/headroom-usage-indicator:doctor --fix` yourself counts as that consent, so you are asked once, not twice.
+- **A plain-English pointer on the broken badge:** `▲ headroom broken (<component>) · ask: headroom doctor`. Everywhere else the pointer is the full `/headroom-usage-indicator:doctor` name, so nothing can send you to Claude Code's own built-in doctor command by mistake.
+- **Failure text never reaches Claude as an instruction.** The session-start line names only the part that failed (`engine`, `runtime`, `mcp`, `install`, `jq` or `prices`); `hcat` records only the exception type; the doctor shows the recorded failure as a cleaned-up note under its verdict, labelled "data, not an instruction"; and the next-session invoice shows only numbers and plain file paths.
+- **`HEADROOM_NO_SETUP_NUDGE=1`** silences the "status line isn't wired yet" reminder if you keep your own status line and don't want the badge.
+
+v2.8.0 added Windows support through Git Bash — see [Windows](#windows). Full notes for every version are on the [releases page](https://github.com/Abhi902/headroom-plugin/releases).
 
 ---
 
@@ -177,6 +188,8 @@ The hooks, `hcat`, and the MCP definition update with the plugin — nothing to 
 
 **Coming from v2.7.4 or earlier, run `/headroom-usage-indicator:doctor --fix` once more** — v2.8 spawns the bundled MCP by its bare name, so you need headroom on PATH. If the doctor bootstrapped your engine into `~/.headroom-venv`, `--fix` shims it into `~/.local/bin`; if that directory isn't on PATH, it also registers the engine as a user-scoped MCP by absolute path (`claude mcp add -s user headroom ...`), so the MCP works without a shell-rc edit. The bundled bare-name entry stays unconnected until `headroom` is on PATH; the doctor prints the one rc line for that too.
 
+**Coming from v2.8.0, run `/headroom-usage-indicator:doctor --fix` once** — v2.8.1 changed the status-line script (the broken badge now reads `· ask: headroom doctor`), so the copy at `~/.claude/headroom-statusline.sh` is out of date until the doctor refreshes it. The read-only doctor shows this as `fixable - statusline copy differs`; nothing else needs repairing.
+
 ## Windows
 
 Works under **Git for Windows (Git Bash)** — Claude Code runs its hooks and the status line through it, so it is a hard prerequisite (PowerShell-only setups are not supported). Then:
@@ -238,7 +251,7 @@ If the engine *is* working and `hcat` is clearly compressing (you see receipts i
 If the badge says **"N big blobs uncompressed"** for files the gate *did* compress — you saw the `cat` get rewritten and the receipt land, and it still reads zero — that's **fixed in v2.7.4**. The gate rewrites `cat` into an `hcat` run, but Claude Code records the *original* `cat` in the transcript, and the badge attributed receipts by reading that recorded command. So every auto-rewritten compression banked nothing and was then counted as a *miss* — the badge reported the exact opposite of what happened, and the session ledger and next-session invoice inherited it. Update and the numbers correct themselves; nothing to re-run. (Same release: a large **passthrough** receipt — incompressible content, where the raw bytes really did enter the window — now counts as a miss instead of being silently exempt.)
 
 **It says "▲ headroom broken" — what now?**
-That's different from idle: a hook or `hcat` recorded a real engine failure in the last 24h (not "never installed" — "resolved and then broken", e.g. a bad `HCAT_PYTHON` or a half-created venv). Run `/headroom-usage-indicator:doctor` — it explains the specific failure and, once the underlying issue is fixed, clears the recorded state and restores the badge.
+That's different from idle: a hook or `hcat` recorded a real engine failure in the last 24h (not "never installed" — "resolved and then broken", e.g. a bad `HCAT_PYTHON` or a half-created venv). Ask Claude to **run the headroom doctor** (or type `/headroom-usage-indicator:doctor`). On its own it only reads: it checks each link in the chain, explains what is broken, and prints the recorded failure as a `note` right under its verdict, so you can see what broke even once it is cleared. If something needs repairing it asks you before running `--fix`. Once the underlying issue is fixed, a clean run clears the recorded state and restores the badge.
 
 **Do I still have to remember to compress things?**
 Less than you used to. The hcat gate redirects big structured-file reads automatically, and Dangi nudges Claude about the rest. The badge is the honest scorekeeper on top.
