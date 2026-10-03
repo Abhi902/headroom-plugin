@@ -16,12 +16,13 @@ jobs:
       # trips it on EACH runner -- the largest such group is 15 assertions -- so
       # it tracks each runner's count: one shared value while both POSIX runners
       # count the same (today), a per-OS matrix expression if they diverge.
-      # Review round 42: 18afe71's run measured 1203 on macOS and on ubuntu; +12
-      # since gives 1215, and the gate is `ran -lt floor`, so the floor is
-      # 1215 - 14 = 1201 (a lost 15-assertion group lands below it).
+      # v2.8.1: cf637cd's run measured 1388 on macOS and on ubuntu; +4 (review
+      # round 9: kept-verdict note, '--' path, cleared/NEW note order; the
+      # legacy-pointer pairs became one exact check each) gives 1392, and the
+      # gate is `ran -lt floor`, so 1392 - 14 = 1378.
       # RAISE it whenever fixtures are added -- at 810 the floor had drifted ~65 below
       # the real count and would have let four such groups vanish green.
-      MIN_FIXTURES: 1201
+      MIN_FIXTURES: 1378
     steps:
       - uses: actions/checkout@v7
       - name: deps
@@ -118,9 +119,10 @@ jobs:
       VENV_DIR: ${{ github.workspace }}/.headroom-venv
       # It must stay well above ~726, the count while the engine probe was
       # POSIX-only, so a regression of that fix is caught. RAISE as coverage grows.
-      # 1183 executed on 18afe71's run; +12 since gives 1195, so 1195 - 14 =
-      # 1181 (the gate is `ran -lt floor`: a lost 15-assertion group lands below).
-      MIN_FIXTURES: "1181"
+      # 1368 executed on cf637cd's run (the python3- and engine-gated checks
+      # DO run there); +4 since gives 1372, so 1372 - 14 = 1358 (the gate is
+      # `ran -lt floor`: a lost 15-assertion group lands below).
+      MIN_FIXTURES: "1358"
       # NOTE: the old WIN_FAIL_BASELINE count gate is gone — the "full suite"
       # step below gates on .github/windows-known-failures.txt by NAME, so a
       # newly-broken fixture cannot hide behind a newly-fixed one. Shrinking
@@ -278,8 +280,8 @@ jobs:
           Write-Host "badge: $out"
           if (-not $out) { throw "status line printed nothing with Git\usr\bin pruned from PATH" }
           # Emptiness is not health. statusline.sh renders its FAILURE state as a
-          # non-empty line on stdout with exit 0 -- "▲ headroom broken (...) · run
-          # /doctor" -- so the exact state the plugin calls broken satisfied a
+          # non-empty line on stdout with exit 0 -- "▲ headroom broken (...) · ask:
+          # headroom doctor" -- so the exact state the plugin calls broken satisfied a
           # bare -not $out. Assert the shape: with an empty transcript_path the
           # expected render is the idle badge.
           if ("$out" -match 'headroom broken') { throw "status line rendered the BROKEN badge: $out" }

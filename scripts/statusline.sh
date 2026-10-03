@@ -207,7 +207,11 @@ if [ -f "$STATE_DIR/last-error" ]; then
 fi
 
 if [ -n "$broken" ]; then
-  printf '\033[33m▲ headroom broken (%s) · run /doctor\033[0m' "$broken"
+  # Never a bare "/doctor": that is Claude Code's BUILT-IN diagnostic. The badge   # bare-doctor-ok
+  # is width-budgeted, so it names the doctor in plain words ("headroom doctor"
+  # is what the doctor skill answers to); every full-sentence nudge (session
+  # probe, last-error, docs) names the command, /headroom-usage-indicator:doctor.
+  printf '\033[33m▲ headroom broken (%s) · ask: headroom doctor\033[0m' "$broken"
 elif [ "$n" -gt 0 ] 2>/dev/null; then
   tok=$(fmt_tok "$saved")
   if [ "$age" -le 60 ] 2>/dev/null; then

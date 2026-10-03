@@ -30,7 +30,7 @@ set -u
 _hb="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
 # shellcheck disable=SC1090,SC1091
 # "$_hb/lib/..." is in the list because a flat ~/.claude install puts hcat at
-# ~/.claude/hcat while /doctor --fix provisions the libs into ~/.claude/lib/ —
+# ~/.claude/hcat while /headroom-usage-indicator:doctor --fix provisions the libs into ~/.claude/lib/ —
 # the same lib/-first shape hcat-gate.sh and session-probe.sh already use.
 for _sl in "$_hb/../scripts/lib/headroom-state.sh" "$_hb/lib/headroom-state.sh" "$_hb/headroom-state.sh"; do
   [ -f "$_sl" ] && { . "$_sl"; break; }
@@ -88,7 +88,7 @@ fi
 
 # Same rule as the gate and the doctor: the first IMPORTABLE candidate, not the
 # first executable one. A decoy `python` beside the headroom console script would
-# otherwise be chosen here and fail at import time with exit 4, while /doctor on
+# otherwise be chosen here and fail at import time with exit 4, while /headroom-usage-indicator:doctor on
 # the same machine reported a healthy engine.
 PY=""; PY_BROKEN=""
 if [ "$TOON_CHECK" -eq 1 ]; then
@@ -201,7 +201,7 @@ def _note_error(component, message):
     try:
         os.makedirs(_STATE_DIR, exist_ok=True)
         msg = " ".join(str(message).split())[:200]
-        with open(_LAST_ERROR, "w") as f:
+        with open(_LAST_ERROR, "w", newline="\n") as f:  # LF on Windows too: the probe reads it with bash
             f.write(f"{int(time.time())} {component} {msg}\n")
     except Exception:
         pass
@@ -274,7 +274,10 @@ try:
     result = compress([{"role": "tool", "content": raw}])
 except Exception as e:
     print(f"hcat: compression failed: {e}", file=sys.stderr)
-    _note_error("runtime", f"hcat: compression failed: {e} — run /headroom-usage-indicator:doctor")
+    # only the exception TYPE is recorded: its text can carry file content, and
+    # the doctor prints this record to the user (the session probe names only
+    # the component)
+    _note_error("runtime", f"hcat: compression failed ({type(e).__name__}) — run /headroom-usage-indicator:doctor")
     sys.exit(4)
 _clear_error()
 

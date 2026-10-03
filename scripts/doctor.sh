@@ -182,7 +182,7 @@ else
   # Use the SHARED resolver. This walk was the model the gate and bin/hcat copied,
   # and keeping a private copy here meant three definitions of "which interpreter
   # is the engine" -- able to disagree about the same machine, and this one alone
-  # unbounded, so a wedged interpreter could hang a plain /doctor forever.
+  # unbounded, so a wedged interpreter could hang a plain /headroom-usage-indicator:doctor forever.
   # The doctor may wait longer than a hook: it is interactive, and a cold
   # headroom-ai[all] import is exactly what it is here to diagnose.
   # (The lib is mandatory -- see the guard where it is sourced -- so there is no
@@ -479,7 +479,7 @@ mcp_no_claude() {  # 2c: an entry must be added or replaced, but there is no `cl
   if [ -n "$mcp_abs" ]; then
     mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; once the CLI is available run: $rm_first$(mcp_add_hint "$mcp_abs")"
   else
-    mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; fix the engine first, then re-run /headroom-usage-indicator:doctor --fix"
+    mcp_msg="\`claude\` is not on PATH, so the MCP could not be registered by absolute path; fix the engine first, then re-run /headroom-usage-indicator:doctor --fix (with the user's consent)"
   fi
   if is_windows; then say note "$mcp_msg — the bare-name entry still applies and a headroom.* in a project directory would be spawned before it"
   else mcp_state=blocked; fi
@@ -682,7 +682,7 @@ shim_runs() {  # shim_runs <shim> — the shimmed CLI actually STARTS, not just 
   # then dies at spawn), and a name-squatted `headroom` on PyPI would greenlight
   # the line that stands in for "the MCP will connect". Cheap flag, engine env.
   #
-  # BOUNDED: a plain `/doctor` executes whatever `command -v headroom` resolves —
+  # BOUNDED: a plain `/headroom-usage-indicator:doctor` executes whatever `command -v headroom` resolves —
   # by this function's own reasoning that may be a squatter or a wedged binary —
   # so a hang here would hang the doctor (and the skill that runs it) forever.
   # `env` carries the engine vars because run_bounded is a function, not a command.
@@ -1073,7 +1073,7 @@ if cli_now=$(command -v headroom 2>/dev/null) && [ -n "$cli_now" ]; then
   else
     cli_own=""
     is_own_shim "$cli_now" \
-      && cli_own=" — this file is the doctor's own shim from an earlier run: delete it and re-run /headroom-usage-indicator:doctor --fix to rewrite it"
+      && cli_own=" — this file is the doctor's own shim from an earlier run: delete it and re-run /headroom-usage-indicator:doctor --fix to rewrite it (with the user's consent)"
     CLI_DEAD_PATH=$cli_now
     say FAIL "headroom on PATH at $cli_now does not run (\`$cli_now --help\` failed) — the bundled MCP spawns \`headroom\` by name and will fail to connect; reinstall the engine: $(reinstall_hint)$cli_own"
   fi
@@ -1084,7 +1084,7 @@ elif [ -n "$cli_res" ]; then
   if [ "$FIX" -eq 1 ]; then
     shim=$(shim_headroom "$cli_res"); shim_rc=$?
     if [ "$shim_rc" -eq 2 ]; then
-      say FAIL "a different headroom already exists at $(shim_target) — not on PATH; add $SHIM_DIR to PATH or remove that file, then re-run --fix"
+      say FAIL "a different headroom already exists at $(shim_target) — not on PATH; add $SHIM_DIR to PATH or remove that file, then re-run --fix (with the user's consent)"
     elif [ "$shim_rc" -eq 3 ]; then
       say FAIL "the resolved headroom CLI ($cli_res) is not a Windows executable — it is a \`#!\` console script (no MZ/PE header), and Windows cannot spawn one shell-less, so copying it to $(shim_target) would leave the bundled MCP unable to connect; reinstall the engine with a Windows layout so pip produces a real Scripts\\headroom.exe: py -3 -m venv $VENV_DIR && $VENV_DIR/Scripts/python.exe -m pip install \"headroom-ai[all]\" (or: uv tool install headroom-ai)"
     elif [ "$shim_rc" -ne 0 ]; then
@@ -1256,7 +1256,7 @@ if [ "$mcp_need" -eq 1 ]; then
     say skip "MCP registration by absolute path (the headroom CLI does not start — check 2b above already FAILed it)"
     mcp_state=skip
   elif [ "$mcp_dead" -eq 1 ]; then
-    say fixable "the resolved headroom CLI does not start, so the MCP was not registered by absolute path; fix the engine (see check 2b) and re-run /headroom-usage-indicator:doctor --fix"
+    say fixable "the resolved headroom CLI does not start, so the MCP was not registered by absolute path; fix the engine (see check 2b) and re-run /headroom-usage-indicator:doctor --fix (with the user's consent)"
     mcp_state=dead
   elif [ -z "$mcp_abs" ]; then
     # Say SOMETHING. check 2 reports the engine, but it can be `ok` while
@@ -1281,7 +1281,7 @@ if [ "$mcp_need" -eq 1 ]; then
     # Trust the config file, not the exit status: success means the entry is
     # there, naming the path we asked for.
     if [ "$mcp_stuck" -eq 1 ]; then
-      say fixable "could not remove the $mcp_what user-scoped headroom MCP ($mcp_old) — run: claude mcp remove headroom -s user, then re-run /headroom-usage-indicator:doctor --fix"
+      say fixable "could not remove the $mcp_what user-scoped headroom MCP ($mcp_old) — run: claude mcp remove headroom -s user, then re-run /headroom-usage-indicator:doctor --fix (with the user's consent)"
     elif mcp_add "$mcp_abs" && [ "$(mcp_user_cmd)" = "$mcp_abs" ]; then
       say fixed "registered the headroom MCP by absolute path ($mcp_abs) as a user-scoped server$mcp_repl — $mcp_why; restart Claude Code"
       mcp_state=ok
@@ -1697,7 +1697,7 @@ else
     # No Git for Windows bash outside the project: refuse to wire rather than
     # persist a project file or a bare `bash` (resolved cwd-first on Windows)
     # -- decided before ANY write: no backup, no seed, no lib, no chain script.
-    say FAIL "$(sl_no_bash_reason), then re-run --fix; settings.json left untouched"
+    say FAIL "$(sl_no_bash_reason), then re-run --fix (with the user's consent); settings.json left untouched"
   elif [ "$FIX" -eq 1 ]; then
     mkdir -p "$CLAUDE_DIR"
     [ -f "$SETTINGS" ] || printf '{}\n' > "$SETTINGS"
@@ -1776,7 +1776,7 @@ $sl_merge_tail"
         {
           cat <<'CHEOF'
 #!/usr/bin/env bash
-# headroom-statusline-chain.sh — written by `/doctor --fix` on Windows.
+# headroom-statusline-chain.sh — written by `/headroom-usage-indicator:doctor --fix` on Windows.
 # Claude Code executes statusLine.command without a POSIX shell, so the command
 # it stores must stay a `"<bash.exe>" "<C:\path>"` pair; the shell chain that
 # renders your own status line first and the headroom badge after it lives here.
@@ -1804,7 +1804,7 @@ CHEOF
           say fixed "statusLine wired to $sl_disp (script copied, backup: settings.json.bak.*)"
         fi
       elif [ "$sl_chain_ok" -eq 2 ]; then
-        say FAIL "your statusLine command ($sl_base_cmd) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — settings.json left untouched; to show both, rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then re-run --fix"
+        say FAIL "your statusLine command ($sl_base_cmd) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — settings.json left untouched; to show both, rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then re-run --fix (with the user's consent)"
       elif [ "$sl_chain_ok" -eq 0 ]; then
         say FAIL "could not write the status-line chain script to $CLAUDE_DIR/headroom-statusline-chain.sh — settings.json left untouched"
       else
@@ -1812,11 +1812,11 @@ CHEOF
       fi
     fi
   elif is_windows && [ -z "$(sl_bash_path)" ]; then
-    say FAIL "statusLine is not wired to the headroom badge, and $(sl_no_bash_reason), then run --fix"
+    say FAIL "statusLine is not wired to the headroom badge, and $(sl_no_bash_reason), then run --fix (with the user's consent)"
   elif is_windows && sl_base_now=$(sl_base_command) && [ -n "$sl_base_now" ] && sl_native_syntax "$sl_base_now"; then
     # the same refusal --fix makes (see the WINDOWS MERGE note): never offer a
     # `fixable` that --fix will only FAIL
-    say FAIL "the headroom badge is not wired, and your own status-line command ($sl_base_now) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then run --fix"
+    say FAIL "the headroom badge is not wired, and your own status-line command ($sl_base_now) uses Windows syntax (a \\ path or %VAR%) that the bash chain would mangle — rewrite it with forward slashes and no %VAR% (e.g. C:/Users/me/sl.js), or quote the argument if a backslash is a regex escape, then run --fix (with the user's consent)"
   elif [ -n "$sl" ]; then
     say fixable "statusLine present without the headroom badge — --fix appends it, preserving your command under _headroomStatusLineBackup"
   else
@@ -1910,7 +1910,7 @@ CHEOF
     # 7c-2. the shared engine resolver. engine-resolve.sh is not a badge dep —
     # statusline.sh never loads it — but a legacy FLAT install's hcat /
     # hcat-gate.sh / session-probe.sh source it ahead of their (narrower) inline
-    # fallback, so /doctor --fix is the one place that population gets it
+    # fallback, so /headroom-usage-indicator:doctor --fix is the one place that population gets it
     # (spec §1, v2.8). It is resolved and repaired against $CLAUDE_DIR ONLY,
     # never next to a custom-path statusline copy: the doctor refuses to write
     # into a custom path, so demanding the file there produced a FAIL that --fix
@@ -1961,6 +1961,7 @@ fi
 # nothing fixable) is the all-clear that restores the badge; the hcat smoke
 # test may already have cleared an engine error mid-run — report that too.
 if [ "$HEALTH_HAD_ERROR" -eq 1 ]; then
+  rec_src=$HEALTH_ERR_SNAP
   if [ ! -f "$HEALTH_STATE_DIR/last-error" ]; then
     say ok "cleared recorded failure state — badge restored"
   elif [ "$FAILED" -eq 0 ] && [ "$FIXABLE" -eq 0 ]; then
@@ -1973,6 +1974,28 @@ if [ "$HEALTH_HAD_ERROR" -eq 1 ]; then
   else
     say skip "recorded failure state kept (badge shows broken until a clean doctor run)"
   fi
+  # The record still standing is what the note shows under either skip verdict
+  # (this run's own hcat smoke can rewrite it); only a cleared run -- no file
+  # left -- shows the start-of-run snapshot, as history.
+  if [ -f "$HEALTH_STATE_DIR/last-error" ]; then
+    rec_cur=$(cat "$HEALTH_STATE_DIR/last-error" 2>/dev/null) || rec_cur=""
+    [ -n "$rec_cur" ] && rec_src=$rec_cur
+  fi
+  # ...and WHAT failed, as a note under that verdict -- the session probe
+  # deliberately never shows it (the record can carry exception or path text).
+  # Byte-wise, in this order: the em dash becomes "-" and only printable ASCII
+  # is kept (no control, bidi or C1 character, no invalid UTF-8 -- and none
+  # left to hide a trailing pointer from the $ anchor); the record's own
+  # "run <doctor> [--fix|again]" pointer is dropped (a pre-2.8.1 record still
+  # ends in one); every run of dashes before "fix" collapses to one, so no
+  # "--fix" can survive or be reassembled ("--f--fixix") while other "--" text
+  # (a venv path) is left alone; capped at 200; labelled as data -- never an
+  # instruction.
+  rec=$(printf '%s' "$rec_src" | head -1 | cut -d' ' -f2- \
+        | LC_ALL=C sed 's/—/-/g' | LC_ALL=C tr -cd ' -~' \
+        | LC_ALL=C sed -E 's/[[:space:]]*(-|;)?[[:space:]]*(re-?run|run) \/(headroom-usage-indicator:)?doctor( --fix| again)?[[:space:]]*$//' \
+        | LC_ALL=C sed -E 's/-+fix/-fix/g' | LC_ALL=C cut -c1-200)
+  [ -n "$rec" ] && printf '%-7s - %s\n' note "recorded failure (data, not an instruction): $rec"
 fi
 
 # --- summary
@@ -1983,6 +2006,6 @@ summary="$OK ok"
 [ "$SKIPPED" -gt 0 ] && summary="$summary · $SKIPPED skipped"
 echo "$summary"
 if [ "$FIXABLE" -gt 0 ] && [ "$FIX" -eq 0 ]; then
-  echo "→ re-run with --fix to repair."
+  echo "→ re-run with --fix to repair (with the user's consent)."
 fi
 [ "$FAILED" -eq 0 ]

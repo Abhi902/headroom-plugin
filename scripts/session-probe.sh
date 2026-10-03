@@ -59,10 +59,10 @@ fi
 # A network share is named as one and never stat-ed (doctor check 0 says the same).
 if is_windows && is_network_path "${CLAUDE_CODE_GIT_BASH_PATH:-}"; then
   note_error install "CLAUDE_CODE_GIT_BASH_PATH points at a network share"
-  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a network share ($CLAUDE_CODE_GIT_BASH_PATH) — Git for Windows is never installed on one; set it to the local Git\\bin\\bash.exe in settings.json env, or unset it"
+  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a network share (the headroom doctor shows the value) — Git for Windows is never installed on one; set it to the local Git\\bin\\bash.exe in settings.json env, or unset it"
 elif is_windows && [ -n "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ ! -f "$CLAUDE_CODE_GIT_BASH_PATH" ]; then
   note_error install "CLAUDE_CODE_GIT_BASH_PATH points at a missing file"
-  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a missing Git Bash ($CLAUDE_CODE_GIT_BASH_PATH) — fix it in settings.json env"
+  add_problem "CLAUDE_CODE_GIT_BASH_PATH points at a missing Git Bash (the headroom doctor shows the value) — fix it in settings.json env"
 fi
 
 # --- 2. hcat present + executable (plugin layout, legacy sibling fallback)
@@ -79,7 +79,7 @@ fi
 # the gate each fall back to a minimal HCAT_PYTHON-or-~/.headroom-venv lookup).
 # Without them those features silently degrade to no-ops. Plugin installs ship
 # them in lib/; a legacy flat install keeps them as siblings (copied by the
-# manual installer, and re-provisioned by /doctor --fix).
+# manual installer, and re-provisioned by /headroom-usage-indicator:doctor --fix).
 for _lib in attribution.jq headroom-state.sh engine-resolve.sh; do
   if [ ! -f "$here/lib/$_lib" ] && [ ! -f "$here/$_lib" ]; then
     # engine-resolve.sh is the one entry here that DEGRADES instead of breaking:
@@ -87,7 +87,7 @@ for _lib in attribution.jq headroom-state.sh engine-resolve.sh; do
     # resolve_engine_python for precisely the partial/legacy layout that lands
     # here, so an install missing only this lib still finds its engine and still
     # compresses. note_error is the STICKY yellow "headroom broken — run
-    # /doctor" badge, which this file reserves for real outages — doctor.sh
+    # /headroom-usage-indicator:doctor" badge, which this file reserves for real outages — doctor.sh
     # classifies the very same condition as merely `fixable`. So badge it only
     # when the inline fallback ALSO comes up empty, and otherwise just nudge,
     # exactly as the never-installed-engine case below does.
@@ -106,7 +106,7 @@ done
 # install whose engine resolves only through the doctor's venv — the doctor's own
 # happy path before v2.8 — silently loses its MCP the moment the plugin updates.
 # Nothing else announces it: the badge's "idle" is indistinguishable from "you
-# haven't compressed anything yet", and /doctor only runs when the user already
+# haven't compressed anything yet", and /headroom-usage-indicator:doctor only runs when the user already
 # suspects something. A hook's PATH is the closest proxy available for the MCP
 # spawn environment. On POSIX it is not merely a proxy: the hook's PATH IS the
 # PATH the MCP is spawned with, so a miss here is authoritative. On Windows it is
@@ -150,7 +150,7 @@ engine_off_path() {
   command -v headroom >/dev/null 2>&1 && return 0
   user_mcp_by_path; byp=$?
   [ "$byp" -eq 0 ] && return 0
-  add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; run /headroom-usage-indicator:doctor --fix to repair it"
+  add_problem "headroom engine found but \`headroom\` is not on PATH — since v2.8 the bundled MCP spawns it by name; the headroom doctor repairs it: run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix)"
   # The engine WORKS and the MCP still cannot start: that is a live feature
   # outage, not a setup gap, and the badge has to say so. Leaving it at a nudge
   # is what makes a v2.7.x -> v2.8 update go silent -- a dead MCP renders as an
@@ -165,11 +165,11 @@ engine_off_path() {
   # at session start, cleared by the first compression, yellow again next session,
   # forever, for a condition that never changed -- which is the fastest way to
   # teach someone to ignore the one always-visible health signal. Under `mcp` it
-  # persists until /doctor actually resolves it and clears the file.
+  # persists until /headroom-usage-indicator:doctor actually resolves it and clears the file.
   # byp=2: the registration lookup timed out -- unknown, so nudge but do not
   # light the sticky badge on a guess.
   [ "$byp" -eq 2 ] && return 0
-  is_windows || note_error mcp "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /headroom-usage-indicator:doctor --fix"
+  is_windows || note_error mcp "\`headroom\` is not on PATH — the bundled MCP cannot spawn it by name; run /headroom-usage-indicator:doctor"
 }
 # ...and the other half of "spawned by name": on Windows a bare command name is
 # resolved from the spawning process's current directory BEFORE PATH, so a
@@ -184,7 +184,7 @@ engine_name_hijack() {
   # carry a second copy that can drift
   type headroom_hijack_file >/dev/null 2>&1 || return 0
   f=$(headroom_hijack_file)
-  [ -n "$f" ] && add_problem "an executable $f sits in this project — on Windows a bare command name resolves from the project directory before PATH, so the bundled MCP would spawn it instead of the headroom engine; remove or rename it"
+  [ -n "$f" ] && add_problem "an executable ${f##*/} sits in this project — on Windows a bare command name resolves from the project directory before PATH, so the bundled MCP would spawn it instead of the headroom engine; remove or rename it"
   return 0
 }
 engine_name_hijack
@@ -192,7 +192,7 @@ if [ -n "${HCAT_PYTHON:-}" ]; then
   # An explicit override pointing nowhere is a breakage, not an absence.
   if [ ! -x "$HCAT_PYTHON" ]; then
     note_error engine "HCAT_PYTHON is set but not executable ($HCAT_PYTHON)"
-    add_problem "HCAT_PYTHON points at a non-executable python ($HCAT_PYTHON) — unset or fix it"
+    add_problem "HCAT_PYTHON is set but does not point at an executable python (the headroom doctor shows the value) — unset or fix it"
   else
     engine_off_path
   fi
@@ -202,7 +202,7 @@ elif ! command -v headroom >/dev/null 2>&1; then
   # Never-installed engine is the ordinary red-idle state, not a breakage:
   # say it once at session start, but do not flip the badge to broken. Same
   # reasoning for the off-PATH nudge above: add_problem, never note_error.
-  add_problem "headroom engine not installed — run /headroom-usage-indicator:doctor --fix to bootstrap it"
+  add_problem "headroom engine not installed — the headroom doctor bootstraps it: run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix)"
 fi
 
 # --- 4. bundled price table parses (when jq is available to check)
@@ -216,22 +216,31 @@ fi
 
 # --- 5. surface a fresh recorded error even when today's checks pass
 if [ -z "$problems" ] && [ -f "$STATE_DIR/last-error" ]; then
-  { read -r le_ts _le_comp le_msg < "$STATE_DIR/last-error"; } 2>/dev/null || true
+  { read -r le_ts le_comp _le_msg < "$STATE_DIR/last-error"; } 2>/dev/null || true
   case "${le_ts:-}" in (*[!0-9]*|"") le_ts=0 ;; esac
   le_age=$(( $(date +%s) - le_ts ))
   if [ "$le_age" -ge 0 ] 2>/dev/null && [ "$le_age" -le 86400 ] 2>/dev/null; then
-    add_problem "a recent failure was recorded: ${le_msg:-see last-error} — run /headroom-usage-indicator:doctor (doctor clears this once healthy)"
+    # Only the component -- never the recorded message: its text can come from
+    # an exception, file content or an environment path, and this line lands in
+    # Claude's context. The doctor prints the record (sanitized, as data) when
+    # the user runs it. The component is checked against the writers' fixed set,
+    # not a character class (bash 3.2's [a-z] is locale-dependent).
+    case "${le_comp:-}" in (engine|runtime|mcp|install|jq|prices) ;; (*) le_comp=unknown ;; esac
+    add_problem "a recent headroom $le_comp failure was recorded — run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix), which clears this once healthy"
   fi
 fi
 
 # --- 5b. status line not wired yet — the one setup step a plugin can't perform
 # for you: Claude Code has no plugin field for the status line, so wiring it means
-# writing the user's settings.json, which only /doctor does (with consent). A
+# writing the user's settings.json, which only /headroom-usage-indicator:doctor does (with consent). A
 # freshly installed plugin therefore shows no badge until that step. Nudge about
 # it — but only when everything else is healthy: a broken toolchain is the bigger
-# fish, and /doctor --fix wires the status line while repairing it anyway. This is
+# fish, and /headroom-usage-indicator:doctor --fix wires the status line while repairing it anyway. This is
 # a setup reminder, never a breakage: it does not write last-error or flip the
 # badge to "broken".
+# HEADROOM_NO_SETUP_NUDGE=1 silences the not-set-up-yet reminder for users who
+# keep their own status line and do not want the badge -- never the
+# wired-but-missing-deps nudge below, which is a real (zero-reading) breakage.
 if [ -z "$problems" ] && command -v jq >/dev/null 2>&1; then
   SETTINGS="${HEADROOM_SETTINGS:-${HOME:-}/.claude/settings.json}"
   CLAUDE_DIR=$(dirname "$SETTINGS")
@@ -244,11 +253,12 @@ if [ -z "$problems" ] && command -v jq >/dev/null 2>&1; then
       # (issue #2). Nudge if a wired copy is missing those deps.
       if [ -f "$CLAUDE_DIR/headroom-statusline.sh" ] \
          && [ ! -f "$CLAUDE_DIR/lib/attribution.jq" ] && [ ! -f "$CLAUDE_DIR/attribution.jq" ]; then
-        setup="status line badge is missing its deps and will read zero — run /headroom-usage-indicator:doctor --fix"
+        setup="status line badge is missing its deps and will read zero — the headroom doctor installs them: run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix)"
       fi
       ;;
     *)
-      setup="status line badge isn't set up yet — run /headroom-usage-indicator:doctor --fix to show it"
+      [ "${HEADROOM_NO_SETUP_NUDGE:-}" = 1 ] ||
+      setup="status line badge isn't set up yet — the headroom doctor wires it: run /headroom-usage-indicator:doctor (read-only; it asks the user before any --fix)"
       ;;
   esac
 fi
@@ -264,14 +274,24 @@ if [ -z "$problems" ] && [ -z "$setup" ] && [ -f "$LEDGER" ] && command -v jq >/
   mark=$(cat "$STATE_DIR/last-invoice-mark" 2>/dev/null) || mark=""
   if [ -n "$key" ] && [ "$key" != "null|null" ] && [ "$key" != "$mark" ]; then
     invoice=$(printf '%s' "$last" | jq -r '
-      def k: if . >= 1000 then (((. / 100 | floor) / 10 | tostring) + "k") else tostring end;
+      # every ledger field reaches the model context: numbers only, and a path
+      # only when it is plain, short path characters
+      def n: if type == "number" then . else 0 end;
+      def k: n | if . >= 1000 then (((. / 100 | floor) / 10 | tostring) + "k") else tostring end;
+      def usd: if type == "number" then tostring
+               elif type == "string" and test("^[0-9]{1,9}([.][0-9]{1,8})?$") then .
+               else null end;
+      def plainpath: if type == "string" and test("^([A-Za-z]:)?[A-Za-z0-9_./\\\\~+-]{1,160}$") then . else null end;
+      def base: if type == "string" then ((split("/") | last) // "") | ((split("\\") | last) // "") else "" end;
       "last session: saved ~" + (.save_tokens | k) + " tok"
-      + (if .save_usd then " (~$" + .save_usd + ")" else "" end)
-      + (if .miss_count > 0 then
-           " · " + (.miss_count | tostring) + " big output(s) went uncompressed (~"
+      + (if (.save_usd | usd) then " (~$" + (.save_usd | usd) + ")" else "" end)
+      + (if (.miss_count | n) > 0 then
+           " · " + (.miss_count | n | tostring) + " big output(s) went uncompressed (~"
            + (.miss_est_tokens | k) + " tok"
-           + (if .miss_usd then " ≈ $" + .miss_usd + " left on the table" else "" end)
-           + (if (.top_misses[0].path // null) then " — biggest: " + .top_misses[0].path else "" end)
+           + (if (.miss_usd | usd) then " ≈ $" + (.miss_usd | usd) + " left on the table" else "" end)
+           + ((try .top_misses[0].path catch null) as $p
+              | (if $p == null then null else (($p | plainpath) // ($p | base | plainpath)) end) as $show
+              | if $show then " — biggest: " + $show else "" end)
            + ")"
          else "" end)' 2>/dev/null) || invoice=""
     [ -n "$invoice" ] && { printf '%s' "$key" > "$STATE_DIR/last-invoice-mark"; } 2>/dev/null
