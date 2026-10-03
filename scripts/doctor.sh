@@ -1970,10 +1970,16 @@ if [ "$HEALTH_HAD_ERROR" -eq 1 ]; then
       say ok "cleared recorded failure state — badge restored"
     else
       say skip "a NEW failure was recorded while this run was in progress — badge kept broken; run /headroom-usage-indicator:doctor again"
-      rec_src=$(cat "$HEALTH_STATE_DIR/last-error" 2>/dev/null) || rec_src=""   # show the NEW record
     fi
   else
     say skip "recorded failure state kept (badge shows broken until a clean doctor run)"
+  fi
+  # The record still standing is what the note shows under either skip verdict
+  # (this run's own hcat smoke can rewrite it); only a cleared run -- no file
+  # left -- shows the start-of-run snapshot, as history.
+  if [ -f "$HEALTH_STATE_DIR/last-error" ]; then
+    rec_cur=$(cat "$HEALTH_STATE_DIR/last-error" 2>/dev/null) || rec_cur=""
+    [ -n "$rec_cur" ] && rec_src=$rec_cur
   fi
   # ...and WHAT failed, as a note under that verdict -- the session probe
   # deliberately never shows it (the record can carry exception or path text).
@@ -1981,13 +1987,14 @@ if [ "$HEALTH_HAD_ERROR" -eq 1 ]; then
   # is kept (no control, bidi or C1 character, no invalid UTF-8 -- and none
   # left to hide a trailing pointer from the $ anchor); the record's own
   # "run <doctor> [--fix|again]" pointer is dropped (a pre-2.8.1 record still
-  # ends in one); runs of "-" are squeezed to one, so no "--fix" can survive or
-  # be reassembled ("--f--fixix"); capped at 200; labelled as data -- never an
+  # ends in one); every run of dashes before "fix" collapses to one, so no
+  # "--fix" can survive or be reassembled ("--f--fixix") while other "--" text
+  # (a venv path) is left alone; capped at 200; labelled as data -- never an
   # instruction.
   rec=$(printf '%s' "$rec_src" | head -1 | cut -d' ' -f2- \
         | LC_ALL=C sed 's/—/-/g' | LC_ALL=C tr -cd ' -~' \
         | LC_ALL=C sed -E 's/[[:space:]]*(-|;)?[[:space:]]*(re-?run|run) \/(headroom-usage-indicator:)?doctor( --fix| again)?[[:space:]]*$//' \
-        | LC_ALL=C tr -s '-' | LC_ALL=C cut -c1-200)
+        | LC_ALL=C sed -E 's/-+fix/-fix/g' | LC_ALL=C cut -c1-200)
   [ -n "$rec" ] && printf '%-7s - %s\n' note "recorded failure (data, not an instruction): $rec"
 fi
 

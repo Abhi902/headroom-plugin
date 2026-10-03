@@ -2460,14 +2460,29 @@ check_absent "health: ...but no --fix is reassembled in the note" "--fix" "$doc_
 doc_note=$(doc_note_for "runtime boom — run /headroom-usage-indicator:doctor --fix$(printf '\001')")
 check "health: a pointer before a trailing control byte: body kept" "runtime boom" "$doc_note"
 check_absent "health: ...and the pointer is still dropped" "run /headroom-usage-indicator:doctor" "$doc_note"
-for rec in "runtime hcat: compression failed: boom — run /doctor" \
-           "engine x; re-run /headroom-usage-indicator:doctor again" \
-           "engine y — rerun /doctor --fix"; do
-  doc_note=$(doc_note_for "$rec")
-  rec_n=$(printf '%s' "$rec" | LC_ALL=C tr -c 'A-Za-z0-9 :._()/-' '?' | cut -c1-30)
-  check "health: legacy pointer '$rec_n...': body kept" "${rec%% *} " "$doc_note"
-  check_absent "health: legacy pointer '$rec_n...': pointer dropped" "run /" "$doc_note"
+for rec in "runtime hcat: compression failed: boom — run /doctor|runtime hcat: compression failed: boom" \
+           "engine x; re-run /headroom-usage-indicator:doctor again|engine x" \
+           "engine y — rerun /doctor --fix|engine y"; do
+  doc_note=$(doc_note_for "${rec%%|*}")
+  rec_n=$(printf '%s' "${rec%%|*}" | LC_ALL=C tr -c 'A-Za-z0-9 :._()/-' '?' | cut -c1-30)
+  check_eq "health: legacy pointer '$rec_n...': exactly the body is shown" "note    - recorded failure (data, not an instruction): ${rec##*|}" "$doc_note"
 done
+# a legitimate "--" in a recorded path is left alone (only "-...-fix" collapses)
+doc_note=$(doc_note_for "engine python not executable (/opt/py--env/bin/python)")
+check "health: a '--' in a recorded path survives" "/opt/py--env/bin/python" "$doc_note"
+# "kept" verdict: the note shows the record STILL STANDING -- the run's own
+# failing engine/hcat smoke rewrites it -- never the start-of-run snapshot
+kpy="$TMP/doc-kept-py"; mkdir -p "$kpy"
+printf '#!/bin/sh\nprintf "%%s mcp NEWREC-kept mid-run\\n" "$(date +%%s)" > "%s/last-error"\nexit 1\n' \
+  "$HEADROOM_STATE_DIR" > "$kpy/python"; chmod +x "$kpy/python"
+printf '%s engine STALE-SNAP-kept\n' "$(date +%s)" > "$HEADROOM_STATE_DIR/last-error"
+out=$(HCAT_PYTHON="$kpy/python" DOCTOR_SETTINGS="$S2" DOCTOR_CLAUDE_DIR="$CD2" \
+      DOCTOR_VENV_DIR="$DOCD/none" bash "$DOCTOR" 2>&1)
+doc_cur=$(cut -d' ' -f2- "$HEADROOM_STATE_DIR/last-error" 2>/dev/null | LC_ALL=C tr -cd ' -~' | cut -c1-20)
+doc_note=$(printf '%s\n' "$out" | grep '^note    - recorded failure')
+check "health: a rewritten record keeps the 'kept' verdict" "recorded failure state kept" "$out"
+check "health: ...and the kept note shows the record still standing" "note    - recorded failure (data, not an instruction): $doc_cur" "$doc_note"
+check_absent "health: ...not the start-of-run snapshot" "STALE-SNAP-kept" "$doc_note"
 rm -f "$HEADROOM_STATE_DIR/last-error"
 
 # probe: status line not wired yet → one-line setup nudge (the "I installed it,
@@ -2534,6 +2549,10 @@ if [ -n "$HEADROOM_PY" ]; then
   out=$(HCAT_PYTHON="$HEADROOM_PY" PATH="$FENG:$PATH" DOCTOR_SETTINGS="$SH" DOCTOR_CLAUDE_DIR="$CDH" \
         DOCTOR_VENV_DIR="$TMP/doc-none" bash "$DOCTOR" 2>&1)
   check "health: doctor reports clearing" "cleared recorded failure" "$out"
+  check "health: the cleared verdict still names what had broken" "note    - recorded failure (data, not an instruction): engine stale2" "$out"
+  doc_v=$(printf '%s\n' "$out" | grep -n 'cleared recorded failure' | tail -1 | cut -d: -f1)
+  doc_n=$(printf '%s\n' "$out" | grep -n '^note    - recorded failure' | cut -d: -f1)
+  check_eq "health: the history note sits right under the cleared verdict" "$((doc_v + 1))" "${doc_n:-0}"
   if [ -f "$HEADROOM_STATE_DIR/last-error" ]; then
     echo "FAIL - health: doctor clean run removes last-error"; FAIL=$((FAIL+1))
   else
@@ -2555,6 +2574,9 @@ if [ -n "$HEADROOM_PY" ]; then
   check "health: a mid-run record gives the NEW-failure verdict" "a NEW failure was recorded" "$out"
   check "health: ...and the note shows the NEW record" "recorded failure (data, not an instruction): mcp NEWREC" "$out"
   check_absent "health: ...not the stale snapshot" "stale4" "$(printf '%s\n' "$out" | grep '^note    - recorded failure')"
+  doc_v=$(printf '%s\n' "$out" | grep -n 'a NEW failure was recorded' | cut -d: -f1)
+  doc_n=$(printf '%s\n' "$out" | grep -n '^note    - recorded failure' | cut -d: -f1)
+  check_eq "health: the NEW-record note sits right under its verdict" "$((doc_v + 1))" "${doc_n:-0}"
   rm -f "$HEADROOM_STATE_DIR/last-error"
 else
   skip_note "health engine-clear tests (headroom venv not found)"
